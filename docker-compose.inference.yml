@@ -1,0 +1,67 @@
+# ══════════════════════════════════════════════════════════════
+# Server B – Inference
+# Ollama (LLM + Embeddings), Evaluation / Agent Service
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - inference
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Application Services ──────────────────────────────────
+
+  evaluation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/evaluation
+        SERVICE_PORT: "8005"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8005
+    ports:
+      - "8005:8005"
+    environment:
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      LLM_MODEL: "${LLM_MODEL:-qwen2.5:14b}"
+      EMBEDDING_SERVICE_URL: "${EMBEDDING_SERVICE_URL:?EMBEDDING_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8003)}"
+      VECTORDB_SERVICE_URL: "${VECTORDB_SERVICE_URL:?VECTORDB_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8004)}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL muss gesetzt sein (z.B. postgresql://rag:changeme@server-c:5432/ragplatform)}"
+      AGENT_MAX_STEPS: "${AGENT_MAX_STEPS:-5}"
+      MEMORY_MAX_CHARS: "${MEMORY_MAX_CHARS:-4000}"
+      RERANKER_MODEL: "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}"
+      RERANKER_ENABLED: "${RERANKER_ENABLED:-true}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    networks:
+      - inference
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  inference:
+    driver: bridge
+
+volumes:
+  ollama_data:

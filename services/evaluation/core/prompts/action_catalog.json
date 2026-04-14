@@ -1,0 +1,8 @@
+{
+  "SEARCH": "Semantische Suche in der Vektordatenbank. Embedding der Query, Suche in den zugewiesenen Collections, Reranking.",
+  "SEARCH_CNC": "Cross-Collection-Suche für CNC-Rüstdaten. Verknüpft CNC-Schritte mit Rüstungs- und Materialdaten.",
+  "CLARIFY": "Rückfrage an den Benutzer stellen, wenn die Anfrage unklar oder mehrdeutig ist.",
+  "RECALL_MEMORY": "Agent-Gedächtnis abrufen – gespeicherte Erkenntnisse aus früheren Anfragen.",
+  "LOOKUP_SOURCES": "Verfügbare Quellen/Collections für den aktuellen Use Case auflisten.",
+  "FINAL_ANSWER": "Endgültige Antwort formulieren, basierend auf den gesammelten Suchergebnissen."
+}

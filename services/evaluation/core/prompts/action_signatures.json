@@ -1,0 +1,8 @@
+{
+  "SEARCH": "SEARCH({\"query\": \"...\", \"collection\": \"...\", \"filters\": {}})",
+  "SEARCH_CNC": "SEARCH_CNC({\"ruest_id\": \"...\", \"missing_tool\": \"...\"})",
+  "CLARIFY": "CLARIFY({\"question\": \"...\"})",
+  "RECALL_MEMORY": "RECALL_MEMORY({})",
+  "LOOKUP_SOURCES": "LOOKUP_SOURCES({})",
+  "FINAL_ANSWER": "FINAL_ANSWER({\"answer\": \"...\", \"extras\": {}})"
+}

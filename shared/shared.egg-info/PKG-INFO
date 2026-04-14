@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: shared
+Version: 0.1.0
+Summary: Shared models, errors, and tracing for the RAG platform
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.0
+Requires-Dist: starlette>=0.27
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: httpx>=0.24; extra == "dev"
+Requires-Dist: anyio[trio]; extra == "dev"

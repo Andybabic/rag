@@ -1,0 +1,59 @@
+{
+  "gw_stpoelten": {
+    "roles": [
+      "default"
+    ],
+    "agent_action_names": [
+      "SEARCH",
+      "SEARCH_CNC",
+      "CLARIFY",
+      "RECALL_MEMORY",
+      "LOOKUP_SOURCES",
+      "FINAL_ANSWER"
+    ],
+    "default_collection": "gw_cnc_steps"
+  },
+  "neumann": {
+    "roles": [
+      "default"
+    ],
+    "agent_action_names": [
+      "SEARCH",
+      "CLARIFY",
+      "RECALL_MEMORY",
+      "LOOKUP_SOURCES",
+      "FINAL_ANSWER"
+    ],
+    "default_collection": "neumann_machines"
+  },
+  "ustp": {
+    "roles": [
+      "default"
+    ],
+    "agent_action_names": [
+      "SEARCH",
+      "CLARIFY",
+      "RECALL_MEMORY",
+      "LOOKUP_SOURCES",
+      "FINAL_ANSWER"
+    ],
+    "default_collection": "ustp_default",
+    "collection_prefixes": [
+      "ustp_"
+    ]
+  },
+  "wiener_linien": {
+    "roles": [
+      "default",
+      "trainee"
+    ],
+    "agent_action_names": [
+      "SEARCH",
+      "CLARIFY",
+      "RECALL_MEMORY",
+      "LOOKUP_SOURCES",
+      "FINAL_ANSWER"
+    ],
+    "default_collection": "wl_fahrzeug"
+  }
+}

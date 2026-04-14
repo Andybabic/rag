@@ -1,0 +1,7 @@
+fastapi>=0.100
+uvicorn[standard]>=0.23
+pydantic-settings>=2.0
+llama-index-core>=0.10
+httpx>=0.24
+pytest>=7.0
+anyio

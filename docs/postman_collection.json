@@ -1,0 +1,488 @@
+{
+	"info": {
+		"name": "RAG Platform API",
+		"description": "Complete API collection for the RAG Platform microservices.\n\nThree-server deployment:\n- Server A (Core): Cleaning, Data Structure, Embedding, VectorDB\n- Server B (Inference): Evaluation / Agent\n- Server C (Frontend): SvelteKit + PostgreSQL",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "base_url_server_a",
+			"value": "http://localhost",
+			"description": "Server A (Core) base URL"
+		},
+		{
+			"key": "base_url_server_b",
+			"value": "http://localhost",
+			"description": "Server B (Inference) base URL"
+		},
+		{
+			"key": "base_url_server_c",
+			"value": "http://localhost:3000",
+			"description": "Server C (Frontend) base URL"
+		}
+	],
+	"item": [
+		{
+			"name": "Cleaning Service (8001)",
+			"description": "Document cleaning and text extraction – Server A",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8001/health",
+						"description": "Returns service health status."
+					}
+				},
+				{
+					"name": "List Supported Formats",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8001/v1/formats",
+						"description": "Returns list of supported file extensions for document cleaning."
+					}
+				},
+				{
+					"name": "Clean Single Document",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8001/v1/clean",
+						"description": "Upload and clean a single document. Returns extracted markdown, images, and metadata.",
+						"header": [
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "file",
+									"type": "file",
+									"description": "Document file (PDF, DOCX, etc.)"
+								},
+								{
+									"key": "config",
+									"value": "{\"extract_images\": false, \"pii_removal\": false}",
+									"type": "text",
+									"description": "Optional JSON config"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Clean Batch Documents",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8001/v1/clean/batch",
+						"description": "Upload and clean multiple documents in parallel. Returns batch results with success/failure counts.",
+						"header": [
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "files",
+									"type": "file",
+									"description": "Multiple document files"
+								},
+								{
+									"key": "config",
+									"value": "{\"extract_images\": false, \"pii_removal\": false}",
+									"type": "text",
+									"description": "Optional JSON config"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Data Structure Service (8002)",
+			"description": "Markdown chunking and metadata enrichment – Server A",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8002/health",
+						"description": "Returns service health status."
+					}
+				},
+				{
+					"name": "Structure Document",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8002/v1/structure",
+						"description": "Chunk markdown text and enrich metadata using use-case plugin. Returns chunks with routing info.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"markdown\": \"# Wartungshandbuch\\n\\nDie Pumpe muss alle 6 Monate gewartet werden.\",\n  \"metadata\": {\n    \"file_name\": \"handbuch.pdf\",\n    \"page\": 1,\n    \"doc_type\": \"pdf\"\n  },\n  \"use_case\": \"neumann\",\n  \"config\": {\n    \"target_collection\": \"neumann_machines\",\n    \"chunk_size\": 512,\n    \"chunk_overlap\": 50\n  }\n}"
+						}
+					}
+				},
+				{
+					"name": "Structure CNC Data",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8002/v1/structure/cnc",
+						"description": "Explicit CNC structuring for GW St. Poelten use case. Returns CNC blocks, Ruest chunks, and material chunks.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"markdown\": \"O0001\\nG90 G54\\nT01 M06\\nS1200 M03\\nG00 X0 Y0\",\n  \"metadata\": {\n    \"file_name\": \"program.nc\",\n    \"doc_type\": \"cnc\"\n  }\n}"
+						}
+					}
+				},
+				{
+					"name": "List Use Cases",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8002/v1/use-cases",
+						"description": "Returns all registered use cases with their collections, descriptions, and agent actions."
+					}
+				}
+			]
+		},
+		{
+			"name": "Embedding Service (8003)",
+			"description": "Ollama embedding wrapper – Server A",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8003/health",
+						"description": "Returns service health status."
+					}
+				},
+				{
+					"name": "Embed Single Text",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8003/v1/embed",
+						"description": "Generate embedding vector for a single text chunk.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"content\": \"Die Pumpe muss regelmaessig gewartet werden.\",\n  \"metadata\": {\n    \"chunk_id\": \"chunk-001\",\n    \"file_name\": \"handbuch.pdf\"\n  }\n}"
+						}
+					}
+				},
+				{
+					"name": "Embed Batch",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8003/v1/embed/batch",
+						"description": "Generate embedding vectors for multiple text chunks. Supports configurable batch size.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"chunks\": [\n    {\n      \"content\": \"Wartungsintervall: 6 Monate\",\n      \"metadata\": {\"chunk_id\": \"c1\"}\n    },\n    {\n      \"content\": \"Schmiermittel nachfuellen bei Bedarf\",\n      \"metadata\": {\"chunk_id\": \"c2\"}\n    }\n  ],\n  \"batch_size\": 50\n}"
+						}
+					}
+				},
+				{
+					"name": "List Models",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8003/v1/models",
+						"description": "Lists available embedding models from Ollama."
+					}
+				}
+			]
+		},
+		{
+			"name": "VectorDB Service (8004)",
+			"description": "Qdrant wrapper for vector storage and search – Server A",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8004/health",
+						"description": "Returns service health status."
+					}
+				},
+				{
+					"name": "Upsert Vectors",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8004/v1/upsert",
+						"description": "Upsert embedding vectors into a Qdrant collection. Creates collection if it does not exist.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"collection\": \"neumann_machines\",\n  \"embeddings\": [\n    {\n      \"chunk_id\": \"chunk-001\",\n      \"vector\": [0.1, 0.2, 0.3],\n      \"metadata\": {\n        \"file_name\": \"handbuch.pdf\",\n        \"page\": 1\n      }\n    }\n  ]\n}"
+						}
+					}
+				},
+				{
+					"name": "Search Vectors",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8004/v1/search",
+						"description": "Similarity search within a single Qdrant collection.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"collection\": \"neumann_machines\",\n  \"vector\": [0.1, 0.2, 0.3],\n  \"top_k\": 5,\n  \"filters\": {}\n}"
+						}
+					}
+				},
+				{
+					"name": "Cross-Collection Search",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_a}}:8004/v1/search/cross",
+						"description": "Search across multiple linked collections (e.g. CNC steps + Ruest data).",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"primary_collection\": \"gw_cnc_steps\",\n  \"linked_collections\": [\"gw_ruest_data\", \"gw_material_info\"],\n  \"vector\": [0.1, 0.2, 0.3],\n  \"link_key\": \"program_id\",\n  \"top_k\": 5,\n  \"filters\": {}\n}"
+						}
+					}
+				},
+				{
+					"name": "List Collections",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_a}}:8004/v1/collections",
+						"description": "Returns all Qdrant collections with their point counts."
+					}
+				},
+				{
+					"name": "Delete Collection",
+					"request": {
+						"method": "DELETE",
+						"url": "{{base_url_server_a}}:8004/v1/collection/neumann_machines",
+						"description": "Delete a Qdrant collection by name. This is irreversible."
+					}
+				}
+			]
+		},
+		{
+			"name": "Evaluation Service (8005)",
+			"description": "Reranking, evaluation, agent, and citation mapping – Server B",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_b}}:8005/health",
+						"description": "Returns service health status."
+					}
+				},
+				{
+					"name": "Rerank Chunks",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_b}}:8005/v1/rerank",
+						"description": "Rerank retrieved chunks by relevance using LLM scoring. Splits results into above/below threshold.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"chunks\": [\n    {\n      \"chunk_id\": \"c1\",\n      \"content\": \"Wartungsintervall betraegt 6 Monate.\",\n      \"score\": 0.85,\n      \"metadata\": {\"file_name\": \"handbuch.pdf\"}\n    }\n  ],\n  \"config\": {\n    \"threshold\": 0.5\n  }\n}"
+						}
+					}
+				},
+				{
+					"name": "Evaluate Chunks",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_b}}:8005/v1/evaluate",
+						"description": "Evaluate retrieved chunks against a user query for relevance and quality.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"Wie oft muss die Pumpe gewartet werden?\",\n  \"chunks\": [\n    {\n      \"chunk_id\": \"c1\",\n      \"content\": \"Wartungsintervall betraegt 6 Monate.\",\n      \"score\": 0.85,\n      \"metadata\": {}\n    }\n  ],\n  \"min_chunks\": 1,\n  \"min_score\": 0.3\n}"
+						}
+					}
+				},
+				{
+					"name": "Map Citations",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_b}}:8005/v1/citations",
+						"description": "Map an LLM answer back to source chunks for citation badges.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"answer\": \"Die Pumpe muss alle 6 Monate gewartet werden (siehe Handbuch S.12).\",\n  \"chunks\": [\n    {\n      \"chunk_id\": \"c1\",\n      \"content\": \"Wartungsintervall betraegt 6 Monate.\",\n      \"score\": 0.85,\n      \"metadata\": {\"file_name\": \"handbuch.pdf\", \"page\": 12}\n    }\n  ]\n}"
+						}
+					}
+				},
+				{
+					"name": "Agent Query",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_b}}:8005/v1/agent/query",
+						"description": "Run a full agentic RAG query using the ReAct loop. The agent searches, retrieves, reranks, and answers.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"Wie oft muss die Pumpe gewartet werden?\",\n  \"use_case\": \"neumann\",\n  \"role\": \"default\",\n  \"session_id\": \"session-001\",\n  \"config\": {\n    \"collection\": \"neumann_machines\",\n    \"filters\": {},\n    \"max_steps\": 5\n  }\n}"
+						}
+					}
+				},
+				{
+					"name": "Log Feedback",
+					"request": {
+						"method": "POST",
+						"url": "{{base_url_server_b}}:8005/v1/log",
+						"description": "Log user feedback (positive/negative) for a query response.",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "X-Request-ID",
+								"value": "{{$guid}}",
+								"description": "Optional trace ID"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query_id\": \"q-abc-123\",\n  \"feedback\": \"positive\",\n  \"comment\": \"Very helpful answer\"\n}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Frontend (3000)",
+			"description": "SvelteKit frontend API proxies – Server C",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"url": "{{base_url_server_c}}/health",
+						"description": "Frontend health endpoint."
+					}
+				}
+			]
+		}
+	]
+}
