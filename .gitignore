@@ -2,3 +2,4 @@
 /services/cleaning/logs
 shared/.DS_Store
 .DS_Store
+.env
