@@ -1,4 +1,7 @@
 import { browser } from '$app/environment';
+import type { ParsedTable } from './file-parser';
+import type { PiiDetection } from './pii-scanner';
+import { PlaceholderMap } from './pii-anonymizer';
 
 export interface Citation {
 	ref: string;
@@ -50,7 +53,80 @@ export interface SubCollection {
 	dimension: number;
 }
 
-export type Tab = 'chat' | 'documents' | 'history' | 'settings';
+export type Tab = 'chat' | 'tabelle' | 'documents' | 'history' | 'settings';
+
+export type AnonymizeMode = 'off' | 'auto' | 'manual';
+
+export type PiiScanStatus = 'idle' | 'loading-model' | 'scanning' | 'done' | 'error';
+
+export type ReleaseStatus = 'idle' | 'released' | 'importing' | 'imported' | 'error';
+
+export type ChunkingStrategy = 'per-row' | 'whole-file';
+
+export interface ReleaseSnapshot {
+	fileName: string;
+	sourceType: 'csv' | 'xlsx' | 'xls';
+	headers: string[];
+	rows: string[][];
+	rowCount: number;
+	columnCount: number;
+	anonymized: boolean;
+	anonymizeMode: AnonymizeMode;
+	detectionTotal: number;
+	detectionApproved: number;
+	chunkingStrategy: ChunkingStrategy;
+	releasedAt: string;
+}
+
+export interface ReleaseState {
+	status: ReleaseStatus;
+	snapshot: ReleaseSnapshot | null;
+	importedAt: string | null;
+	importResult: { chunks?: number; storedPath?: string } | null;
+	error: string | null;
+}
+
+export interface AuditTrail {
+	fileLoadedAt: string | null;
+	scanStartedAt: string | null;
+	scanCompletedAt: string | null;
+}
+
+export function freshReleaseState(): ReleaseState {
+	return {
+		status: 'idle',
+		snapshot: null,
+		importedAt: null,
+		importResult: null,
+		error: null
+	};
+}
+
+export function freshAuditTrail(): AuditTrail {
+	return { fileLoadedAt: null, scanStartedAt: null, scanCompletedAt: null };
+}
+
+export interface PiiScanState {
+	status: PiiScanStatus;
+	progress: number;
+	total: number;
+	error: string | null;
+	detections: PiiDetection[];
+	approvals: Set<string>;
+	placeholders: PlaceholderMap;
+}
+
+export function freshPiiState(): PiiScanState {
+	return {
+		status: 'idle',
+		progress: 0,
+		total: 0,
+		error: null,
+		detections: [],
+		approvals: new Set<string>(),
+		placeholders: new PlaceholderMap()
+	};
+}
 
 function getOrCreateSessionId(): string {
 	if (!browser) return '';
@@ -72,7 +148,15 @@ export const app = $state({
 	uploadResults: [] as Array<{ name: string; ok: boolean; msg: string; pending?: boolean }>,
 	activeTab: 'chat' as Tab,
 	availableCollections: [] as SubCollection[],
-	collectionsLoading: false
+	collectionsLoading: false,
+	parsedTable: null as ParsedTable | null,
+	tableLoading: false,
+	tableError: null as string | null,
+	pii: freshPiiState() as PiiScanState,
+	anonymizeMode: 'off' as AnonymizeMode,
+	chunkingStrategy: 'per-row' as ChunkingStrategy,
+	release: freshReleaseState() as ReleaseState,
+	audit: freshAuditTrail() as AuditTrail
 });
 
 export function initSession() {
