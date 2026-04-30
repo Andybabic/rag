@@ -37,6 +37,7 @@
 
 	const tabs = [
 		{ id: 'chat' as const, label: 'Chat', icon: '&#128172;', href: '' },
+		{ id: 'tabelle' as const, label: 'Tabelle', icon: '&#128196;', href: '/tabelle' },
 		{ id: 'documents' as const, label: 'Dokumente', icon: '&#128196;', href: '/documents' },
 		{ id: 'history' as const, label: 'Verlauf', icon: '&#128337;', href: '/history' },
 		{ id: 'settings' as const, label: 'Einstellungen', icon: '&#9881;', href: '/settings' }

@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { app } from '$lib/state.svelte';
 	import { getDocuments } from '$lib/api';
+	import TablePreviewModal from './TablePreviewModal.svelte';
+
+	const TABLE_EXTS = new Set(['csv', 'xlsx', 'xls']);
 
 	let documents: Array<{
 		id: string;
@@ -20,6 +23,7 @@
 	}> = $state([]);
 
 	let loading = $state(false);
+	let preview = $state<{ url: string; fileName: string } | null>(null);
 
 	async function load() {
 		loading = true;
@@ -32,6 +36,20 @@
 			collections = [];
 		}
 		loading = false;
+	}
+
+	function getExtension(name: string): string {
+		const idx = name.lastIndexOf('.');
+		return idx >= 0 ? name.slice(idx + 1).toLowerCase() : '';
+	}
+
+	function isTable(fileName: string): boolean {
+		return TABLE_EXTS.has(getExtension(fileName));
+	}
+
+	function openPreview(fileName: string, storedPath: string | undefined) {
+		if (!storedPath) return;
+		preview = { url: `/api/documents/${storedPath}`, fileName };
 	}
 
 	$effect(() => {
@@ -89,7 +107,16 @@
 										{doc.file_name.split('.').pop()?.toUpperCase() ?? '?'}
 									</div>
 									<div class="min-w-0 flex-1">
-										{#if doc.stored_path}
+										{#if doc.stored_path && isTable(doc.file_name)}
+											<button
+												type="button"
+												onclick={() => openPreview(doc.file_name, doc.stored_path)}
+												class="block truncate text-left text-sm font-medium text-blue-600 hover:underline"
+												title="Tabellen-Vorschau öffnen"
+											>
+												{doc.file_name}
+											</button>
+										{:else if doc.stored_path}
 											<a
 												href="/api/documents/{doc.stored_path}"
 												target="_blank"
@@ -110,6 +137,16 @@
 											{new Date(doc.created_at).toLocaleString('de-AT')}
 										</p>
 									</div>
+									{#if doc.stored_path && isTable(doc.file_name)}
+										<button
+											type="button"
+											onclick={() => openPreview(doc.file_name, doc.stored_path)}
+											class="rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+											title="Tabellen-Vorschau öffnen"
+										>
+											Tabelle anzeigen
+										</button>
+									{/if}
 									<span class="rounded-full px-2 py-0.5 text-[10px] font-semibold
 										{doc.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
 										{doc.status}
@@ -123,3 +160,11 @@
 		{/if}
 	</div>
 </main>
+
+{#if preview}
+	<TablePreviewModal
+		url={preview.url}
+		fileName={preview.fileName}
+		onClose={() => (preview = null)}
+	/>
+{/if}
