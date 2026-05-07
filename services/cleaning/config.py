@@ -12,8 +12,12 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = 3
     RETRY_BACKOFF_BASE: int = 5
 
-    # Image alt-text generation via multimodal LLM
+    # ── LLM provider pipeline (alt-text generation) ─────────
+    VISION_PROVIDER: str = "ollama"  # ollama | openai
     OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_API_KEY: str | None = None
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_API_KEY: str | None = None
     VISION_MODEL: str = "qwen2.5:14b"
 
     # File storage for original documents
