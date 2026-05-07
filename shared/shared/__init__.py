@@ -1,4 +1,9 @@
 from shared.errors import handle_error
+from shared.llm import (
+    LLMConfig,
+    LLMUnavailableError,
+    OllamaUnavailableError,
+)
 from shared.logging import get_logger, setup_logging
 from shared.models import (
     APIError,
@@ -14,6 +19,9 @@ __all__ = [
     "Chunk",
     "ChunkMetadata",
     "EmbeddedChunk",
+    "LLMConfig",
+    "LLMUnavailableError",
+    "OllamaUnavailableError",
     "SearchResult",
     "get_logger",
     "handle_error",

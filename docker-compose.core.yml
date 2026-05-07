@@ -39,6 +39,12 @@ services:
     environment:
       USE_MINERU: "${USE_MINERU:-false}"
       MINERU_API_URL: "${MINERU_API_URL:-http://mineru:8000}"
+      VISION_PROVIDER: "${VISION_PROVIDER:-ollama}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      VISION_MODEL: "${VISION_MODEL:-qwen2.5:14b}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     networks:
       - core
@@ -85,7 +91,11 @@ services:
     ports:
       - "8003:8003"
     environment:
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-ollama}"
       OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:?OLLAMA_BASE_URL muss gesetzt sein (z.B. http://server-b:11434)}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       EMBEDDING_MODEL: "${EMBEDDING_MODEL:-bge-m3}"
       EMBED_BATCH_SIZE: "${EMBED_BATCH_SIZE:-50}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"

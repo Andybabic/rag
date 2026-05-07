@@ -1,4 +1,4 @@
-"""Tests for the Ollama client module."""
+"""Tests for the embedding shim wired through the shared LLM pipeline."""
 
 from __future__ import annotations
 
@@ -10,9 +10,14 @@ from core.ollama import OllamaUnavailableError, embed_batch, embed_text, list_mo
 
 FAKE_VECTOR = [0.1] * 1024
 
+# All HTTP calls now go through the shared Ollama provider, so we patch its
+# httpx client. Public symbols (embed_text, list_models, OllamaUnavailableError)
+# stay importable from core.ollama unchanged.
+HTTPX_PATCH = "shared.llm.providers.ollama.httpx.AsyncClient"
+
 
 @pytest.mark.anyio
-@patch("core.ollama.httpx.AsyncClient")
+@patch(HTTPX_PATCH)
 async def test_embed_text_returns_vector(mock_client_cls):
     mock_response = MagicMock()
     mock_response.json.return_value = {"embedding": FAKE_VECTOR}
@@ -30,7 +35,7 @@ async def test_embed_text_returns_vector(mock_client_cls):
 
 
 @pytest.mark.anyio
-@patch("core.ollama.httpx.AsyncClient")
+@patch(HTTPX_PATCH)
 async def test_embed_text_connect_error_raises(mock_client_cls):
     mock_client = AsyncMock()
     mock_client.post.side_effect = httpx.ConnectError("Connection refused")
@@ -43,7 +48,7 @@ async def test_embed_text_connect_error_raises(mock_client_cls):
 
 
 @pytest.mark.anyio
-@patch("core.ollama.httpx.AsyncClient")
+@patch(HTTPX_PATCH)
 async def test_embed_text_http_error_raises(mock_client_cls):
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 500
@@ -84,7 +89,7 @@ async def test_embed_batch_all_vectors_returned(mock_embed):
 
 
 @pytest.mark.anyio
-@patch("core.ollama.httpx.AsyncClient")
+@patch(HTTPX_PATCH)
 async def test_list_models_returns_models(mock_client_cls):
     mock_response = MagicMock()
     mock_response.json.return_value = {
@@ -104,7 +109,7 @@ async def test_list_models_returns_models(mock_client_cls):
 
 
 @pytest.mark.anyio
-@patch("core.ollama.httpx.AsyncClient")
+@patch(HTTPX_PATCH)
 async def test_list_models_connect_error_raises(mock_client_cls):
     mock_client = AsyncMock()
     mock_client.get.side_effect = httpx.ConnectError("Connection refused")
