@@ -37,7 +37,11 @@ services:
     ports:
       - "8005:8005"
     environment:
-      OLLAMA_BASE_URL: "http://ollama:11434"
+      LLM_PROVIDER: "${LLM_PROVIDER:-ollama}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       LLM_MODEL: "${LLM_MODEL:-qwen2.5:14b}"
       EMBEDDING_SERVICE_URL: "${EMBEDDING_SERVICE_URL:?EMBEDDING_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8003)}"
       VECTORDB_SERVICE_URL: "${VECTORDB_SERVICE_URL:?VECTORDB_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8004)}"

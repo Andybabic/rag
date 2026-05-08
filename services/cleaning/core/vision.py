@@ -1,11 +1,14 @@
-"""Generate alt-text descriptions for images via multimodal LLM (Ollama)."""
+"""Generate alt-text descriptions for images via the central LLM pipeline.
+
+Backend (Ollama / OpenAI) is selected via ``VISION_PROVIDER`` env var.
+"""
 
 from __future__ import annotations
 
 import logging
 
-import httpx
 from config import settings
+from shared.llm import LLMUnavailableError, vision_describe
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +35,12 @@ async def generate_alt_text(base64_image: str, context: str = "") -> str:
         prompt += f"\n\nKontext aus dem Dokument: {context[:300]}"
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": settings.VISION_MODEL,
-                    "prompt": prompt,
-                    "images": [base64_image],
-                    "stream": False,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json().get("response", "").strip()
-    except (httpx.HTTPError, KeyError) as exc:
+        return await vision_describe(
+            prompt,
+            base64_image,
+            model=settings.VISION_MODEL,
+        )
+    except LLMUnavailableError as exc:
         logger.warning("Alt-text generation failed: %s", exc)
         return ""
 
