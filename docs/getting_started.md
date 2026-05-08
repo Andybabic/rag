@@ -54,7 +54,7 @@ Maschine. In Produktion werden sie auf drei Server verteilt.
 git clone <repo-url> && cd rag-platform
 
 # 2. Env-Datei erstellen
-cp .env.example .env.dev
+cp .env.example .env
 
 # 3. Alles starten (inkl. lokales Ollama)
 make dev-up
@@ -70,14 +70,14 @@ werden:
 
 ```bash
 # 1. Env-Datei erstellen
-cp .env.example .env.dev
+cp .env.example .env
 
-# 2. Externe URLs in .env.dev setzen
-echo 'OLLAMA_BASE_URL=http://gpu-server.local:11434' >> .env.dev
+# 2. Externe URLs in .env setzen
+echo 'OLLAMA_BASE_URL=http://gpu-server.local:11434' >> .env
 
 # Optional: MinerU fuer PDF-Parsing
-echo 'USE_MINERU=true' >> .env.dev
-echo 'MINERU_API_URL=http://gpu-server.local:8000' >> .env.dev
+echo 'USE_MINERU=true' >> .env
+echo 'MINERU_API_URL=http://gpu-server.local:8000' >> .env
 
 # 3. Ohne lokales Ollama starten
 make dev-up-light
@@ -92,14 +92,14 @@ So braucht die lokale Maschine nur ~4 GB RAM statt 16 GB.
 ### 1. Env-Datei anlegen
 
 ```bash
-cp .env.example .env.dev
+cp .env.example .env
 ```
 
 Die Defaults in `.env.example` sind fuer den lokalen Betrieb vorkonfiguriert
 (Docker-Service-Namen als Hostnamen). Normalerweise muss nichts geaendert
 werden.
 
-**Optionale Anpassungen in `.env.dev`:**
+**Optionale Anpassungen in `.env`:**
 
 | Variable | Default | Wann aendern? |
 |----------|---------|---------------|
@@ -120,12 +120,12 @@ make dev-up
 **Variante B – Ohne lokales Ollama** (~4 GB RAM, Ollama laeuft extern):
 
 ```bash
-# Externe Ollama-URL in .env.dev setzen
-echo 'OLLAMA_BASE_URL=http://gpu-server.local:11434' >> .env.dev
+# Externe Ollama-URL in .env setzen
+echo 'OLLAMA_BASE_URL=http://gpu-server.local:11434' >> .env
 
 # Optional: Externen MinerU-Server nutzen
-echo 'USE_MINERU=true' >> .env.dev
-echo 'MINERU_API_URL=http://gpu-server.local:8000' >> .env.dev
+echo 'USE_MINERU=true' >> .env
+echo 'MINERU_API_URL=http://gpu-server.local:8000' >> .env
 
 make dev-up-light
 ```
@@ -158,7 +158,7 @@ Die Modelle muessen direkt auf dem externen Server geladen werden.
 
 ```bash
 docker exec ollama ollama pull qwen2.5:7b
-# In .env.dev: LLM_MODEL=qwen2.5:7b
+# In .env: LLM_MODEL=qwen2.5:7b
 ```
 
 ### 4. Pruefen, ob alles laeuft
@@ -665,7 +665,7 @@ curl http://localhost:6333/collections/neumann_machines
 | Target | Beschreibung |
 |--------|--------------|
 | `make dev-up` | Alle Services starten (inkl. lokales Ollama, ~16 GB RAM) |
-| `make dev-up-light` | Ohne Ollama starten (externe URL in `.env.dev`, ~4 GB RAM) |
+| `make dev-up-light` | Ohne Ollama starten (externe URL in `.env`, ~4 GB RAM) |
 | `make dev-down` | Alle Services stoppen |
 | `make dev-logs` | Live-Logs aller Services |
 | `make pull-models` | Ollama-Modelle herunterladen (LLM + Embedding) |
@@ -680,7 +680,7 @@ curl http://localhost:6333/collections/neumann_machines
 
 | Datei | Zweck | Env-Datei |
 |-------|-------|-----------|
-| `docker-compose.dev.yml` | Lokale Entwicklung (alle Services, Hot-Reload) | `.env.dev` |
+| `docker-compose.dev.yml` | Lokale Entwicklung (alle Services, Hot-Reload) | `.env` |
 | `docker-compose.core.yml` | Produktion Server A (Core Pipeline) | `.env` |
 | `docker-compose.inference.yml` | Produktion Server B (LLM + Agent) | `.env` |
 | `docker-compose.frontend.yml` | Produktion Server C (Frontend + DB) | `.env` |

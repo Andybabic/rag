@@ -1,4 +1,4 @@
-COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env.dev
+COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
 .PHONY: frontend-build up-dev-full dev dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
@@ -19,21 +19,21 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	@echo "Frontend-Build fertig."
 
 up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
-	@test -f .env.dev || cp .env.example .env.dev
+	@test -f .env || cp .env.example .env
 	$(COMPOSE) --profile local-ollama up --build -d
 	@echo ""
 	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
 	@echo "Ollama-Modelle laden:  make pull-models"
 	@echo "Logs anzeigen:         make dev-logs"
 
-dev: frontend-build ## Start ohne Ollama (externe URL in .env.dev setzen)
-	@test -f .env.dev || cp .env.example .env.dev
-	@if ! grep -q '^OLLAMA_BASE_URL=' .env.dev 2>/dev/null; then \
+dev: frontend-build ## Start ohne Ollama (externe URL in .env setzen)
+	@test -f .env || cp .env.example .env
+	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
 		echo ""; \
-		echo "FEHLER: OLLAMA_BASE_URL ist nicht in .env.dev gesetzt."; \
+		echo "FEHLER: OLLAMA_BASE_URL ist nicht in .env gesetzt."; \
 		echo ""; \
 		echo "Setzen Sie die URL des externen Ollama-Servers:"; \
-		echo "  echo 'OLLAMA_BASE_URL=http://<HOST>:11434' >> .env.dev"; \
+		echo "  echo 'OLLAMA_BASE_URL=http://<HOST>:11434' >> .env"; \
 		echo ""; \
 		echo "Oder starten Sie mit lokalem Ollama:"; \
 		echo "  make up-dev-full"; \
@@ -43,12 +43,12 @@ dev: frontend-build ## Start ohne Ollama (externe URL in .env.dev setzen)
 	$(COMPOSE) up --build -d
 	@echo ""
 	@echo "Services gestartet (ohne lokales Ollama)."
-	@echo "Ollama-URL: $$(grep '^OLLAMA_BASE_URL=' .env.dev)"
+	@echo "Ollama-URL: $$(grep '^OLLAMA_BASE_URL=' .env)"
 
 dev-fe: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
-	@test -f .env.dev || cp .env.example .env.dev
-	@if ! grep -q '^OLLAMA_BASE_URL=' .env.dev 2>/dev/null; then \
-		echo "FEHLER: OLLAMA_BASE_URL fehlt in .env.dev – siehe 'make dev'."; exit 1; \
+	@test -f .env || cp .env.example .env
+	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
+		echo "FEHLER: OLLAMA_BASE_URL fehlt in .env – siehe 'make dev'."; exit 1; \
 	fi
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
@@ -147,7 +147,7 @@ help: ## Show this help
 	@echo ""
 	@echo "Entwicklung:"
 	@echo "  make dev-full          Alle Services starten (inkl. lokales Ollama)"
-	@echo "  make dev    Ohne Ollama starten (externe URL in .env.dev)"
+	@echo "  make dev    Ohne Ollama starten (externe URL in .env)"
 	@echo "  make dev-fe    Backend in Docker, Frontend mit Hot-Reload (Vite)"
 	@echo "  make frontend-dev    Nur Frontend im Dev-Modus (Backend muss laufen)"
 	@echo "  make down        Alle Services stoppen"
@@ -166,7 +166,7 @@ help: ## Show this help
 	@echo "  make reset          Alle Daten loeschen (DB, Vektoren, Dokumente)"
 	@echo ""
 	@echo "Konfiguration fuer dev-up-light:"
-	@echo "  In .env.dev die externen URLs setzen:"
+	@echo "  In .env die externen URLs setzen:"
 	@echo "    OLLAMA_BASE_URL=http://<externer-server>:11434"
 	@echo "    USE_MINERU=true"
 	@echo "    MINERU_API_URL=http://<externer-server>:8000"
