@@ -258,7 +258,7 @@ npm run dev
 Der Dev-Server laeuft auf `http://localhost:5173` mit Hot-Reload.
 
 **Wichtig:** Die Backend-Services muessen erreichbar sein. Env-Variablen
-in `.env` oder `.env.dev` setzen:
+in `.env` setzen:
 
 ```
 EVALUATION_SERVICE_URL=http://localhost:8005

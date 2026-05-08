@@ -146,7 +146,7 @@ Erwartete Tabellen: `queries`, `feedback`, `ingestion_log`, `agent_memory`,
 Fuer lokale Entwicklung alle Services auf einer Maschine:
 
 ```bash
-cp .env.example .env.dev
+cp .env.example .env
 docker compose -f docker-compose.dev.yml up --build -d
 
 # Modelle laden
