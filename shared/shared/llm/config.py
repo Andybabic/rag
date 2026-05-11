@@ -2,6 +2,9 @@
 
 Reads provider selection and credentials from environment variables.
 Each role (chat, embedding, vision) can point at a different provider.
+
+Per-usecase overrides are applied on top of this snapshot by
+``shared.usecase_config.resolve_config``.
 """
 
 from __future__ import annotations
@@ -17,6 +20,26 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value
 
 
+def _env_int(name: str, default: int | None = None) -> int | None:
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float | None = None) -> float | None:
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     """Snapshot of the LLM-related env vars at call time.
@@ -24,6 +47,10 @@ class LLMConfig:
     Roles map to provider names registered via ``@register(...)``.
     Per-provider settings live in their own fields and are read by the
     provider implementations as they need them.
+
+    The model + tuning fields (``llm_model``, ``embedding_model`` etc.)
+    are advisory: callers may override them per request. They exist on
+    this snapshot so the resolver can deliver per-usecase defaults.
     """
 
     chat_provider: str = "ollama"
@@ -36,6 +63,17 @@ class LLMConfig:
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str | None = None
 
+    llm_model: str | None = None
+    embedding_model: str | None = None
+    vision_model: str | None = None
+    embedding_dimension: int | None = None
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    embed_batch_size: int | None = None
+    agent_max_steps: int | None = None
+    memory_max_chars: int | None = None
+
     @classmethod
     def from_env(cls) -> LLMConfig:
         return cls(
@@ -46,6 +84,15 @@ class LLMConfig:
             ollama_api_key=_env("OLLAMA_API_KEY"),
             openai_base_url=_env("OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1",
             openai_api_key=_env("OPENAI_API_KEY"),
+            llm_model=_env("LLM_MODEL"),
+            embedding_model=_env("EMBEDDING_MODEL"),
+            vision_model=_env("VISION_MODEL"),
+            embedding_dimension=_env_int("EMBEDDING_DIMENSION"),
+            temperature=_env_float("TEMPERATURE"),
+            max_tokens=_env_int("MAX_TOKENS"),
+            embed_batch_size=_env_int("EMBED_BATCH_SIZE"),
+            agent_max_steps=_env_int("AGENT_MAX_STEPS"),
+            memory_max_chars=_env_int("MEMORY_MAX_CHARS"),
         )
 
     def provider_for(self, role: str) -> str:

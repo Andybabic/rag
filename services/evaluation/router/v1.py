@@ -74,7 +74,7 @@ async def agent_query(body: AgentQueryRequest, request: Request):
     request_id = getattr(request.state, "request_id", "unknown")
 
     try:
-        system_prompt = get_system_prompt(body.use_case, body.role)
+        system_prompt = await get_system_prompt(body.use_case, body.role)
         available_actions = get_agent_actions(body.use_case)
         default_collection = get_default_collection(body.use_case)
     except ValueError as exc:
@@ -136,7 +136,7 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
     request_id = getattr(request.state, "request_id", "unknown")
 
     try:
-        system_prompt = get_system_prompt(body.use_case, body.role)
+        system_prompt = await get_system_prompt(body.use_case, body.role)
         available_actions = get_agent_actions(body.use_case)
         default_collection = get_default_collection(body.use_case)
     except ValueError as exc:

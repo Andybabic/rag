@@ -70,9 +70,13 @@ async def clean_file(
         markdown = remove_pii(markdown)
         pages = [{**p, "text": remove_pii(p["text"])} for p in pages]
 
+    # Use-case is consumed by both alt-text generation (for per-usecase
+    # vision provider/model/prompt) and original-file storage below.
+    use_case = cfg.get("use_case", "")
+
     # Generate alt-text for images via multimodal LLM
     if images:
-        images = await enrich_images_with_alt_text(images, pages)
+        images = await enrich_images_with_alt_text(images, pages, use_case=use_case)
         # Append image descriptions to the markdown so they flow into RAG
         alt_blocks = []
         for img in images:
@@ -84,7 +88,6 @@ async def clean_file(
             markdown = markdown + "\n\n" + "\n\n".join(alt_blocks)
 
     # Store original file for later retrieval
-    use_case = cfg.get("use_case", "")
     file_hash, stored_path = store_original(file_bytes, use_case or "_unsorted", filename)
 
     return {

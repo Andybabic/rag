@@ -27,6 +27,9 @@ class OllamaProvider(LLMProvider):
     async def chat(self, messages: list[dict], *, model: str, **opts) -> str:
         options = {"temperature": 0.2}
         options.update(opts.get("options") or {})
+        # Unified knob: callers pass `max_tokens`; Ollama uses `num_predict`.
+        if "max_tokens" in options and "num_predict" not in options:
+            options["num_predict"] = options.pop("max_tokens")
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(

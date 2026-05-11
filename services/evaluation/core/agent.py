@@ -19,7 +19,9 @@ from core.actions import (
 from core.citations import map_citations
 from core.llm import call_llm
 from core.memory import read_memory, write_memory
-from core.prompts import ACTION_SIGNATURES, AGENT_REACT_SUFFIX
+from core.prompts import ACTION_SIGNATURES
+from core.use_cases import get_react_suffix
+from shared.usecase_config import list_skills
 
 _ACTION_NAME_RE = re.compile(r"ACTION:\s*(\w+)\(", re.DOTALL)
 
@@ -63,18 +65,51 @@ def _extract_json_arg(text: str, start: int) -> str | None:
     return None
 
 
-def _build_system_prompt(use_case_prompt: str, available_actions: list[str]) -> str:
-    """Build the full system prompt with action descriptions."""
+def _format_skills_block(skills: list) -> str:
+    """Format enabled skills as a "Zusätzliche Regeln" section.
+
+    Empty string when no skills are enabled — keeps the prompt clean.
+    """
+    if not skills:
+        return ""
+    lines = ["# Zusätzliche Regeln", ""]
+    lines.append(
+        "Beachte die folgenden Regeln bei jeder Anfrage. Wenn eine Regel "
+        "greift, passe deinen Workflow entsprechend an (erweitere Schritte, "
+        "brich ab, oder ändere die Antwort)."
+    )
+    lines.append("")
+    for skill in skills:
+        lines.append(f"## {skill.name} — {skill.overview}")
+        lines.append(skill.detailed_task.strip())
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n\n"
+
+
+async def _build_system_prompt(
+    use_case: str,
+    use_case_prompt: str,
+    available_actions: list[str],
+) -> str:
+    """Build the full system prompt with action descriptions and active skills.
+
+    Pulls the global ReAct suffix and the enabled per-usecase skills from the
+    resolver so admins can edit both via the UI; falls back gracefully.
+    """
     action_lines = []
     for action in available_actions:
         if action in ACTION_SIGNATURES:
             action_lines.append(f"- {ACTION_SIGNATURES[action]}")
 
+    suffix = await get_react_suffix()
+    skills = await list_skills(use_case, only_enabled=True)
+    skills_block = _format_skills_block(skills)
     return (
         f"{use_case_prompt}\n\n"
         f"Verfügbare Actions (immer als JSON-Argument):\n"
         f"{chr(10).join(action_lines)}\n\n"
-        f"{AGENT_REACT_SUFFIX}"
+        f"{skills_block}"
+        f"{suffix}"
     )
 
 
@@ -203,7 +238,7 @@ async def run_agent(
       - {"type": "step", "step": N, ...full step dict...}
       - {"type": "final", "answer": ...}
     """
-    full_system = _build_system_prompt(system_prompt, available_actions)
+    full_system = await _build_system_prompt(use_case, system_prompt, available_actions)
     if on_event:
         await on_event({"type": "started", "max_steps": max_steps})
 
@@ -234,8 +269,8 @@ async def run_agent(
         if on_event:
             await on_event({"type": "thinking", "step": step_num})
 
-        # 1. Call LLM
-        llm_response = await call_llm(messages)
+        # 1. Call LLM (use_case threads provider/model overrides through resolver)
+        llm_response = await call_llm(messages, use_case=use_case)
         thought, action_name, action_args = _parse_action(llm_response)
 
         if on_event:

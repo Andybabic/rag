@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     VISION_MODEL: str = "qwen2.5:14b"
 
+    # ── Per-usecase config DB (optional; falls back to env if unset) ──
+    DATABASE_URL: str | None = None
+
     # File storage for original documents
     FILE_STORAGE_DIR: str = "/data/documents"
 

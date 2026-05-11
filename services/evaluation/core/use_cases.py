@@ -1,14 +1,33 @@
 """Use-case metadata lookup.
 
-Provides system prompts and agent actions per use case.
-In production, this could call the data_structure service.
-For now, provides built-in defaults for the three known use cases.
+System prompts and the global ReAct suffix are now resolved through the
+DB-backed ``shared.usecase_config`` resolver — values stored there override
+the file-loaded defaults. Editing happens via the admin API, which writes
+back through this module.
+
+Agent action toggles (enabled flag + description) remain in-memory for now
+(they reset to defaults on process restart).
 """
 
 from __future__ import annotations
 
+from core.prompts import AGENT_REACT_SUFFIX as _DEFAULT_REACT_SUFFIX
 from core.prompts import USE_CASE_META as _USE_CASE_META
 from core.prompts import ActionDef
+from shared.usecase_config import (
+    GLOBAL_USE_CASE,
+    resolve_prompt,
+    upsert_prompt,
+)
+
+# Prompt-key conventions used in the usecase_prompts table:
+#   agent.system.{role}            (per-usecase agent system prompt)
+#   agent.react_suffix             (use_case = '*'  — global ReAct suffix)
+PROMPT_KEY_REACT_SUFFIX = "agent.react_suffix"
+
+
+def _system_prompt_key(role: str) -> str:
+    return f"agent.system.{role}"
 
 
 def get_use_case_meta(use_case: str) -> dict:
@@ -19,17 +38,38 @@ def get_use_case_meta(use_case: str) -> dict:
     return _USE_CASE_META[use_case]
 
 
-def get_system_prompt(use_case: str, role: str = "default") -> str:
-    """Get the system prompt for a use case and role."""
+def _file_default_prompt(use_case: str, role: str) -> str:
     meta = get_use_case_meta(use_case)
     prompts = meta["system_prompt"]
     return prompts.get(role, prompts["default"])
 
 
-def set_system_prompt(use_case: str, role: str, prompt: str) -> None:
-    """Update the system prompt for a use case and role (runtime only)."""
-    meta = get_use_case_meta(use_case)
-    meta["system_prompt"][role] = prompt
+async def get_system_prompt(use_case: str, role: str = "default") -> str:
+    """Get the effective system prompt: DB override → file default."""
+    default = _file_default_prompt(use_case, role)
+    value = await resolve_prompt(
+        use_case, _system_prompt_key(role), default=default
+    )
+    return value or default
+
+
+async def set_system_prompt(use_case: str, role: str, prompt: str) -> None:
+    """Persist a system-prompt override (empty string clears it)."""
+    get_use_case_meta(use_case)  # raise on unknown use case
+    await upsert_prompt(use_case, _system_prompt_key(role), prompt)
+
+
+async def get_react_suffix() -> str:
+    """Get the ReAct suffix: DB global override → file default."""
+    value = await resolve_prompt(
+        GLOBAL_USE_CASE, PROMPT_KEY_REACT_SUFFIX, default=_DEFAULT_REACT_SUFFIX
+    )
+    return value or _DEFAULT_REACT_SUFFIX
+
+
+async def set_react_suffix(content: str) -> None:
+    """Persist a ReAct suffix override (empty string clears it)."""
+    await upsert_prompt(GLOBAL_USE_CASE, PROMPT_KEY_REACT_SUFFIX, content)
 
 
 def get_agent_actions(use_case: str) -> list[str]:

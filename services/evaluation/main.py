@@ -11,6 +11,7 @@ from router.v1 import router as v1_router
 from shared.errors import handle_error
 from shared.logging import setup_logging
 from shared.tracing import RequestIDMiddleware
+from shared.usecase_config import set_pool as set_resolver_pool
 
 SERVICE_NAME = "evaluation-service"
 VERSION = "1.0.0"
@@ -20,7 +21,8 @@ setup_logging(SERVICE_NAME, os.getenv("LOG_LEVEL", "INFO"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await get_pool()
+    pool = await get_pool()
+    set_resolver_pool(pool)
     # Start the cross-encoder download in the background so the first query
     # doesn't block for minutes on a cold HF cache. Until it's ready, the
     # reranker falls back to hybrid-fusion ordering (still good quality).
