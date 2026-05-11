@@ -1,3 +1,11 @@
+# Pull torch from the PyTorch CPU-wheel index — sentence-transformers
+# transitively needs torch, but the default PyPI wheel ships with CUDA libs
+# (~4 GB of nvidia-* + triton). The +cpu local-version pin disambiguates so
+# pip picks the CPU wheel even though the same x.y.z exists on PyPI.
+# Bump this pin when you upgrade torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.11.0+cpu
+
 fastapi>=0.100
 uvicorn[standard]>=0.23
 pydantic-settings>=2.0

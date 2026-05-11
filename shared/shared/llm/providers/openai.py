@@ -43,6 +43,8 @@ class OpenAIProvider(LLMProvider):
             body["temperature"] = options["temperature"]
         else:
             body["temperature"] = 0.2
+        if "max_tokens" in options:
+            body["max_tokens"] = options["max_tokens"]
 
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:

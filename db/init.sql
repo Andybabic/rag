@@ -59,6 +59,53 @@ CREATE TABLE evaluation_runs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Per-Use-Case Konfiguration (Provider, Modelle, API-Keys verschluesselt).
+-- NULL bedeutet "Fallback auf .env".
+CREATE TABLE usecase_config (
+    use_case VARCHAR(50) PRIMARY KEY,
+    chat_provider VARCHAR(20),
+    embedding_provider VARCHAR(20),
+    vision_provider VARCHAR(20),
+    ollama_base_url TEXT,
+    ollama_api_key_encrypted TEXT,
+    openai_base_url TEXT,
+    openai_api_key_encrypted TEXT,
+    llm_model VARCHAR(100),
+    embedding_model VARCHAR(100),
+    vision_model VARCHAR(100),
+    embedding_dimension INTEGER,
+    temperature REAL,
+    max_tokens INTEGER,
+    embed_batch_size INTEGER,
+    agent_max_steps INTEGER,
+    memory_max_chars INTEGER,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Editierbare Prompts pro Use Case. use_case='*' fuer globale Prompts.
+CREATE TABLE usecase_prompts (
+    use_case VARCHAR(50) NOT NULL,
+    prompt_key VARCHAR(100) NOT NULL,
+    content TEXT NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (use_case, prompt_key)
+);
+
+-- Skills / Regeln, die an den Agent-System-Prompt angehaengt werden.
+CREATE TABLE usecase_skills (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    use_case VARCHAR(50) NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    overview TEXT NOT NULL,
+    detailed_task TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (use_case, name)
+);
+CREATE INDEX idx_usecase_skills_use_case ON usecase_skills(use_case);
+
 -- Indizes
 CREATE INDEX idx_queries_use_case ON queries(use_case);
 CREATE INDEX idx_queries_created_at ON queries(created_at);

@@ -6,28 +6,33 @@ import pytest
 from core.use_cases import get_agent_actions, get_default_collection, get_system_prompt
 
 
-def test_neumann_system_prompt():
-    prompt = get_system_prompt("neumann")
+@pytest.mark.asyncio
+async def test_neumann_system_prompt():
+    prompt = await get_system_prompt("neumann")
     assert "Wartungsassistent" in prompt
 
 
-def test_gw_system_prompt():
-    prompt = get_system_prompt("gw_stpoelten")
+@pytest.mark.asyncio
+async def test_gw_system_prompt():
+    prompt = await get_system_prompt("gw_stpoelten")
     assert "CNC-Rüstexperte" in prompt
 
 
-def test_wl_system_prompt_default():
-    prompt = get_system_prompt("wiener_linien")
+@pytest.mark.asyncio
+async def test_wl_system_prompt_default():
+    prompt = await get_system_prompt("wiener_linien")
     assert "Fachpersonal" in prompt
 
 
-def test_wl_system_prompt_trainee():
-    prompt = get_system_prompt("wiener_linien", role="trainee")
+@pytest.mark.asyncio
+async def test_wl_system_prompt_trainee():
+    prompt = await get_system_prompt("wiener_linien", role="trainee")
     assert "Auszubildende" in prompt
 
 
-def test_wl_system_prompt_unknown_role_fallback():
-    prompt = get_system_prompt("wiener_linien", role="unknown")
+@pytest.mark.asyncio
+async def test_wl_system_prompt_unknown_role_fallback():
+    prompt = await get_system_prompt("wiener_linien", role="unknown")
     assert "Fachpersonal" in prompt  # falls back to default
 
 
@@ -53,6 +58,7 @@ def test_default_collections():
     assert get_default_collection("wiener_linien") == "wl_fahrzeug"
 
 
-def test_unknown_use_case():
+@pytest.mark.asyncio
+async def test_unknown_use_case():
     with pytest.raises(ValueError, match="Unbekannter Use Case"):
-        get_system_prompt("nonexistent")
+        await get_system_prompt("nonexistent")

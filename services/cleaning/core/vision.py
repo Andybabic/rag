@@ -1,6 +1,7 @@
 """Generate alt-text descriptions for images via the central LLM pipeline.
 
-Backend (Ollama / OpenAI) is selected via ``VISION_PROVIDER`` env var.
+Provider, model and the prompt itself are resolved per use-case (DB) and
+fall back to env / hardcoded defaults when nothing is configured.
 """
 
 from __future__ import annotations
@@ -9,10 +10,13 @@ import logging
 
 from config import settings
 from shared.llm import LLMUnavailableError, vision_describe
+from shared.usecase_config import resolve_config, resolve_prompt
 
 logger = logging.getLogger(__name__)
 
-_PROMPT = (
+PROMPT_KEY_VISION = "vision.alt_text"
+
+_DEFAULT_PROMPT = (
     "Beschreibe dieses Bild präzise und sachlich in 1-3 Sätzen auf Deutsch. "
     "Konzentriere dich auf technisch relevante Inhalte: Diagramme, Schaltpläne, "
     "Maschinenteile, Tabellen, Beschriftungen. "
@@ -20,25 +24,38 @@ _PROMPT = (
 )
 
 
-async def generate_alt_text(base64_image: str, context: str = "") -> str:
+async def generate_alt_text(
+    base64_image: str,
+    context: str = "",
+    *,
+    use_case: str = "",
+) -> str:
     """Send a base64 image to the multimodal LLM and return alt-text.
 
     Args:
         base64_image: Base64-encoded image data (without data URI prefix).
         context: Optional surrounding text context for better descriptions.
+        use_case: Use case id; selects per-usecase prompt + model overrides.
 
     Returns:
         Alt-text description, or empty string on failure.
     """
-    prompt = _PROMPT
+    base_prompt = await resolve_prompt(
+        use_case or "*", PROMPT_KEY_VISION, default=_DEFAULT_PROMPT
+    ) or _DEFAULT_PROMPT
+    prompt = base_prompt
     if context:
         prompt += f"\n\nKontext aus dem Dokument: {context[:300]}"
+
+    cfg = await resolve_config(use_case or None)
+    model = cfg.vision_model or settings.VISION_MODEL
 
     try:
         return await vision_describe(
             prompt,
             base64_image,
-            model=settings.VISION_MODEL,
+            model=model,
+            config=cfg,
         )
     except LLMUnavailableError as exc:
         logger.warning("Alt-text generation failed: %s", exc)
@@ -48,6 +65,8 @@ async def generate_alt_text(base64_image: str, context: str = "") -> str:
 async def enrich_images_with_alt_text(
     images: list[dict],
     pages: list[dict],
+    *,
+    use_case: str = "",
 ) -> list[dict]:
     """Generate alt-text for each image and add it to the image dict.
 
@@ -71,7 +90,7 @@ async def enrich_images_with_alt_text(
                 context = p.get("text", "")[:300]
                 break
 
-        alt_text = await generate_alt_text(base64_data, context)
+        alt_text = await generate_alt_text(base64_data, context, use_case=use_case)
         enriched.append({**img, "alt_text": alt_text})
 
     return enriched

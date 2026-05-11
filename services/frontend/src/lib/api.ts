@@ -146,6 +146,126 @@ export async function updatePrompt(useCase: string, prompt: string, role = 'defa
 	return resp.json();
 }
 
+// ── Per-usecase Config + Multi-Prompt API ──────────────────
+
+export interface UsecaseConfig {
+	chat_provider: string;
+	embedding_provider: string;
+	vision_provider: string;
+	ollama_base_url: string;
+	openai_base_url: string;
+	ollama_api_key_set: boolean;
+	ollama_api_key_preview: string;
+	openai_api_key_set: boolean;
+	openai_api_key_preview: string;
+	llm_model: string | null;
+	embedding_model: string | null;
+	vision_model: string | null;
+	embedding_dimension: number | null;
+	temperature: number | null;
+	max_tokens: number | null;
+	embed_batch_size: number | null;
+	agent_max_steps: number | null;
+	memory_max_chars: number | null;
+}
+
+export async function getConfig(
+	useCase: string
+): Promise<{ use_case: string; crypto_configured: boolean; config: UsecaseConfig }> {
+	const resp = await fetch(`${BASE}/admin/config/${useCase}`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function updateConfig(
+	useCase: string,
+	patch: Partial<Record<string, string | number | null>>
+) {
+	const resp = await fetch(`${BASE}/admin/config/${useCase}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	});
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export interface PromptKeyEntry {
+	key: string;
+	scope: string;
+	label: string;
+	value: string;
+	is_override: boolean;
+}
+
+export async function listPromptKeys(
+	useCase: string
+): Promise<{ use_case: string; prompts: PromptKeyEntry[] }> {
+	const resp = await fetch(`${BASE}/admin/prompt-keys/${useCase}`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function updatePromptKey(scope: string, key: string, content: string) {
+	const resp = await fetch(`${BASE}/admin/prompt-keys`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ scope, key, content })
+	});
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+// ── Skills / Regeln API ────────────────────────────────────
+
+export interface Skill {
+	id: string;
+	use_case: string;
+	name: string;
+	overview: string;
+	detailed_task: string;
+	enabled: boolean;
+	position: number;
+}
+
+export async function listSkills(useCase: string): Promise<{ use_case: string; skills: Skill[] }> {
+	const resp = await fetch(`${BASE}/admin/skills/${useCase}`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function createSkill(
+	useCase: string,
+	skill: { name: string; overview: string; detailed_task: string; enabled?: boolean; position?: number }
+) {
+	const resp = await fetch(`${BASE}/admin/skills/${useCase}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(skill)
+	});
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function updateSkill(
+	id: string,
+	patch: Partial<Pick<Skill, 'name' | 'overview' | 'detailed_task' | 'enabled' | 'position'>>
+) {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	});
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function deleteSkill(id: string) {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}`, { method: 'DELETE' });
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
 // ── Agent Actions API ───────────────────────────────────────
 
 export async function getActions(useCase: string) {

@@ -1,7 +1,7 @@
 COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: frontend-build up-dev-full dev dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
+.PHONY: frontend-build up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -26,7 +26,7 @@ up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
 	@echo "Ollama-Modelle laden:  make pull-models"
 	@echo "Logs anzeigen:         make dev-logs"
 
-dev: frontend-build ## Start ohne Ollama (externe URL in .env setzen)
+dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
 	@test -f .env || cp .env.example .env
 	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
 		echo ""; \
@@ -40,16 +40,6 @@ dev: frontend-build ## Start ohne Ollama (externe URL in .env setzen)
 		echo ""; \
 		exit 1; \
 	fi
-	$(COMPOSE) up --build -d
-	@echo ""
-	@echo "Services gestartet (ohne lokales Ollama)."
-	@echo "Ollama-URL: $$(grep '^OLLAMA_BASE_URL=' .env)"
-
-dev-fe: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
-	@test -f .env || cp .env.example .env
-	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
-		echo "FEHLER: OLLAMA_BASE_URL fehlt in .env – siehe 'make dev'."; exit 1; \
-	fi
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
 		postgres qdrant cleaning data_structure embedding vectordb evaluation
@@ -59,6 +49,18 @@ dev-fe: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5
 	@echo "Backend-Logs:  make logs   |   Stop:  make down"
 	@echo ""
 	cd services/frontend && $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
+
+dev-fe: dev ## Alias fuer 'make dev' (frueheres Verhalten beibehalten)
+
+dev-bundled: frontend-build ## Wie 'make dev', aber mit gebautem Frontend-Container statt Vite
+	@test -f .env || cp .env.example .env
+	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
+		echo "FEHLER: OLLAMA_BASE_URL fehlt in .env – siehe 'make dev'."; exit 1; \
+	fi
+	$(COMPOSE) up --build -d
+	@echo ""
+	@echo "Services + gebautes Frontend gestartet (Frontend → http://localhost:3000)."
+	@echo "Ollama-URL: $$(grep '^OLLAMA_BASE_URL=' .env)"
 
 frontend-dev: ## Nur das Frontend im Dev-Modus (Backend muss bereits laufen)
 	@cd services/frontend && [ -d node_modules ] || npm install
@@ -146,13 +148,13 @@ help: ## Show this help
 	@echo "RAG Platform – Makefile Targets"
 	@echo ""
 	@echo "Entwicklung:"
-	@echo "  make dev-full          Alle Services starten (inkl. lokales Ollama)"
-	@echo "  make dev    Ohne Ollama starten (externe URL in .env)"
-	@echo "  make dev-fe    Backend in Docker, Frontend mit Hot-Reload (Vite)"
-	@echo "  make frontend-dev    Nur Frontend im Dev-Modus (Backend muss laufen)"
-	@echo "  make down        Alle Services stoppen"
-	@echo "  make logs        Live-Logs aller Services"
-	@echo "  make pull-models     Ollama-Modelle herunterladen"
+	@echo "  make dev               Backend in Docker + Vite-Hot-Reload (localhost:5173)"
+	@echo "  make dev-bundled       Wie dev, aber mit gebautem Frontend-Container (:3000)"
+	@echo "  make up-dev-full       Alle Services starten (inkl. lokales Ollama)"
+	@echo "  make frontend-dev      Nur Frontend im Dev-Modus (Backend muss laufen)"
+	@echo "  make down              Alle Services stoppen"
+	@echo "  make logs              Live-Logs aller Services"
+	@echo "  make pull-models       Ollama-Modelle herunterladen"
 	@echo ""
 	@echo "Qualitaet:"
 	@echo "  make test            Unit-Tests ausfuehren"
