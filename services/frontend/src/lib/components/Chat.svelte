@@ -1,10 +1,21 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { app, type Message, type AgentStep } from '$lib/state.svelte';
 	import { streamQuery } from '$lib/api';
+	import { getUseCaseBySlug } from '$lib/use-cases';
 	import ChatMessage from './ChatMessage.svelte';
 
 	let input = $state('');
 	let chatContainer: HTMLDivElement | undefined = $state();
+
+	// Use case comes from the URL — single source of truth. app.useCase can
+	// be stale (e.g. when the layout's $effect hasn't run yet, or after HMR
+	// resets state to the 'neumann' default), which led to queries being
+	// sent under the wrong use case.
+	const useCase = $derived.by(() => {
+		const slug = $page.params.useCase ?? '';
+		return getUseCaseBySlug(slug)?.apiId ?? app.useCase;
+	});
 
 	const actionLabels: Record<string, string> = {
 		SEARCH: 'Suche in Vektordatenbank',
@@ -60,7 +71,7 @@
 		try {
 			const result = await streamQuery(
 				text,
-				app.useCase,
+				useCase,
 				app.sessionId,
 				app.role,
 				{},
@@ -145,7 +156,7 @@
 
 	function exportChat() {
 		const exportData = {
-			use_case: app.useCase,
+			use_case: useCase,
 			session_id: app.sessionId,
 			exported_at: new Date().toISOString(),
 			messages: app.messages.map((m) => ({
@@ -168,7 +179,7 @@
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = `chat_${app.useCase}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+		a.download = `chat_${useCase}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
 		a.click();
 		URL.revokeObjectURL(url);
 	}
