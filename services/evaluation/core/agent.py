@@ -265,6 +265,8 @@ async def run_agent(
     searched_collections: set[str] = set()
     sufficient = False
 
+    has_searched = False
+
     for step_num in range(1, max_steps + 1):
         if on_event:
             await on_event({"type": "thinking", "step": step_num})
@@ -272,6 +274,17 @@ async def run_agent(
         # 1. Call LLM (use_case threads provider/model overrides through resolver)
         llm_response = await call_llm(messages, use_case=use_case)
         thought, action_name, action_args = _parse_action(llm_response)
+
+        # Hard guard: small models (e.g. qwen3:8b) sometimes skip SEARCH on
+        # short follow-up questions and go straight to FINAL_ANSWER from the
+        # conversation history. Force a SEARCH first so RAG actually runs.
+        if not has_searched and action_name in ("FINAL_ANSWER", "CLARIFY"):
+            action_name = "SEARCH"
+            action_args = {"query": enriched_query}
+            thought = (
+                (thought + "\n" if thought else "")
+                + "[Auto-Korrektur: SEARCH erzwungen, bevor eine Antwort gegeben wird.]"
+            )
 
         if on_event:
             await on_event({
@@ -288,6 +301,7 @@ async def run_agent(
             action_args["filters"] = filters or action_args.get("filters", {})
             if "query" not in action_args:
                 action_args["query"] = enriched_query
+            has_searched = True
 
         # 2. Execute action
         result = await _execute_action(
