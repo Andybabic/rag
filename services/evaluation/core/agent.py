@@ -13,6 +13,7 @@ from core.actions import (
     action_clarify,
     action_lookup_sources,
     action_recall_memory,
+    action_refine_query,
     action_search,
     action_search_cnc,
 )
@@ -149,12 +150,18 @@ async def _execute_action(
     *,
     session_id: str,
     use_case: str,
+    collection: str = "",
+    filters: dict | None = None,
 ) -> str | dict:
     """Execute an action and return the observation string (or dict with chunks)."""
     if action_name == "SEARCH":
         return await action_search(action_args, use_case=use_case)
     if action_name == "SEARCH_CNC":
         return await action_search_cnc(action_args, use_case=use_case)
+    if action_name == "REFINE_QUERY":
+        return await action_refine_query(
+            action_args, use_case=use_case, collection=collection, filters=filters
+        )
     if action_name == "CLARIFY":
         return await action_clarify(action_args)
     if action_name == "RECALL_MEMORY":
@@ -309,15 +316,19 @@ async def run_agent(
             action_args,
             session_id=session_id,
             use_case=use_case,
+            collection=collection,
+            filters=filters,
         )
 
-        # Handle structured results (SEARCH returns dict with chunks)
+        # Handle structured results (SEARCH / REFINE_QUERY return dict with chunks)
         step_chunks: list[dict] = []
         if isinstance(result, dict):
             observation = result.get("observation", "")
             step_chunks = result.get("chunks", [])
             chunks_for_citations.extend(step_chunks)
             searched_collections.update(result.get("searched_collections", []))
+            if action_name == "REFINE_QUERY":
+                has_searched = True
         else:
             observation = result
 

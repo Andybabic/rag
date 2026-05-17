@@ -210,6 +210,36 @@ async def action_search_cnc(args: dict, *, use_case: str) -> str:
     return "\n".join(lines)
 
 
+async def action_refine_query(args: dict, *, use_case: str, collection: str, filters: dict | None) -> dict:
+    """REFINE_QUERY – re-run SEARCH with an LLM-rewritten query.
+
+    Sub-agents use this to escape a mager observation without ending the
+    loop: same retrieval pipeline, but with a query the agent itself has
+    reformulated (synonyms, broader/narrower terms, …).
+
+    Inherits the same use-case-scoped collection resolution as ``SEARCH``
+    so isolation is never bypassed.
+    """
+    refined_query = (args.get("query") or "").strip()
+    if not refined_query:
+        return {
+            "observation": "REFINE_QUERY benötigt eine neue Query im 'query'-Feld.",
+            "chunks": [],
+            "searched_collections": [],
+        }
+    reason = (args.get("reason") or "").strip()
+    search_args = {
+        "query": refined_query,
+        "collection": collection,
+        "filters": filters or {},
+    }
+    result = await action_search(search_args, use_case=use_case)
+    if isinstance(result, dict):
+        prefix = f"[Verfeinerte Suche: {reason}]\n" if reason else "[Verfeinerte Suche]\n"
+        result = {**result, "observation": prefix + result.get("observation", "")}
+    return result
+
+
 async def action_clarify(args: dict) -> str:
     """CLARIFY – return a clarification request for the frontend."""
     question = args.get("question", "Können Sie Ihre Frage präzisieren?")
@@ -250,6 +280,7 @@ async def action_lookup_sources(args: dict, use_case: str) -> str:
 ACTION_HANDLERS: dict[str, str] = {
     "SEARCH": "action_search",
     "SEARCH_CNC": "action_search_cnc",
+    "REFINE_QUERY": "action_refine_query",
     "CLARIFY": "action_clarify",
     "RECALL_MEMORY": "action_recall_memory",
     "LOOKUP_SOURCES": "action_lookup_sources",

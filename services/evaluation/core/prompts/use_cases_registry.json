@@ -6,6 +6,7 @@
     "agent_action_names": [
       "SEARCH",
       "SEARCH_CNC",
+      "REFINE_QUERY",
       "CLARIFY",
       "RECALL_MEMORY",
       "LOOKUP_SOURCES",
@@ -19,6 +20,7 @@
     ],
     "agent_action_names": [
       "SEARCH",
+      "REFINE_QUERY",
       "CLARIFY",
       "RECALL_MEMORY",
       "LOOKUP_SOURCES",
@@ -32,6 +34,7 @@
     ],
     "agent_action_names": [
       "SEARCH",
+      "REFINE_QUERY",
       "CLARIFY",
       "RECALL_MEMORY",
       "LOOKUP_SOURCES",
@@ -49,6 +52,7 @@
     ],
     "agent_action_names": [
       "SEARCH",
+      "REFINE_QUERY",
       "CLARIFY",
       "RECALL_MEMORY",
       "LOOKUP_SOURCES",

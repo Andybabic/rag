@@ -30,6 +30,52 @@ export interface AgentStep {
 	args?: Record<string, unknown>;
 	llm_response?: string;
 	chunks?: RetrievedChunk[];
+	subagent_id?: string;
+	subagent_role?: string;
+}
+
+export interface ManagerSubtask {
+	role: string;
+	sub_query: string;
+	focus?: string;
+}
+
+export interface ManagerPlan {
+	rationale?: string;
+	merge_strategy?: 'complementary' | 'comparative' | 'fallback' | string;
+	subtasks: ManagerSubtask[];
+}
+
+export interface SubAgentTrace {
+	subagent_id: string;
+	role: string;
+	role_label: string;
+	sub_query: string;
+	focus?: string;
+	answer: string;
+	agent_steps: AgentStep[];
+	chunks?: RetrievedChunk[];
+	sufficient?: boolean;
+	searched_collections?: string[];
+	error?: string | null;
+	status?: 'pending' | 'running' | 'done' | 'error';
+}
+
+export interface SynthesizerTrace {
+	phase: 'started' | 'done' | 'skipped';
+	merge_strategy?: string;
+	fragment_count?: number;
+	global_chunk_count?: number;
+	answer_length?: number;
+	reason?: string;
+}
+
+export interface ComplianceTrace {
+	verdict?: 'OK' | 'REWRITE' | 'REFUSE';
+	issues?: string[];
+	guidance?: string;
+	phase?: 'started' | 'done' | 'error';
+	detail?: string;
 }
 
 export interface Message {
@@ -37,6 +83,10 @@ export interface Message {
 	text: string;
 	citations?: Citation[];
 	agentSteps?: AgentStep[];
+	managerPlan?: ManagerPlan;
+	subAgents?: SubAgentTrace[];
+	synthesizer?: SynthesizerTrace;
+	compliance?: ComplianceTrace;
 	searchedCollections?: string[];
 	systemPrompt?: string;
 	enrichedQuery?: string;
