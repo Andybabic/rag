@@ -1,6 +1,14 @@
 <script lang="ts">
 	import { page } from '$app/stores';
-	import { app, type Message, type AgentStep } from '$lib/state.svelte';
+	import {
+		app,
+		type Message,
+		type AgentStep,
+		type SubAgentTrace,
+		type ManagerPlan,
+		type SynthesizerTrace,
+		type ComplianceTrace
+	} from '$lib/state.svelte';
 	import { streamQuery } from '$lib/api';
 	import { getUseCaseBySlug } from '$lib/use-cases';
 	import ChatMessage from './ChatMessage.svelte';
@@ -23,8 +31,76 @@
 		CLARIFY: 'Stelle Rückfrage',
 		RECALL_MEMORY: 'Lese Gedächtnis',
 		LOOKUP_SOURCES: 'Liste Quellen auf',
-		FINAL_ANSWER: 'Formuliere Antwort'
+		FINAL_ANSWER: 'Formuliere Antwort',
+		MANAGER_PLAN: 'Manager-Plan',
+		SYNTHESIZE: 'Antworten zusammenführen'
 	};
+
+	const roleLabels: Record<string, string> = {
+		facts: 'Fakten',
+		procedure: 'Prozedur',
+		context: 'Kontext'
+	};
+
+	function upsertSubAgent(
+		list: SubAgentTrace[],
+		subId: string,
+		patch: Partial<SubAgentTrace>
+	): SubAgentTrace[] {
+		const idx = list.findIndex((s) => s.subagent_id === subId);
+		if (idx < 0) {
+			list.push({
+				subagent_id: subId,
+				role: patch.role ?? 'facts',
+				role_label: patch.role_label ?? roleLabels[patch.role ?? 'facts'] ?? 'Spezialist',
+				sub_query: patch.sub_query ?? '',
+				focus: patch.focus,
+				answer: patch.answer ?? '',
+				agent_steps: patch.agent_steps ?? [],
+				chunks: patch.chunks ?? [],
+				sufficient: patch.sufficient,
+				searched_collections: patch.searched_collections,
+				error: patch.error ?? null,
+				status: patch.status ?? 'running'
+			});
+		} else {
+			list[idx] = { ...list[idx], ...patch };
+		}
+		return list;
+	}
+
+	function pushInnerStep(sub: SubAgentTrace, innerType: string, payload: Record<string, unknown>) {
+		const steps = [...(sub.agent_steps ?? [])];
+		const stepNum = (payload.step as number) ?? steps.length + 1;
+		if (innerType === 'action') {
+			steps.push({
+				step: stepNum,
+				action: (payload.action as string) ?? '',
+				thought: (payload.thought as string) ?? '',
+				args: (payload.args as Record<string, unknown>) ?? {},
+				observation: '',
+				chunks: [],
+				subagent_id: sub.subagent_id,
+				subagent_role: sub.role
+			});
+		} else if (innerType === 'step') {
+			const idx = steps.findIndex((s) => s.step === stepNum);
+			const full: AgentStep = {
+				step: stepNum,
+				action: (payload.action as string) ?? '',
+				thought: (payload.thought as string) ?? '',
+				args: (payload.args as Record<string, unknown>) ?? {},
+				observation: (payload.observation as string) ?? '',
+				llm_response: payload.llm_response as string,
+				chunks: (payload.chunks as AgentStep['chunks']) ?? [],
+				subagent_id: sub.subagent_id,
+				subagent_role: sub.role
+			};
+			if (idx >= 0) steps[idx] = full;
+			else steps.push(full);
+		}
+		sub.agent_steps = steps;
+	}
 
 	function scrollToBottom() {
 		if (chatContainer) {
@@ -58,6 +134,7 @@
 			role: 'assistant',
 			text: '',
 			agentSteps: [],
+			subAgents: [],
 			streaming: true,
 			currentPhase: 'Verbinde …'
 		});
@@ -79,56 +156,130 @@
 				(event) => {
 					const type = event.type as string;
 					const msg = app.messages[assistantIdx];
-					const steps = [...(msg.agentSteps ?? [])];
 
 					if (type === 'started') {
-						updateMsg({ currentPhase: 'Agent gestartet …' });
-					} else if (type === 'thinking') {
-						updateMsg({ currentPhase: `Schritt ${event.step}: LLM denkt nach …` });
-					} else if (type === 'action') {
-						// Push a partial step so it shows up in the UI immediately,
-						// even before the action result has come back.
-						steps.push({
-							step: event.step as number,
-							action: event.action as string,
-							thought: event.thought as string,
-							args: (event.args as Record<string, unknown>) ?? {},
-							observation: '',
-							chunks: []
-						});
-						const label = actionLabels[event.action as string] ?? (event.action as string);
-						updateMsg({
-							agentSteps: steps,
-							currentPhase: `Schritt ${event.step}: ${label} …`
-						});
-					} else if (type === 'step') {
-						// Replace the partial step with the full one (incl. observation + chunks).
-						const idx = steps.findIndex((s) => s.step === event.step);
-						const full = {
-							step: event.step as number,
-							action: event.action as string,
-							thought: event.thought as string,
-							args: (event.args as Record<string, unknown>) ?? {},
-							observation: (event.observation as string) ?? '',
-							llm_response: event.llm_response as string,
-							chunks: (event.chunks as AgentStep['chunks']) ?? []
+						updateMsg({ currentPhase: 'Manager startet …' });
+					} else if (type === 'manager_plan') {
+						const plan: ManagerPlan = {
+							rationale: event.rationale as string,
+							merge_strategy: event.merge_strategy as ManagerPlan['merge_strategy'],
+							subtasks: (event.subtasks as ManagerPlan['subtasks']) ?? []
 						};
-						if (idx >= 0) steps[idx] = full;
-						else steps.push(full);
-						const label = actionLabels[event.action as string] ?? (event.action as string);
+						// Pre-seed sub-agent placeholders so the UI shows the plan
+						// immediately, even before the first sub-agent emits.
+						const seeded: SubAgentTrace[] = plan.subtasks.map((st, i) => ({
+							subagent_id: `sub-${i + 1}-${st.role}`,
+							role: st.role,
+							role_label: roleLabels[st.role] ?? st.role,
+							sub_query: st.sub_query,
+							focus: st.focus,
+							answer: '',
+							agent_steps: [],
+							status: 'pending'
+						}));
 						updateMsg({
-							agentSteps: steps,
-							currentPhase: `Schritt ${event.step}: ${label} – fertig`
+							managerPlan: plan,
+							subAgents: seeded,
+							currentPhase: `Manager: ${plan.subtasks.length} Sub-Task(s) verteilt`
+						});
+					} else if (type === 'subagent_started') {
+						const list = upsertSubAgent([...(msg.subAgents ?? [])], event.subagent_id as string, {
+							role: event.subagent_role as string,
+							role_label: (event.role_label as string) ??
+								roleLabels[event.subagent_role as string] ?? 'Spezialist',
+							sub_query: event.sub_query as string,
+							focus: event.focus as string,
+							status: 'running'
+						});
+						updateMsg({
+							subAgents: list,
+							currentPhase: `${event.role_label ?? event.subagent_role} sucht …`
+						});
+					} else if (type === 'subagent_step') {
+						const list = [...(msg.subAgents ?? [])];
+						const sub = list.find((s) => s.subagent_id === event.subagent_id);
+						if (sub) {
+							pushInnerStep(sub, event.inner_type as string,
+								(event.payload as Record<string, unknown>) ?? {});
+							const payload = (event.payload as Record<string, unknown>) ?? {};
+							const innerAction = payload.action as string | undefined;
+							if (innerAction) {
+								const lbl = actionLabels[innerAction] ?? innerAction;
+								updateMsg({
+									subAgents: list,
+									currentPhase: `${sub.role_label}: ${lbl} …`
+								});
+							} else {
+								updateMsg({ subAgents: list });
+							}
+						}
+					} else if (type === 'subagent_done') {
+						const list = upsertSubAgent([...(msg.subAgents ?? [])], event.subagent_id as string, {
+							answer: (event.answer_preview as string) ?? '',
+							sufficient: event.sufficient as boolean,
+							error: (event.error as string | null) ?? null,
+							status: event.error ? 'error' : 'done'
+						});
+						updateMsg({
+							subAgents: list,
+							currentPhase: `${event.subagent_role}: fertig`
+						});
+					} else if (type === 'compliance') {
+						const prev = msg.compliance ?? {};
+						const comp: ComplianceTrace = {
+							...prev,
+							phase: event.phase as ComplianceTrace['phase'],
+							verdict: (event.verdict as ComplianceTrace['verdict']) ?? prev.verdict,
+							issues: (event.issues as string[]) ?? prev.issues,
+							guidance: (event.guidance as string) ?? prev.guidance,
+							detail: (event.detail as string) ?? prev.detail
+						};
+						const phaseLabel =
+							comp.phase === 'started'
+								? 'Compliance prüft …'
+								: comp.verdict === 'REWRITE'
+									? 'Compliance: Korrektur'
+									: comp.verdict === 'REFUSE'
+										? 'Compliance: abgelehnt'
+										: 'Compliance: OK';
+						updateMsg({ compliance: comp, currentPhase: phaseLabel });
+					} else if (type === 'synthesizer') {
+						const synth: SynthesizerTrace = {
+							phase: event.phase as SynthesizerTrace['phase'],
+							merge_strategy: event.merge_strategy as string,
+							fragment_count: event.fragment_count as number,
+							global_chunk_count: event.global_chunk_count as number,
+							answer_length: event.answer_length as number,
+							reason: event.reason as string
+						};
+						updateMsg({
+							synthesizer: synth,
+							currentPhase:
+								synth.phase === 'started'
+									? 'Synthesizer führt Antworten zusammen …'
+									: synth.phase === 'skipped'
+										? 'Synthesizer übersprungen'
+										: 'Synthesizer fertig'
 						});
 					}
 					scrollToBottom();
 				}
 			);
 			if (!result) throw new Error('Kein Ergebnis vom Stream');
+			// Prefer the rich sub-agent traces from the server (with full
+			// step bodies) over the live-built partials.
+			const finalSubAgents = (result.subagents as SubAgentTrace[] | undefined)?.map((s) => ({
+				...s,
+				role_label: s.role_label ?? roleLabels[s.role] ?? s.role,
+				status: s.error ? 'error' : 'done'
+			})) as SubAgentTrace[] | undefined;
 			updateMsg({
 				text: (result.answer as string) ?? '',
 				citations: (result.citations as Message['citations']) ?? [],
 				agentSteps: (result.agent_steps as Message['agentSteps']) ?? app.messages[assistantIdx].agentSteps,
+				managerPlan: (result.manager_plan as ManagerPlan | undefined) ?? app.messages[assistantIdx].managerPlan,
+				subAgents: finalSubAgents ?? app.messages[assistantIdx].subAgents,
+				compliance: (result.compliance as ComplianceTrace | undefined) ?? app.messages[assistantIdx].compliance,
 				searchedCollections: (result.searched_collections as string[]) ?? [],
 				systemPrompt: (result.system_prompt as string) ?? '',
 				enrichedQuery: (result.enriched_query as string) ?? '',

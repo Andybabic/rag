@@ -6,14 +6,52 @@
 	let { message }: { message: Message } = $props();
 
 	let showSteps = $state(false);
+	let showManager = $state(false);
 	let openSteps = $state<Set<number>>(new Set());
-	// Auto-expand the steps panel while the agent is still streaming so the
-	// user sees progress live; user can still collapse manually after.
+	let openSubAgents = $state<Set<string>>(new Set());
+	// Auto-expand the manager + steps panels while streaming so the user sees
+	// progress live. They can still collapse manually after.
 	$effect(() => {
 		if (message.streaming) {
 			showSteps = true;
+			showManager = true;
 		}
 	});
+
+	function toggleSubAgent(id: string) {
+		if (openSubAgents.has(id)) {
+			openSubAgents.delete(id);
+		} else {
+			openSubAgents.add(id);
+		}
+		openSubAgents = new Set(openSubAgents);
+	}
+
+	const roleColors: Record<string, string> = {
+		facts: 'bg-blue-100 text-blue-700 border-blue-200',
+		procedure: 'bg-amber-100 text-amber-700 border-amber-200',
+		context: 'bg-emerald-100 text-emerald-700 border-emerald-200'
+	};
+
+	const statusColors: Record<string, string> = {
+		pending: 'bg-gray-100 text-gray-500',
+		running: 'bg-blue-100 text-blue-600 animate-pulse',
+		done: 'bg-green-100 text-green-700',
+		error: 'bg-red-100 text-red-700'
+	};
+
+	const statusLabels: Record<string, string> = {
+		pending: 'wartet',
+		running: 'läuft',
+		done: 'fertig',
+		error: 'Fehler'
+	};
+
+	const mergeLabels: Record<string, string> = {
+		complementary: 'ergänzend',
+		comparative: 'gegenüberstellend',
+		fallback: 'Fallback'
+	};
 	let openChunks = $state<Set<string>>(new Set());
 	let showSystemPrompt = $state(false);
 	let showLlmResponse = $state<Set<number>>(new Set());
@@ -145,7 +183,9 @@
 		CLARIFY: 'Rückfrage',
 		RECALL_MEMORY: 'Gedächtnis abrufen',
 		LOOKUP_SOURCES: 'Quellen auflisten',
-		FINAL_ANSWER: 'Antwort formuliert'
+		FINAL_ANSWER: 'Antwort formuliert',
+		MANAGER_PLAN: 'Manager-Plan',
+		SYNTHESIZE: 'Antworten zusammengeführt'
 	};
 
 	const actionColors: Record<string, string> = {
@@ -154,7 +194,9 @@
 		CLARIFY: 'bg-yellow-100 text-yellow-700 border-yellow-200',
 		RECALL_MEMORY: 'bg-cyan-100 text-cyan-700 border-cyan-200',
 		LOOKUP_SOURCES: 'bg-teal-100 text-teal-700 border-teal-200',
-		FINAL_ANSWER: 'bg-green-100 text-green-700 border-green-200'
+		FINAL_ANSWER: 'bg-green-100 text-green-700 border-green-200',
+		MANAGER_PLAN: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+		SYNTHESIZE: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200'
 	};
 </script>
 
@@ -260,6 +302,212 @@
 							</div>
 						{/each}
 					</div>
+				</div>
+			{/if}
+
+			<!-- Manager Plan + Sub-Agents (hierarchical trace) -->
+			{#if message.managerPlan || (message.subAgents && message.subAgents.length > 0)}
+				<div class="mt-3 border-t border-gray-100 pt-3">
+					<button
+						class="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+						onclick={() => (showManager = !showManager)}
+					>
+						<span class="transform transition-transform {showManager ? 'rotate-90' : ''}">&#9654;</span>
+						Manager-Trace
+						{#if message.subAgents && message.subAgents.length > 0}
+							<span class="ml-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
+								{message.subAgents.length}× parallel
+							</span>
+						{/if}
+					</button>
+
+					{#if showManager}
+						<div class="mt-2 space-y-2">
+							<!-- Manager plan card -->
+							{#if message.managerPlan}
+								<div class="rounded-lg border border-indigo-200 bg-indigo-50/50 px-3 py-2">
+									<div class="flex items-center gap-2">
+										<span class="rounded-md border border-indigo-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
+											MANAGER
+										</span>
+										{#if message.managerPlan.merge_strategy}
+											<span class="text-[10px] uppercase tracking-wider text-indigo-500">
+												Merge: {mergeLabels[message.managerPlan.merge_strategy] ?? message.managerPlan.merge_strategy}
+											</span>
+										{/if}
+									</div>
+									{#if message.managerPlan.rationale}
+										<p class="mt-1 text-xs italic text-indigo-900/80">
+											„{message.managerPlan.rationale}"
+										</p>
+									{/if}
+								</div>
+							{/if}
+
+							<!-- Sub-agent cards -->
+							{#if message.subAgents && message.subAgents.length > 0}
+								<div class="space-y-2">
+									{#each message.subAgents as sub}
+										{@const isOpen = openSubAgents.has(sub.subagent_id)}
+										{@const rColor = roleColors[sub.role] ?? 'bg-gray-100 text-gray-700 border-gray-200'}
+										{@const sColor = statusColors[sub.status ?? 'done'] ?? 'bg-gray-100 text-gray-500'}
+										<div class="rounded-lg border {isOpen ? 'border-gray-300 bg-white shadow-sm' : 'border-gray-200 bg-gray-50'}">
+											<button
+												class="flex w-full items-start gap-2 px-3 py-2 text-left text-xs hover:bg-gray-50"
+												onclick={() => toggleSubAgent(sub.subagent_id)}
+											>
+												<span class="mt-0.5 transform transition-transform {isOpen ? 'rotate-90' : ''} text-gray-400">&#9654;</span>
+												<span class="rounded-md border px-1.5 py-0.5 text-[10px] font-semibold {rColor}">
+													{sub.role_label}
+												</span>
+												<span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {sColor}">
+													{statusLabels[sub.status ?? 'done'] ?? sub.status}
+												</span>
+												<span class="min-w-0 flex-1 truncate text-gray-700">{sub.sub_query}</span>
+												{#if sub.agent_steps && sub.agent_steps.length > 0}
+													<span class="shrink-0 text-[10px] text-gray-400">{sub.agent_steps.length} Schritte</span>
+												{/if}
+											</button>
+
+											{#if isOpen}
+												<div class="space-y-2 border-t border-gray-100 px-3 py-2">
+													{#if sub.focus}
+														<div>
+															<p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Fokus</p>
+															<p class="text-xs text-gray-600">{sub.focus}</p>
+														</div>
+													{/if}
+													{#if sub.error}
+														<div class="rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+															Fehler: {sub.error}
+														</div>
+													{/if}
+													{#if sub.answer}
+														<div>
+															<p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Antwort-Fragment</p>
+															<p class="whitespace-pre-wrap text-xs text-gray-700">{sub.answer}</p>
+														</div>
+													{/if}
+
+													<!-- Inner ReAct steps for this sub-agent -->
+													{#if sub.agent_steps && sub.agent_steps.length > 0}
+														<div>
+															<p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+																ReAct-Schritte
+															</p>
+															<div class="space-y-0">
+																{#each sub.agent_steps as step, si}
+																	{@const colors = actionColors[step.action] ?? 'bg-gray-100 text-gray-700 border-gray-200'}
+																	{@const label = actionLabels[step.action] ?? step.action}
+																	{@const stepKey = `${sub.subagent_id}:${step.step}`}
+																	{@const stepOpen = openSteps.has(step.step + si * 1000)}
+																	{#if si > 0}
+																		<div class="ml-3 h-2 border-l border-gray-200"></div>
+																	{/if}
+																	<div class="rounded-md border {stepOpen ? 'border-gray-300 bg-white' : 'border-gray-200 bg-gray-50'}">
+																		<button
+																			class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[11px] hover:bg-gray-50"
+																			onclick={() => toggleStep(step.step + si * 1000)}
+																		>
+																			<span class="transform transition-transform {stepOpen ? 'rotate-90' : ''} text-gray-400">&#9654;</span>
+																			<span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[9px] font-bold text-gray-600">{step.step}</span>
+																			<span class="rounded border px-1 py-0.5 text-[9px] font-semibold {colors}">{step.action}</span>
+																			<span class="truncate text-gray-500">{label}</span>
+																		</button>
+																		{#if stepOpen}
+																			<div class="space-y-2 border-t border-gray-100 px-2 py-2">
+																				{#if step.thought}
+																					<div>
+																						<p class="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-gray-400">Reasoning</p>
+																						<p class="whitespace-pre-wrap text-[11px] text-gray-600">{step.thought}</p>
+																					</div>
+																				{/if}
+																				{#if step.observation}
+																					<div>
+																						<p class="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-gray-400">Ergebnis</p>
+																						<pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-gray-50 p-1.5 font-mono text-[10px] text-gray-600">{step.observation}</pre>
+																					</div>
+																				{/if}
+																				{#if step.chunks && step.chunks.length > 0}
+																					<p class="text-[9px] text-gray-500">{step.chunks.length} Chunks abgerufen</p>
+																				{/if}
+																			</div>
+																		{/if}
+																	</div>
+																{/each}
+															</div>
+														</div>
+													{/if}
+												</div>
+											{/if}
+										</div>
+									{/each}
+								</div>
+							{/if}
+
+							<!-- Compliance verdict -->
+							{#if message.compliance && message.compliance.verdict}
+								{@const verdict = message.compliance.verdict}
+								{@const vColor = verdict === 'OK'
+									? 'border-green-200 bg-green-50/50 text-green-700'
+									: verdict === 'REWRITE'
+										? 'border-amber-200 bg-amber-50/50 text-amber-700'
+										: 'border-red-200 bg-red-50/50 text-red-700'}
+								<div class="rounded-lg border {vColor} px-3 py-2">
+									<div class="flex items-center gap-2">
+										<span class="rounded-md border bg-white px-1.5 py-0.5 text-[10px] font-bold">
+											COMPLIANCE
+										</span>
+										<span class="text-[10px] font-bold uppercase tracking-wider">
+											{verdict}
+										</span>
+									</div>
+									{#if message.compliance.issues && message.compliance.issues.length > 0}
+										<ul class="mt-1 list-disc space-y-0.5 pl-4 text-[11px]">
+											{#each message.compliance.issues as issue}
+												<li>{issue}</li>
+											{/each}
+										</ul>
+									{/if}
+									{#if message.compliance.guidance}
+										<p class="mt-1 text-[11px] italic">
+											Korrektur-Hinweis: {message.compliance.guidance}
+										</p>
+									{/if}
+								</div>
+							{/if}
+
+							<!-- Synthesizer status -->
+							{#if message.synthesizer}
+								<div class="rounded-lg border border-fuchsia-200 bg-fuchsia-50/50 px-3 py-2">
+									<div class="flex items-center gap-2">
+										<span class="rounded-md border border-fuchsia-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-fuchsia-700">
+											SYNTHESIZER
+										</span>
+										<span class="text-[10px] uppercase tracking-wider text-fuchsia-500">
+											{message.synthesizer.phase}
+										</span>
+										{#if message.synthesizer.merge_strategy}
+											<span class="text-[10px] text-fuchsia-700">
+												· {mergeLabels[message.synthesizer.merge_strategy] ?? message.synthesizer.merge_strategy}
+											</span>
+										{/if}
+									</div>
+									{#if message.synthesizer.global_chunk_count !== undefined}
+										<p class="mt-1 text-[11px] text-fuchsia-900/80">
+											{message.synthesizer.fragment_count ?? 0} Fragmente,
+											{message.synthesizer.global_chunk_count} eindeutige Chunks im Pool
+										</p>
+									{/if}
+									{#if message.synthesizer.reason}
+										<p class="mt-1 text-[11px] italic text-fuchsia-900/70">
+											Hinweis: {message.synthesizer.reason}
+										</p>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/if}
 

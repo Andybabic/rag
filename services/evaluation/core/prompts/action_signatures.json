@@ -1,6 +1,7 @@
 {
   "SEARCH": "SEARCH({\"query\": \"...\", \"collection\": \"...\", \"filters\": {}})",
   "SEARCH_CNC": "SEARCH_CNC({\"ruest_id\": \"...\", \"missing_tool\": \"...\"})",
+  "REFINE_QUERY": "REFINE_QUERY({\"query\": \"umformulierte Suchanfrage\", \"reason\": \"warum die vorherige Suche nicht reichte\"})",
   "CLARIFY": "CLARIFY({\"question\": \"...\"})",
   "RECALL_MEMORY": "RECALL_MEMORY({})",
   "LOOKUP_SOURCES": "LOOKUP_SOURCES({})",

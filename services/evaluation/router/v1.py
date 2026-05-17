@@ -5,10 +5,10 @@ import logging
 
 import asyncio
 
-from core.agent import run_agent
 from core.citations import map_citations
 from core.database import get_pool
 from core.evaluator import evaluate_chunks
+from core.manager import run_manager
 from core.reranker import rerank_chunks
 from core.use_cases import (
     get_agent_actions,
@@ -92,15 +92,14 @@ async def agent_query(body: AgentQueryRequest, request: Request):
 
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
-    result = await run_agent(
+    result = await run_manager(
         query=body.query,
         use_case=body.use_case,
         session_id=body.session_id,
-        system_prompt=system_prompt,
+        use_case_prompt=system_prompt,
         available_actions=available_actions,
         collection=collection,
         filters=body.config.filters,
-        max_steps=body.config.max_steps,
         history=history,
     )
 
@@ -155,15 +154,14 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
 
     async def runner() -> None:
         try:
-            result = await run_agent(
+            result = await run_manager(
                 query=body.query,
                 use_case=body.use_case,
                 session_id=body.session_id,
-                system_prompt=system_prompt,
+                use_case_prompt=system_prompt,
                 available_actions=available_actions,
                 collection=collection,
                 filters=body.config.filters,
-                max_steps=body.config.max_steps,
                 history=history,
                 on_event=on_event,
             )
