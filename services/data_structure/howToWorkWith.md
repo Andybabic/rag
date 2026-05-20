@@ -133,8 +133,10 @@ eingefuegt werden. Der Chunker:
 
 Ueber Env-Variablen oder per Request:
 
-- `DEFAULT_CHUNK_SIZE` (512 Zeichen) – globaler Default.
-- `DEFAULT_CHUNK_OVERLAP` (50 Zeichen) – globaler Default.
+- `DEFAULT_CHUNK_SIZE` (256 **Tokens**) – globaler Default.
+  LlamaIndex `SentenceSplitter` zaehlt Tokens, nicht Zeichen.
+  Faustregel DE-Text: 1 Token ≈ 3–4 Zeichen, also ~1000 Zeichen pro Chunk.
+- `DEFAULT_CHUNK_OVERLAP` (32 Tokens) – globaler Default.
 - Per Request: `config.chunk_size` und `config.chunk_overlap`.
 
 ### Eigene Chunking-Strategie
@@ -200,6 +202,6 @@ python -m pytest tests/ -v
 
 | Variable | Default | Beschreibung |
 |----------|---------|--------------|
-| `DEFAULT_CHUNK_SIZE` | `512` | Chunk-Groesse in Zeichen |
-| `DEFAULT_CHUNK_OVERLAP` | `50` | Ueberlappung in Zeichen |
+| `DEFAULT_CHUNK_SIZE` | `256` | Chunk-Groesse in **Tokens** (SentenceSplitter; ≈ 1000 Zeichen DE) |
+| `DEFAULT_CHUNK_OVERLAP` | `32` | Ueberlappung in **Tokens** (≈ 130 Zeichen DE) |
 | `LOG_LEVEL` | `INFO` | Log-Level |

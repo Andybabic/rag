@@ -7,16 +7,13 @@
 
 	let showSteps = $state(false);
 	let showManager = $state(false);
+	let showCitations = $state(false);
 	let openSteps = $state<Set<number>>(new Set());
 	let openSubAgents = $state<Set<string>>(new Set());
-	// Auto-expand the manager + steps panels while streaming so the user sees
-	// progress live. They can still collapse manually after.
-	$effect(() => {
-		if (message.streaming) {
-			showSteps = true;
-			showManager = true;
-		}
-	});
+	// Panels stay collapsed by default – the user expands what they
+	// actually want to see. The live "currentPhase" status during
+	// streaming already shows what the agent is doing without forcing
+	// the full trace open.
 
 	function toggleSubAgent(id: string) {
 		if (openSubAgents.has(id)) {
@@ -146,7 +143,7 @@
 		// Then add citation badges
 		html = html.replace(
 			/\[(\d+)]/g,
-			'<span class="citation-badge inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold cursor-pointer hover:bg-blue-200" data-ref="$1" title="Quelle $1 anzeigen">$1</span>'
+			'<span class="citation-badge inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold cursor-pointer hover:bg-blue-200" data-ref="$1" title="Quelle $1 öffnen – Dokument an der Fundstelle anzeigen">$1</span>'
 		);
 		return html;
 	}
@@ -160,20 +157,47 @@
 		}
 	}
 
-	function scrollToCitation(ref: number) {
-		const el = document.getElementById(`citation-${ref}`);
-		if (el) {
-			el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-			el.classList.add('ring-2', 'ring-blue-400');
-			setTimeout(() => el.classList.remove('ring-2', 'ring-blue-400'), 2000);
+	function flashCitationCard(refNum: number) {
+		// Find the source card whose badge matches this ref number.
+		const cites = message.citations ?? [];
+		const idx = cites.findIndex(
+			(c) => (c.ref ?? '').replace(/[^\d]/g, '') === String(refNum)
+		);
+		// Expand the (collapsed by default) Quellen panel so the card
+		// the user just clicked is actually in the DOM to scroll to.
+		showCitations = true;
+		const targetId = `citation-${idx >= 0 ? idx + 1 : refNum}`;
+		// Wait one tick so the just-rendered card exists before scrolling.
+		setTimeout(() => {
+			const el = document.getElementById(targetId);
+			if (el) {
+				el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+				el.classList.add('ring-2', 'ring-blue-400');
+				setTimeout(() => el.classList.remove('ring-2', 'ring-blue-400'), 2000);
+			}
+		}, 30);
+	}
+
+	// Clicking the [N] badge in the answer opens the cited document at the
+	// right page; if the document isn't stored, fall back to highlighting
+	// the source card so the passage is still reachable.
+	function openCitation(refNum: number) {
+		const cite = (message.citations ?? []).find(
+			(c) => (c.ref ?? '').replace(/[^\d]/g, '') === String(refNum)
+		);
+		if (cite?.stored_path) {
+			openPreview(cite.stored_path, cite.file_name ?? '', cite.page ?? undefined);
 		}
+		// Always also flash the source card (useful context, and the only
+		// affordance when there is no stored document to open).
+		flashCitationCard(refNum);
 	}
 
 	function handleAnswerClick(e: MouseEvent) {
 		const target = e.target as HTMLElement;
 		if (target.classList.contains('citation-badge')) {
 			const ref = parseInt(target.dataset.ref ?? '0');
-			if (ref) scrollToCitation(ref);
+			if (ref) openCitation(ref);
 		}
 	}
 
@@ -259,7 +283,17 @@
 			<!-- Citations / Sources -->
 			{#if message.citations && message.citations.length > 0}
 				<div class="mt-3 border-t border-gray-100 pt-3">
-					<p class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Quellen</p>
+					<button
+						class="mb-2 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-600"
+						onclick={() => (showCitations = !showCitations)}
+					>
+						<span class="transform transition-transform {showCitations ? 'rotate-90' : ''}">&#9654;</span>
+						Quellen
+						<span class="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700 normal-case">
+							{message.citations.length}
+						</span>
+					</button>
+					{#if showCitations}
 					<div class="space-y-2">
 						{#each message.citations as cite, i}
 							<div
@@ -302,6 +336,7 @@
 							</div>
 						{/each}
 					</div>
+					{/if}
 				</div>
 			{/if}
 

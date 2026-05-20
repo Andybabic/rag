@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -18,7 +19,7 @@ import docx
 import fitz  # PyMuPDF
 import httpx
 from config import settings
-from models import MaxRetriesExceeded, ParsedDocument
+from models import DegenerateExtractionError, MaxRetriesExceeded, ParsedDocument
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +164,63 @@ class PDFHandler(BaseHandler):
 
     async def parse(self, file_bytes: bytes, filename: str) -> ParsedDocument:
         if settings.USE_MINERU:
+            # MinerU is authoritative for scanned/table PDFs. No PyMuPDF
+            # fallback: a silent PyMuPDF degrade on a scanned PDF produces
+            # an (almost) empty index without any error – exactly the bug
+            # that made a whole document set unsearchable. Fail loudly.
             try:
-                return await self._parse_with_mineru(file_bytes, filename)
+                parsed = await self._parse_with_mineru(file_bytes, filename)
             except Exception as e:
-                logger.warning("MineU fehlgeschlagen: %s – fallback auf PyMuPDF", e)
-        return await self._parse_with_pymupdf(file_bytes, filename)
+                logger.error(
+                    "MinerU-Extraktion fehlgeschlagen für %r: %s. Kein "
+                    "PyMuPDF-Fallback (USE_MINERU=true) – Ingest abgebrochen.",
+                    filename,
+                    e,
+                )
+                raise DegenerateExtractionError(
+                    f"MinerU extraction failed for {filename!r} and the "
+                    f"PyMuPDF fallback is intentionally disabled while "
+                    f"USE_MINERU=true: {e}"
+                ) from e
+        else:
+            parsed = await self._parse_with_pymupdf(file_bytes, filename)
+
+        self._guard_degenerate(parsed, filename)
+        return parsed
+
+    @staticmethod
+    def _guard_degenerate(parsed: ParsedDocument, filename: str) -> None:
+        """Reject a near-empty extraction instead of ingesting silence.
+
+        A scanned/image PDF parsed without OCR yields pages with no text;
+        ingesting that builds an empty, unsearchable index with zero
+        warning. Surface it as a hard, actionable error.
+        """
+        total_pages = (parsed.metadata or {}).get("total_pages") or 0
+        text_len = len((parsed.text or "").strip())
+        n_text_pages = len(parsed.pages or [])
+        if total_pages < 1:
+            return  # unknown page count – can't judge, don't false-positive
+        # Unambiguous degenerate signal: the PDF has pages but NOT ONE of
+        # them produced any text (every page was empty → scanned/no OCR).
+        # Kept strict so small-but-valid documents are never rejected.
+        too_little = n_text_pages == 0
+        # Larger PDFs: essentially no text across many pages (a scan that
+        # only yielded stray artifacts). Conservative per-page floor avoids
+        # false positives on short legitimate documents.
+        if total_pages >= 5 and text_len < 15 * total_pages:
+            too_little = True
+        if too_little:
+            parser = (parsed.metadata or {}).get("parser", "unknown")
+            msg = (
+                f"Extraktion von {filename!r} ergab fast keinen Text "
+                f"({text_len} Zeichen, {n_text_pages}/{total_pages} Seiten "
+                f"mit Text, Parser={parser}). Das PDF ist vermutlich "
+                f"gescannt/bildbasiert. Setze USE_MINERU=true (OCR + "
+                f"Tabellen), statt einen leeren Index zu erzeugen."
+            )
+            logger.error(msg)
+            raise DegenerateExtractionError(msg)
 
     # ── PyMuPDF (fallback) ───────────────────────────────────
 
@@ -200,79 +253,35 @@ class PDFHandler(BaseHandler):
             metadata={"format": "pdf", "total_pages": total_pages, "parser": "pymupdf"},
         )
 
-    # ── MineU (primary) ─────────────────────────────────────
+    # ── MinerU (mineru-api /file_parse) ──────────────────────
 
     async def _parse_with_mineru(
         self, file_bytes: bytes, filename: str
     ) -> ParsedDocument:
-        if settings.MINERU_PAGE_BY_PAGE:
-            return await self._parse_mineru_page_by_page(file_bytes, filename)
-        return await self._parse_mineru_single(file_bytes, filename)
+        """Parse via the mineru-api ``POST /file_parse`` endpoint.
 
-    async def _parse_mineru_single(
-        self, file_bytes: bytes, filename: str
-    ) -> ParsedDocument:
-        """Single MineU call – split resulting markdown by <!-- Page N --> comments."""
+        The endpoint is synchronous and paginates the whole document
+        itself, so we make a single call (no page-by-page loop) and
+        rebuild page-anchored text + images from the structured
+        ``content_list`` so downstream chunking keeps page metadata.
+        """
         result = await self._call_mineru(file_bytes, filename)
-        return self._mineru_response_to_parsed(result, filename)
-
-    async def _parse_mineru_page_by_page(
-        self, file_bytes: bytes, filename: str
-    ) -> ParsedDocument:
-        """One MineU call per page – gives the most accurate page boundaries."""
-        total_pages = self._count_pdf_pages(file_bytes)
-        pages: list[dict] = []
-        images: list[dict] = []
-        all_text: list[str] = []
-
-        for page_num in range(total_pages):
-            result = await self._call_mineru(
-                file_bytes, filename, start_page=page_num, end_page=page_num
-            )
-            markdown = result.get("markdown", "")
-            if markdown.strip():
-                pages.append({"page": page_num + 1, "text": markdown})
-                all_text.append(markdown)
-
-            for img in result.get("images", []):
-                images.append({
-                    "page": page_num + 1,
-                    "base64": img.get("base64", ""),
-                    "caption": img.get("caption", ""),
-                })
-
-        return ParsedDocument(
-            text="\n\n".join(all_text),
-            pages=pages,
-            images=images,
-            metadata={
-                "format": "pdf",
-                "total_pages": total_pages,
-                "parser": "mineru",
-                "mode": "page_by_page",
-            },
-        )
+        return self._mineru_response_to_parsed(result, file_bytes)
 
     async def _call_mineru(
-        self,
-        file_bytes: bytes,
-        filename: str,
-        start_page: int | None = None,
-        end_page: int | None = None,
+        self, file_bytes: bytes, filename: str
     ) -> dict[str, Any]:
-        """Call MineU API with retry + exponential backoff."""
+        """Call mineru-api with retry + exponential backoff."""
         last_exc: Exception | None = None
         for attempt in range(settings.MAX_RETRIES):
             try:
-                return await self._do_mineru_request(
-                    file_bytes, filename, start_page, end_page
-                )
+                return await self._do_mineru_request(file_bytes, filename)
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
                 last_exc = exc
                 if attempt < settings.MAX_RETRIES - 1:
                     wait = settings.RETRY_BACKOFF_BASE * (2**attempt)
                     logger.warning(
-                        "MineU attempt %d/%d failed: %s – retry in %ds",
+                        "MinerU attempt %d/%d failed: %s – retry in %ds",
                         attempt + 1,
                         settings.MAX_RETRIES,
                         exc,
@@ -284,96 +293,284 @@ class PDFHandler(BaseHandler):
         )
 
     async def _do_mineru_request(
-        self,
-        file_bytes: bytes,
-        filename: str,
-        start_page: int | None = None,
-        end_page: int | None = None,
+        self, file_bytes: bytes, filename: str
     ) -> dict[str, Any]:
-        """Execute a single HTTP request to MineU."""
-        data: dict[str, str] = {
-            "page_by_page": str(settings.MINERU_PAGE_BY_PAGE).lower(),
-        }
-        if start_page is not None:
-            data["start_page"] = str(start_page)
-        if end_page is not None:
-            data["end_page"] = str(end_page)
+        """Single POST to mineru-api /file_parse.
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        Form contract (from the server's OpenAPI): file field is ``files``
+        (list), plus form flags. ``backend=pipeline`` + table/formula on
+        matches the dashboard config that correctly OCR'd these scanned
+        regulation PDFs.
+        """
+        data = {
+            "backend": settings.MINERU_BACKEND,
+            "parse_method": "auto",
+            "formula_enable": "true",
+            "table_enable": "true",
+            "return_md": "true",
+            "return_content_list": "true",
+            "return_images": "true",
+        }
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.MINERU_TIMEOUT)
+        ) as client:
             response = await client.post(
-                f"{settings.MINERU_API_URL}/parse",
-                files={"file": (filename, file_bytes, "application/pdf")},
+                f"{settings.MINERU_API_URL}/file_parse",
+                files={"files": (filename, file_bytes, "application/pdf")},
                 data=data,
             )
             response.raise_for_status()
             return response.json()
 
-    # ── MineU response → ParsedDocument ──────────────────────
+    # ── MinerU /file_parse response → ParsedDocument ─────────
+
+    # MinerU emits tables as HTML. Embedding raw <td rowspan=…> markup
+    # produces vectors dominated by tag noise rather than cell content
+    # (observed: top retrieval scores collapsed to ~0.06 on verbatim
+    # queries). Converting to clean pipe-markdown keeps tabular structure
+    # while letting the embedding capture the actual words.
+    _TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+    _CELL_RE = re.compile(r"<t[hd][^>]*>(.*?)</t[hd]>", re.IGNORECASE | re.DOTALL)
+    _TAG_RE = re.compile(r"<[^>]+>")
+    _WS_RE = re.compile(r"\s+")
+    # Match a whole <table>…</table> block inside markdown so we can swap
+    # it for pipe markdown without touching the surrounding prose.
+    _TABLE_BLOCK_RE = re.compile(
+        r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL
+    )
+
+    @classmethod
+    def _convert_html_tables_in_md(cls, md: str) -> str:
+        """Replace every ``<table>…</table>`` block inside the markdown
+        with the pipe-table equivalent. md_content from MinerU embeds
+        tables as raw HTML; leaving them in tanks the chunks' alpha
+        ratio (Boilerplate-Filter drops them) and dilutes the
+        embedding with markup."""
+        if not md or "<table" not in md.lower():
+            return md
+        return cls._TABLE_BLOCK_RE.sub(
+            lambda m: cls._html_table_to_pipe(m.group(0)), md
+        )
+
+    @classmethod
+    def _html_table_to_pipe(cls, html: str) -> str:
+        """Convert an HTML <table> to a pipe-separated markdown table.
+
+        Falls back to plain stripped text if no <tr>/<td> are present."""
+        if not html or "<" not in html:
+            return cls._WS_RE.sub(" ", html).strip()
+        rows: list[str] = []
+        for row_html in cls._TR_RE.findall(html):
+            cells = [
+                cls._WS_RE.sub(" ", cls._TAG_RE.sub("", c)).strip()
+                for c in cls._CELL_RE.findall(row_html)
+            ]
+            if any(cells):
+                rows.append("| " + " | ".join(cells) + " |")
+        if rows:
+            return "\n".join(rows)
+        # Not a real table – strip tags and collapse whitespace.
+        return cls._WS_RE.sub(" ", cls._TAG_RE.sub("", html)).strip()
+
+    # MinerU's own page markers in md_content (e.g. "<!-- Page 14 -->").
+    # When present, we skip our best-effort injection: MinerU's markers
+    # are authoritative for every page, ours are only there as a
+    # fallback (and our snippet-match might miss exactly the pages
+    # MinerU already labelled).
+    _MINERU_PAGE_MARK_RE = re.compile(
+        r"<!--\s*Page\s+\d+\s*-->", re.IGNORECASE
+    )
+
+    @classmethod
+    def _inject_page_anchors(cls, md: str, content_list: list[dict]) -> str:
+        """Inject ``<!-- page:N -->`` anchors into ``md`` at best-effort
+        positions derived from ``content_list`` page transitions.
+
+        Each page's first content snippet is located in ``md`` via plain
+        substring search; an anchor is inserted immediately before it.
+        Pages whose snippet can't be located are silently skipped – the
+        previous page's anchor carries forward in chunk metadata, which
+        is degraded but harmless. Full ``md`` content is preserved
+        verbatim regardless.
+
+        Short-circuits when MinerU already emitted its own per-page
+        markers (``<!-- Page N -->``) – those are authoritative and the
+        chunker now recognises them natively."""
+        if not md:
+            return md
+        if cls._MINERU_PAGE_MARK_RE.search(md):
+            return md
+        if not content_list:
+            return md
+        first_per_page: list[tuple[int, str]] = []  # (page_num, snippet)
+        seen: set[int] = set()
+        for it in content_list:
+            try:
+                pidx = int(it.get("page_idx", 0))
+            except (TypeError, ValueError):
+                pidx = 0
+            if pidx in seen:
+                continue
+            snippet = ""
+            if it.get("text"):
+                snippet = str(it["text"]).strip()
+            if not snippet:
+                for k in ("table_caption", "img_caption", "image_caption"):
+                    v = it.get(k)
+                    if isinstance(v, list) and v:
+                        snippet = str(v[0]).strip()
+                        break
+                    if v:
+                        snippet = str(v).strip()
+                        break
+            snippet = snippet[:60].strip()
+            if snippet:
+                first_per_page.append((pidx + 1, snippet))
+                seen.add(pidx)
+        if not first_per_page:
+            return md
+        out: list[str] = []
+        cursor = 0
+        for page_num, snippet in first_per_page:
+            idx = md.find(snippet, cursor)
+            if idx < 0:
+                continue
+            if idx > cursor:
+                out.append(md[cursor:idx])
+            out.append(f"<!-- page:{page_num} -->\n")
+            cursor = idx
+        if cursor < len(md):
+            out.append(md[cursor:])
+        return "".join(out).lstrip()
+
+    @classmethod
+    def _content_item_text(cls, item: dict[str, Any]) -> str:
+        """Render one content_list block to searchable text.
+
+        Tables become pipe-markdown (no HTML noise). Captions and prose
+        text are joined verbatim."""
+        parts: list[str] = []
+        if item.get("text"):
+            parts.append(str(item["text"]))
+        for key in ("table_caption", "img_caption", "image_caption"):
+            val = item.get(key)
+            if isinstance(val, list):
+                parts.extend(str(v) for v in val if v)
+            elif val:
+                parts.append(str(val))
+        if item.get("table_body"):
+            parts.append(cls._html_table_to_pipe(str(item["table_body"])))
+        return "\n".join(p for p in parts if p).strip()
 
     def _mineru_response_to_parsed(
-        self, result: dict[str, Any], filename: str
+        self, result: dict[str, Any], file_bytes: bytes
     ) -> ParsedDocument:
-        """Convert a single-call MineU response to ParsedDocument.
+        """Convert the mineru-api /file_parse JSON to a ParsedDocument.
 
-        Splits the markdown by <!-- Page N --> comments if present.
+        Response shape (from mineru-api source):
+            {"backend":..., "version":...,
+             "results": {"<stem>": {"md_content": str,
+                                     "content_list": [...],
+                                     "images": {name: dataURI}}}}
         """
-        markdown = result.get("markdown", "")
-        raw_images = result.get("images", [])
+        results = result.get("results")
+        entry: dict[str, Any] = {}
+        if isinstance(results, dict) and results:
+            entry = next(iter(results.values())) or {}
+        md_content = (entry.get("md_content") or "").strip()
+        # mineru-api returns these fields as the RAW file contents (strings),
+        # not parsed JSON – content_list is the text of _content_list.json.
+        content_list = entry.get("content_list") or []
+        if isinstance(content_list, str):
+            try:
+                content_list = json.loads(content_list)
+            except (ValueError, TypeError):
+                content_list = []
+        if not isinstance(content_list, list):
+            content_list = []
+        images_map = entry.get("images") or {}
+        if isinstance(images_map, str):
+            try:
+                images_map = json.loads(images_map)
+            except (ValueError, TypeError):
+                images_map = {}
+        if not isinstance(images_map, dict):
+            images_map = {}
 
-        images = [
-            {
-                "page": img.get("page", 1),
-                "base64": img.get("base64", ""),
-                "caption": img.get("caption", ""),
-            }
-            for img in raw_images
-        ]
+        # Per-page text from content_list – fed to vision/alt-text as
+        # "what is on page N" context, and used as a last-resort fallback.
+        by_page: dict[int, list[str]] = {}
+        for it in content_list:
+            try:
+                pidx = int(it.get("page_idx", 0))
+            except (TypeError, ValueError):
+                pidx = 0
+            txt = self._content_item_text(it)
+            if txt:
+                by_page.setdefault(pidx, []).append(txt)
+        pages: list[dict] = []
+        for pidx in sorted(by_page):
+            ptxt = "\n\n".join(by_page[pidx]).strip()
+            if ptxt:
+                pages.append({"page": pidx + 1, "text": ptxt})
 
-        page_splits = self._split_by_page_comments(markdown)
-        if page_splits:
-            total_pages = max(p["page"] for p in page_splits)
-            full_text = "\n\n".join(p["text"] for p in page_splits)
-            return ParsedDocument(
-                text=full_text,
-                pages=page_splits,
-                images=images,
-                metadata={
-                    "format": "pdf",
-                    "total_pages": total_pages,
-                    "parser": "mineru",
-                    "mode": "single",
-                },
+        # Primary text: prefer ``md_content`` (the full, dashboard-proven
+        # markdown) over a content_list reconstruction. Rebuilding from
+        # content_list dropped ~80 % of the document content on the live
+        # corpus (9 chunks for a 23-page PDF) because content_list is
+        # structurally sparse vs. md_content. Convert in-markdown HTML
+        # tables to pipe so chunks aren't dominated by tag noise (which
+        # also drops the alpha ratio below the boilerplate threshold).
+        # Inject page anchors at best-effort positions so the chunker
+        # keeps page metadata.
+        if md_content:
+            md_content = self._convert_html_tables_in_md(md_content)
+            text = self._inject_page_anchors(md_content, content_list)
+        elif pages:
+            text = "\n\n".join(
+                f"<!-- page:{p['page']} -->\n{p['text']}" for p in pages
             )
+        else:
+            text = ""
 
-        # No page comments – treat as single page
+        if not pages and md_content:
+            pages = [{"page": 1, "text": md_content}]
+
+        # Images: map filename → page via content_list, strip data-URI prefix
+        # so the value stays raw base64 (the existing alt-text contract).
+        img_page: dict[str, int] = {}
+        for it in content_list:
+            p = it.get("img_path") or ""
+            if p:
+                img_page[p.rsplit("/", 1)[-1]] = int(it.get("page_idx", 0)) + 1
+        images: list[dict] = []
+        for name, data_uri in images_map.items():
+            b64 = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
+            images.append({
+                "page": img_page.get(name, 1),
+                "base64": b64,
+                "caption": name,
+            })
+
+        if pages:
+            total_pages = max(p["page"] for p in pages)
+        else:
+            try:
+                total_pages = self._count_pdf_pages(file_bytes)
+            except Exception:  # noqa: BLE001
+                total_pages = 0
+
         return ParsedDocument(
-            text=markdown,
-            pages=[{"page": 1, "text": markdown}] if markdown.strip() else [],
+            text=text,
+            pages=pages,
             images=images,
             metadata={
                 "format": "pdf",
-                "total_pages": 1,
+                "total_pages": total_pages,
                 "parser": "mineru",
-                "mode": "single",
+                "backend": settings.MINERU_BACKEND,
             },
         )
-
-    @staticmethod
-    def _split_by_page_comments(markdown: str) -> list[dict] | None:
-        """Split markdown on <!-- Page N --> markers."""
-        matches = list(_PAGE_COMMENT_RE.finditer(markdown))
-        if not matches:
-            return None
-
-        pages: list[dict] = []
-        for i, match in enumerate(matches):
-            page_num = int(match.group(1))
-            start = match.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(markdown)
-            text = markdown[start:end].strip()
-            if text:
-                pages.append({"page": page_num, "text": text})
-        return pages or None
 
     @staticmethod
     def _count_pdf_pages(file_bytes: bytes) -> int:

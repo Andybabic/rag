@@ -20,11 +20,14 @@ import asyncio
 import json
 import logging
 import re
+import time
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from core.agent import run_agent
-from core.citations import map_citations
+from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
+from shared.usecase_config import resolve_config
 from core.roles import (
     DEFAULT_ROLE,
     VALID_ROLES,
@@ -627,6 +630,7 @@ async def run_manager(
                             each sub-agent's steps + synthesizer event
       global_chunks       – deduped chunk pool used for citation mapping
     """
+    _t0 = time.perf_counter()
     if on_event:
         await on_event({"type": "started", "stage": "manager"})
 
@@ -695,6 +699,9 @@ async def run_manager(
         )
 
     citations = map_citations(final_answer, global_chunks)
+    # Drop any [n] the synthesizer invented beyond the chunk pool so every
+    # citation number shown in the answer actually opens a document.
+    final_answer = strip_unresolved_refs(final_answer, citations)
     searched: set[str] = set()
     for sub in subagents:
         searched.update(sub.get("searched_collections") or [])
@@ -728,6 +735,22 @@ async def run_manager(
         s.get("sufficient") for s in subagents
     )
 
+    # Audit block – the actual model/provider/tuning used and server-side
+    # timing, so an exported protocol is genuinely reproducible.
+    try:
+        _cfg = await resolve_config(use_case)
+        _audit = {
+            "model": _cfg.llm_model,
+            "llm_provider": _cfg.chat_provider,
+            "temperature": _cfg.temperature,
+            "max_tokens": _cfg.max_tokens,
+        }
+    except Exception as exc:  # never let auditing break a successful answer
+        logger.warning(f"audit config resolve failed: {exc}")
+        _audit = {}
+    _audit["generated_at"] = datetime.now(timezone.utc).isoformat()
+    _audit["processing_ms"] = round((time.perf_counter() - _t0) * 1000)
+
     result = {
         "answer": final_answer,
         "citations": citations,
@@ -739,6 +762,7 @@ async def run_manager(
         "system_prompt": use_case_prompt,
         "enriched_query": query,
         "use_case_extras": {},
+        "audit": _audit,
         "sufficient": sufficient and compliance["verdict"] != "REFUSE",
         "session_id": session_id,
         "use_case": use_case,

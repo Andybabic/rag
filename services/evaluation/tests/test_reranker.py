@@ -49,20 +49,28 @@ def test_rerank_empty_input(monkeypatch):
     assert rerank_chunks("q", [], top_n=5) == []
 
 
-def test_rerank_label_thresholds(monkeypatch):
+def test_fallback_labels_are_unranked(monkeypatch):
+    """Without the cross-encoder the fallback must NOT fake cross-encoder
+    relevance labels (their thresholds are tuned for logits, not the tiny
+    cosine/RRF scores here) – that mislabelling fooled the agent into
+    trusting near-zero matches. Fallback must report 'unranked'."""
     _force_fallback(monkeypatch)
-    # Fallback uses incoming rerank_score if present, else score.
     chunks = [
         {"chunk_id": "hi", "metadata": {}, "rerank_score": 5.0, "score": 0.0},
-        {"chunk_id": "ok", "metadata": {}, "rerank_score": 1.0, "score": 0.0},
-        {"chunk_id": "meh", "metadata": {}, "rerank_score": -1.0, "score": 0.0},
-        {"chunk_id": "no", "metadata": {}, "rerank_score": -5.0, "score": 0.0},
+        {"chunk_id": "lo", "metadata": {}, "rerank_score": 0.0003, "score": 0.0},
     ]
-    out = rerank_chunks("q", chunks, top_n=4)
-    labels = {c["chunk_id"]: c["relevance_label"] for c in out}
-    assert labels == {
-        "hi": "highly_relevant",
-        "ok": "relevant",
-        "meh": "marginally_relevant",
-        "no": "not_relevant",
-    }
+    out = rerank_chunks("q", chunks, top_n=2)
+    assert {c["relevance_label"] for c in out} == {"unranked"}
+    # Scores are still passed through for ordering/inspection.
+    assert out[0]["rerank_score"] == 5.0
+
+
+def test_relevance_label_thresholds():
+    """The threshold mapping itself is still used by the real cross-encoder
+    path and must keep its logit-based boundaries."""
+    from core.reranker import _relevance_label
+
+    assert _relevance_label(5.0) == "highly_relevant"
+    assert _relevance_label(1.0) == "relevant"
+    assert _relevance_label(-1.0) == "marginally_relevant"
+    assert _relevance_label(-5.0) == "not_relevant"

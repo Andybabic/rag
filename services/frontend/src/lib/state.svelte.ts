@@ -78,9 +78,24 @@ export interface ComplianceTrace {
 	detail?: string;
 }
 
+export interface AuditInfo {
+	model?: string | null;
+	llm_provider?: string;
+	temperature?: number | null;
+	max_tokens?: number | null;
+	generated_at?: string;
+	processing_ms?: number;
+}
+
 export interface Message {
 	role: 'user' | 'assistant';
 	text: string;
+	/** ISO timestamp set client-side when the message is created. */
+	createdAt?: string;
+	/** Client-perceived round-trip duration for the assistant reply, ms. */
+	durationMs?: number;
+	/** Server-reported model/provider/timing audit block. */
+	audit?: AuditInfo;
 	citations?: Citation[];
 	agentSteps?: AgentStep[];
 	managerPlan?: ManagerPlan;

@@ -254,7 +254,7 @@ class TestWienerLinien:
                 query="Was bedeutet Paragraph 34?",
                 use_case="wiener_linien",
                 role="trainee",
-                collection="wl_fahrzeug",
+                collection="wl_default",
             )
         assert result["answer"], "Answer is empty"
         assert len(result["agent_steps"]) >= 1

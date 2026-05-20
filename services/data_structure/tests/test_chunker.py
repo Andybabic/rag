@@ -51,10 +51,45 @@ def test_page_anchors_single_page():
     assert "<!-- page:" not in chunks[0].text
 
 
+def test_small_section_between_larger_ones_survives():
+    """Regression: §11 (small page) was lost when the whole-document
+    SentenceSplitter merged it into neighbouring sections. Page-based
+    chunking must guarantee a chunk per substantive page."""
+    md = (
+        "<!-- Page 12 -->\n# § 9 Warnsignale\n"
+        + ("Warnsignale werden gegeben um Personen zu warnen. " * 60)
+        + "\n\n<!-- Page 14 -->\n# § 11 Ersatzsignal\n"
+        "(1) Allgemeines\n"
+        "Blinkt am Armaturenpult die weiße Drucktaste „Ersatzsignal\", "
+        "so hat das Fahrpersonal bei Stillstand des Zuges durch Betätigen "
+        "der Drucktaste das Ersatzsignal zu quittieren und die Fahrt "
+        "mit Handfahrt fortzusetzen.\n\n"
+        "(2) Signalbild\n"
+        "| Ersatzsignal | Ein weißes, blinkendes Licht am Armaturenpult | "
+        "Vorbeifahrt gestattet |\n"
+        "| Fa 20 |  | Beachtung der Weichenstellung |\n"
+        "\n<!-- Page 15 -->\n# § 12 Fahrterlaubnissignal\n"
+        + ("Fahrterlaubnissignale sind weitere Lichtsignale. " * 60)
+    )
+    chunks = _chunk(md)
+    pages_seen = {c.metadata.page for c in chunks}
+    assert 14 in pages_seen, f"§11 page (14) missing from chunks: {pages_seen}"
+    # Verify §11 content actually survives in a chunk text.
+    assert any(
+        "Ersatzsignal" in c.text and "Armaturenpult" in c.text
+        for c in chunks
+    ), "§11 content lost despite page being present"
+
+
 def test_page_anchors_multi_page():
     pages = []
     for i in range(1, 6):
-        pages.append(f"<!-- page:{i} -->\nThis is content on page {i}. " * 5)
+        # One marker per page, content repeated 5x – the old test
+        # accidentally repeated the marker too, which worked under the
+        # whole-document splitter but creates 25 tiny segments under the
+        # page-based chunker.
+        content = f"This is content on page {i}. " * 5
+        pages.append(f"<!-- page:{i} -->\n{content}")
     md = "\n\n".join(pages)
     chunks = _chunk(md, chunk_size=100, chunk_overlap=10)
 

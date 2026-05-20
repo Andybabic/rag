@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.qdrant import (
+    EmbeddingModelMismatchError,
     QdrantUnavailableError,
     cross_search,
     delete_collection,
@@ -34,6 +35,7 @@ async def upsert(body: UpsertRequest, request: Request):
         count = upsert_vectors(
             collection=body.collection,
             embeddings=[e.model_dump() for e in body.embeddings],
+            embed_model=body.embed_model,
         )
     except QdrantUnavailableError as exc:
         return _qdrant_error_response(exc, request_id)
@@ -55,6 +57,7 @@ async def search(body: SearchRequest, request: Request):
             vector=body.vector,
             top_k=body.top_k,
             filters=body.filters,
+            embed_model=body.embed_model,
         )
     except ValueError as exc:
         return JSONResponse(
@@ -62,6 +65,19 @@ async def search(body: SearchRequest, request: Request):
             content={
                 "error": "collection_not_found",
                 "detail": str(exc),
+                "request_id": request_id,
+                "service": "vectordb-service",
+            },
+        )
+    except EmbeddingModelMismatchError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "embedding_model_mismatch",
+                "detail": str(exc),
+                "collection": exc.collection,
+                "index_model": exc.index_model,
+                "query_model": exc.query_model,
                 "request_id": request_id,
                 "service": "vectordb-service",
             },

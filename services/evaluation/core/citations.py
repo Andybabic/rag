@@ -41,3 +41,34 @@ def map_citations(answer: str, chunks: list[dict]) -> list[dict]:
         })
 
     return citations
+
+
+# Cleanups applied after removing an unresolved [n]: collapse the gap so the
+# sentence stays readable ("gemäß  sofort" → "gemäß sofort", "(Quelle )" → "").
+_EMPTY_PAREN_RE = re.compile(r"\(\s*(?:Quelle|Quellen|siehe|vgl\.?)?\s*\)")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?])")
+_MULTISPACE_RE = re.compile(r"[ \t]{2,}")
+
+
+def strip_unresolved_refs(answer: str, citations: list[dict]) -> str:
+    """Remove ``[n]`` markers that map to no source.
+
+    A small synthesizer model sometimes cites a pool index that does not
+    exist (e.g. ``[14]`` when only 9 chunks were retrieved). Such a number
+    renders as a clickable badge that leads nowhere. Dropping it keeps the
+    rule "every citation number in the answer opens a real document".
+    """
+    valid = {
+        int(c["ref"].strip("[]"))
+        for c in citations
+        if c.get("ref", "").strip("[]").isdigit()
+    }
+    cleaned = _REF_PATTERN.sub(
+        lambda m: m.group(0) if int(m.group(1)) in valid else "", answer
+    )
+    if cleaned == answer:
+        return answer
+    cleaned = _EMPTY_PAREN_RE.sub("", cleaned)
+    cleaned = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", cleaned)
+    cleaned = _MULTISPACE_RE.sub(" ", cleaned)
+    return cleaned.strip()

@@ -89,7 +89,9 @@ export const POST: RequestHandler = async ({ request }) => {
 	const embeddings = embedData.embeddings as Array<{
 		chunk_id?: string;
 		vector: number[];
+		model?: string;
 	}>;
+	const embedModel = embeddings[0]?.model ?? null;
 
 	// 3. Upsert into a single per-use-case collection. Use the same fallback
 	//    naming as the standard pipeline.
@@ -110,7 +112,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	const upsertResp = await fetch(`${SERVICES.vectordb}/v1/upsert`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ collection, embeddings: upsertItems })
+		body: JSON.stringify({ collection, embeddings: upsertItems, embed_model: embedModel })
 	});
 	if (!upsertResp.ok) {
 		return json(

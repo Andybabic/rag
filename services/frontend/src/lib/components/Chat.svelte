@@ -7,11 +7,15 @@
 		type SubAgentTrace,
 		type ManagerPlan,
 		type SynthesizerTrace,
-		type ComplianceTrace
+		type ComplianceTrace,
+		type AuditInfo
 	} from '$lib/state.svelte';
 	import { streamQuery } from '$lib/api';
 	import { getUseCaseBySlug } from '$lib/use-cases';
 	import ChatMessage from './ChatMessage.svelte';
+
+	const APP_VERSION = __APP_VERSION__;
+	const EXPORT_SCHEMA_VERSION = '2.0';
 
 	let input = $state('');
 	let chatContainer: HTMLDivElement | undefined = $state();
@@ -123,8 +127,9 @@
 			}));
 
 		input = '';
-		app.messages.push({ role: 'user', text });
+		app.messages.push({ role: 'user', text, createdAt: new Date().toISOString() });
 		app.isLoading = true;
+		const startedAt = performance.now();
 
 		// Push an empty assistant message immediately and fill it in as events
 		// arrive. This keeps every step visible permanently instead of flashing
@@ -133,6 +138,7 @@
 		app.messages.push({
 			role: 'assistant',
 			text: '',
+			createdAt: new Date().toISOString(),
 			agentSteps: [],
 			subAgents: [],
 			streaming: true,
@@ -285,6 +291,8 @@
 				enrichedQuery: (result.enriched_query as string) ?? '',
 				requestId: (result.request_id as string) ?? '',
 				sufficient: result.sufficient as boolean | undefined,
+				audit: (result.audit as AuditInfo | undefined) ?? undefined,
+				durationMs: Math.round(performance.now() - startedAt),
 				streaming: false,
 				currentPhase: undefined
 			});
@@ -305,24 +313,105 @@
 		}
 	}
 
+	// Recursively drop null/undefined and empty arrays/objects so the
+	// protocol carries only meaningful data (e.g. no `subagent_id: null`,
+	// no `error: null`, no empty `args: {}`).
+	function clean<T>(value: T): T {
+		if (Array.isArray(value)) {
+			return value.map(clean).filter((v) => v !== undefined) as T;
+		}
+		if (value && typeof value === 'object') {
+			const out: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(value)) {
+				const cv = clean(v);
+				if (cv === undefined || cv === null) continue;
+				if (Array.isArray(cv) && cv.length === 0) continue;
+				if (typeof cv === 'object' && !Array.isArray(cv) && Object.keys(cv).length === 0)
+					continue;
+				out[k] = cv;
+			}
+			return out as T;
+		}
+		return value;
+	}
+
+	// One ReAct step, trimmed for the protocol: the parsed structured fields
+	// fully represent the step, so the raw `llm_response` (a verbatim repeat
+	// of thought/action/args) is dropped. Inside a sub-agent the
+	// subagent_id/role are implied by the parent and removed as noise.
+	function exportStep(s: AgentStep, nested: boolean) {
+		return clean({
+			step: s.step,
+			thought: s.thought,
+			action: s.action,
+			args: s.args,
+			observation: s.observation,
+			chunks: s.chunks,
+			...(nested ? {} : { subagent_id: s.subagent_id, subagent_role: s.subagent_role })
+		});
+	}
+
 	function exportChat() {
-		const exportData = {
+		// Traceable protocol of the entire conversation. Deduplicated: the
+		// flattened top-level `agent_steps` mirror is omitted whenever
+		// sub-agents are present (it only duplicates their steps plus the
+		// manager/synthesizer events, which are already in `manager_plan`
+		// and `synthesizer`). Retrieved chunks are kept once, at the step
+		// where retrieval happened, not repeated at the sub-agent level.
+		const exportData = clean({
+			schema_version: EXPORT_SCHEMA_VERSION,
+			app_version: APP_VERSION,
 			use_case: useCase,
 			session_id: app.sessionId,
+			role: app.role,
 			exported_at: new Date().toISOString(),
-			messages: app.messages.map((m) => ({
-				role: m.role,
-				text: m.text,
-				...(m.citations?.length ? { citations: m.citations } : {}),
-				...(m.agentSteps?.length ? { agent_steps: m.agentSteps } : {}),
-				...(m.searchedCollections?.length
-					? { searched_collections: m.searchedCollections }
-					: {}),
-				...(m.requestId ? { request_id: m.requestId } : {}),
-				...(m.sufficient !== undefined ? { sufficient: m.sufficient } : {}),
-				...(m.error ? { error: true } : {})
-			}))
-		};
+			message_count: app.messages.length,
+			messages: app.messages.map((m, i) => {
+				const hasSubAgents = (m.subAgents?.length ?? 0) > 0;
+				return clean({
+					index: i,
+					role: m.role,
+					created_at: m.createdAt,
+					text: m.text,
+					...(m.role === 'assistant' && m.durationMs !== undefined
+						? { duration_ms: m.durationMs }
+						: {}),
+					audit: m.audit,
+					enriched_query:
+						m.enrichedQuery && m.enrichedQuery !== m.text ? m.enrichedQuery : undefined,
+					citations: m.citations,
+					manager_plan: m.managerPlan,
+					sub_agents: hasSubAgents
+						? m.subAgents!.map((s) => ({
+								subagent_id: s.subagent_id,
+								role: s.role,
+								role_label: s.role_label,
+								sub_query: s.sub_query,
+								focus: s.focus,
+								status: s.status,
+								sufficient: s.sufficient,
+								searched_collections: s.searched_collections,
+								error: s.error,
+								answer: s.answer,
+								agent_steps: (s.agent_steps ?? []).map((st) => exportStep(st, true))
+							}))
+						: undefined,
+					// Single-agent fallback: only when there are no sub-agents,
+					// otherwise this is a redundant flattened mirror.
+					agent_steps:
+						!hasSubAgents && m.agentSteps?.length
+							? m.agentSteps.map((st) => exportStep(st, false))
+							: undefined,
+					compliance: m.compliance,
+					synthesizer: m.synthesizer,
+					searched_collections: m.searchedCollections,
+					system_prompt: m.systemPrompt,
+					request_id: m.requestId,
+					sufficient: m.sufficient,
+					error: m.error ? true : undefined
+				});
+			})
+		});
 
 		const blob = new Blob([JSON.stringify(exportData, null, 2)], {
 			type: 'application/json'
@@ -336,7 +425,7 @@
 	}
 </script>
 
-<main class="flex h-full flex-1 flex-col bg-gray-50">
+<main class="relative flex h-full flex-1 flex-col bg-gray-50">
 	<!-- Messages -->
 	<div class="flex-1 space-y-4 overflow-y-auto p-6" bind:this={chatContainer}>
 		{#if app.messages.length === 0}
@@ -356,6 +445,24 @@
 
 	</div>
 
+	<!-- Export button, bottom right of the chat area -->
+	{#if app.messages.length > 0}
+		<button
+			onclick={exportChat}
+			class="absolute bottom-24 right-6 z-10 flex items-center gap-2 rounded-full bg-gray-800 px-4 py-2.5 text-sm font-medium text-white shadow-lg transition-colors hover:bg-gray-900"
+			title="Gesamten Chat inkl. aller Schritte als JSON-Protokoll exportieren"
+		>
+			<svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+				<path
+					fill-rule="evenodd"
+					d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+					clip-rule="evenodd"
+				/>
+			</svg>
+			Chat als JSON exportieren
+		</button>
+	{/if}
+
 	<!-- Input -->
 	<div class="border-t border-gray-200 bg-white p-4">
 		<div class="mx-auto flex max-w-3xl gap-3">
@@ -367,21 +474,6 @@
 				class="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
 				disabled={app.isLoading}
 			></textarea>
-			{#if app.messages.length > 0}
-				<button
-					onclick={exportChat}
-					class="rounded-xl border border-gray-300 px-3 py-3 text-gray-400 transition-colors hover:border-gray-400 hover:text-gray-600"
-					title="Chat als JSON exportieren"
-				>
-					<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-						<path
-							fill-rule="evenodd"
-							d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
-							clip-rule="evenodd"
-						/>
-					</svg>
-				</button>
-			{/if}
 			<button
 				onclick={send}
 				disabled={app.isLoading || !input.trim()}

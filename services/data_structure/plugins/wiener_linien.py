@@ -13,30 +13,9 @@ from shared.models import ChunkMetadata
 
 from plugins.base import BasePlugin
 
-TOPIC_KEYWORDS: dict[str, list[str]] = {
-    "fahrzeug": ["fahrzeug", "triebwagen", "bremse", "antrieb", "pantograph"],
-    "strecke": ["strecke", "gleis", "weiche", "signal", "bahnsteig"],
-    "betrieb": ["betrieb", "störung", "vorfall", "fahrplan", "disposition"],
-    "recht": ["gesetz", "verordnung", "vorschrift", "§", "abs.", "bgbl"],
-    "pruefung": ["prüfung", "frage", "aufgabe", "lernziel", "kompetenz"],
-}
-
 LAW_PATTERN = re.compile(r"§\s*\d+\s*(Abs\.\s*\d+)?\s*\w+")
 
 _TECHNICAL_TERMS = {"frequenz", "impedanz", "nennspannung"}
-
-
-def _detect_topic(text: str) -> str:
-    """Topic with highest keyword hit count wins."""
-    lower = text.lower()
-    best_topic = "allgemein"
-    best_count = 0
-    for topic, keywords in TOPIC_KEYWORDS.items():
-        count = sum(1 for kw in keywords if kw in lower)
-        if count > best_count:
-            best_count = count
-            best_topic = topic
-    return best_topic
 
 
 def _estimate_difficulty(text: str, has_law_ref: bool) -> int:
@@ -56,7 +35,15 @@ def _estimate_difficulty(text: str, has_law_ref: bool) -> int:
 
 
 class WienerLinienPlugin(BasePlugin):
-    """Rollenbasierter Wissensassistent für Wiener Linien."""
+    """Rollenbasierter Wissensassistent für Wiener Linien.
+
+    Topic-basierte Collection-Aufteilung wurde entfernt: das naive
+    Keyword-Matching legte z. B. §11 Ersatzsignal (Fahrzeug-Inhalt
+    mit „Drucktaste am Armaturenpult") in ``wl_strecke``, weil das
+    Wort „Signal"/„Bahnsteig" mehr Treffer hatte als „bremse". Folge:
+    suchte der Agent in ``wl_fahrzeug``, blieb §11 unauffindbar.
+    Alle Chunks landen jetzt in einer einzigen ``wl_default``-Collection.
+    """
 
     use_case_id = "wiener_linien"
 
@@ -68,28 +55,20 @@ class WienerLinienPlugin(BasePlugin):
     ) -> ChunkMetadata:
         law_match = LAW_PATTERN.search(text)
         law_ref = law_match.group(0).strip() if law_match else ""
-        topic = _detect_topic(text)
         has_law_ref = bool(law_ref)
 
         base.extra = {
             **raw_meta,
             "audience": raw_meta.get("audience", "both"),
-            "topic": topic,
             "difficulty": _estimate_difficulty(text, has_law_ref),
             "law_ref": law_ref,
-            "criticality": "high" if has_law_ref or topic == "betrieb" else "medium",
+            "criticality": "high" if has_law_ref else "medium",
         }
-        base.collection = f"wl_{topic}"
+        # Single collection per use case – no topic-based routing.
         return base
 
     def get_collections(self) -> list[str]:
-        return [
-            "wl_fahrzeug",
-            "wl_strecke",
-            "wl_betrieb",
-            "wl_recht",
-            "wl_pruefung",
-        ]
+        return ["wl_default"]
 
     def get_system_prompt(self, role: str = "default") -> str:
         if role == "trainee":

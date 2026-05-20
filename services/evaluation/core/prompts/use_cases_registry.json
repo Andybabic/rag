@@ -58,6 +58,6 @@
       "LOOKUP_SOURCES",
       "FINAL_ANSWER"
     ],
-    "default_collection": "wl_fahrzeug"
+    "default_collection": "wl_default"
   }
 }

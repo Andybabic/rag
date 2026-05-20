@@ -50,3 +50,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(status="ok", service=SERVICE_NAME, version=VERSION)
+
+
+@app.get("/health/reranker")
+async def health_reranker():
+    """Reranker diagnostic – check whether the cross-encoder is actually
+    active. ``degraded: true`` means retrieval runs on hybrid-fusion only."""
+    from core.reranker import reranker_status
+
+    return reranker_status()

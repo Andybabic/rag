@@ -48,8 +48,16 @@ def _load_model_blocking() -> None:
     except Exception as exc:  # noqa: BLE001
         with _model_lock:
             _model_load_failed = True
-        logger.warning(
-            "Reranker unavailable (%s); using score-based fallback", exc
+        # ERROR, not WARNING: without the cross-encoder the system runs
+        # permanently in a much weaker retrieval mode. This must be visible.
+        logger.error(
+            "Reranker FAILED to load (%s): %s. Retrieval quality is degraded "
+            "(no cross-encoder reranking). Ensure 'sentence-transformers' + "
+            "torch are installed and the model '%s' is reachable/cached "
+            "(set RERANKER_MODEL or pre-download into the image/volume).",
+            type(exc).__name__,
+            exc,
+            _RERANKER_MODEL_NAME,
         )
     finally:
         with _model_lock:
@@ -74,6 +82,29 @@ def preload_model() -> None:
     threading.Thread(
         target=_load_model_blocking, name="reranker-loader", daemon=True
     ).start()
+
+
+def reranker_status() -> dict:
+    """Current reranker state – surfaced via the health endpoint so the
+    degraded mode is verifiable without log access."""
+    with _model_lock:
+        if not _RERANKER_ENABLED:
+            state = "disabled"
+        elif _model is not None:
+            state = "ready"
+        elif _model_load_failed:
+            state = "failed"
+        elif _model_loading:
+            state = "loading"
+        else:
+            state = "not_started"
+    return {
+        "enabled": _RERANKER_ENABLED,
+        "model": _RERANKER_MODEL_NAME,
+        "state": state,
+        # When not "ready", retrieval falls back to hybrid-fusion order only.
+        "degraded": state not in ("ready", "disabled"),
+    }
 
 
 def _get_model():
@@ -117,7 +148,10 @@ def rerank_chunks(
 
     model = _get_model()
     if model is None:
-        # Fallback: keep the incoming order, re-shape fields
+        # Fallback: keep the incoming (hybrid-fused) order. Do NOT pretend
+        # these are cross-encoder scores – the _relevance_label thresholds
+        # are tuned for logits in [-10,10], not tiny cosine/RRF values, and
+        # would mislabel near-zero matches as "relevant", fooling the agent.
         out = []
         for c in chunks[:top_n]:
             score = c.get("rerank_score", c.get("score", 0.0))
@@ -126,7 +160,7 @@ def rerank_chunks(
                 or (c.get("metadata") or {}).get("chunk_id", ""),
                 "original_score": c.get("original_score", c.get("score", 0.0)),
                 "rerank_score": score,
-                "relevance_label": _relevance_label(score),
+                "relevance_label": "unranked",
                 "metadata": c.get("metadata", {}),
             })
         return out

@@ -19,3 +19,11 @@ class ParsedDocument:
 
 class MaxRetriesExceeded(Exception):
     """Raised when all retry attempts for a MineU call have been exhausted."""
+
+
+class DegenerateExtractionError(Exception):
+    """Raised when a PDF yielded (almost) no extractable text.
+
+    Typically a scanned / image-based PDF parsed without OCR. Failing
+    loudly here prevents a silent near-empty ingest (the failure mode that
+    made an entire document set unsearchable without any error)."""

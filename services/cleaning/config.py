@@ -4,7 +4,14 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     USE_MINERU: bool = False
     MINERU_API_URL: str = "http://mineru:8000"
-    MINERU_PAGE_BY_PAGE: bool = True
+    MINERU_PAGE_BY_PAGE: bool = True  # deprecated: mineru-api paginates itself
+    # mineru-api /file_parse backend. "pipeline" = traditional multi-model
+    # pipeline (OCR + table recognition, multilingual) – matches the proven
+    # dashboard config for scanned German regulation PDFs.
+    MINERU_BACKEND: str = "pipeline"
+    # Synchronous /file_parse on a scanned multi-page PDF (OCR + tables) can
+    # take minutes – generous per-request timeout, not the 120s default.
+    MINERU_TIMEOUT: float = 900.0
 
     BATCH_PARSE_WORKERS: int = 2
     BATCH_CHUNK_WORKERS: int = 4
