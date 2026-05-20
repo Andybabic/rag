@@ -360,7 +360,7 @@ OLLAMA_BASE_URL=http://<IP_SERVER_B>:11434
 
 # Optional: Anpassen
 LOG_LEVEL=INFO
-DEFAULT_CHUNK_SIZE=512
+DEFAULT_CHUNK_SIZE=256   # in Tokens (SentenceSplitter), ≈ 1000 Zeichen DE
 ```
 
 Starten:
@@ -521,8 +521,8 @@ Frontend oeffnen: **http://\<IP_SERVER_C\>:3000**
 | `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Ollama-Modell fuer Embeddings |
 | `EMBEDDING_DIMENSION` | `768` | Vektordimension (muss zum Modell passen) |
 | `EMBED_BATCH_SIZE` | `50` | Max. Chunks pro Embed-Batch |
-| `DEFAULT_CHUNK_SIZE` | `512` | Chunk-Groesse in Zeichen |
-| `DEFAULT_CHUNK_OVERLAP` | `50` | Ueberlappung in Zeichen |
+| `DEFAULT_CHUNK_SIZE` | `256` | Chunk-Groesse in **Tokens** (SentenceSplitter; ≈ 1000 Zeichen DE) |
+| `DEFAULT_CHUNK_OVERLAP` | `32` | Ueberlappung in **Tokens** (≈ 130 Zeichen DE) |
 | `AGENT_MAX_STEPS` | `5` | Max. Schritte im ReAct-Loop |
 | `MEMORY_MAX_CHARS` | `4000` | Max. Zeichen im Session-Gedaechtnis |
 | `USE_MINERU` | `false` | MinerU fuer PDF-Parsing verwenden |

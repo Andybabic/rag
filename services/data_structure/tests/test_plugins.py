@@ -270,7 +270,7 @@ def test_gw_agent_actions():
 
 
 def test_wl_enrich_law_ref_and_criticality():
-    """§ 34 Abs. 2 EisbG → law_ref set, criticality=high, topic=recht."""
+    """§ 34 Abs. 2 EisbG → law_ref set, criticality=high."""
     plugin = WienerLinienPlugin()
     meta = _make_meta(use_case="wiener_linien")
     result = plugin.enrich_metadata(
@@ -279,8 +279,6 @@ def test_wl_enrich_law_ref_and_criticality():
     assert result.extra["law_ref"] != ""
     assert "§ 34" in result.extra["law_ref"]
     assert result.extra["criticality"] == "high"
-    assert result.extra["topic"] == "recht"
-    assert meta.collection == "wl_recht"
 
 
 def test_wl_enrich_no_law_ref():
@@ -291,55 +289,32 @@ def test_wl_enrich_no_law_ref():
     assert result.extra["criticality"] == "medium"
 
 
-def test_wl_enrich_topic_fahrzeug():
-    """Text about Fahrzeugbremsen → topic=fahrzeug, collection=wl_fahrzeug."""
+def test_wl_collection_is_never_overridden():
+    """Regression: topic-based collection routing previously sent §11
+    Ersatzsignal (Fahrzeug-Inhalt) to wl_strecke because of the word
+    "Signal". The plugin must NOT touch base.collection any more –
+    everything goes through one wl_default collection."""
     plugin = WienerLinienPlugin()
-    meta = _make_meta(use_case="wiener_linien")
-    result = plugin.enrich_metadata(meta, "Die Fahrzeugbremse muss geprüft werden.", {})
-    assert result.extra["topic"] == "fahrzeug"
-    assert meta.collection == "wl_fahrzeug"
+    for text in (
+        "Die Fahrzeugbremse muss geprüft werden.",
+        "Gleis und Weiche inspizieren.",
+        "Störung im Betrieb, Vorfall melden.",
+        "Blinkt am Armaturenpult die weiße Drucktaste „Ersatzsignal\", so hat das Fahrpersonal …",
+        "Prüfung: Aufgabe zum Lernziel.",
+        "Allgemeine Information.",
+    ):
+        meta = _make_meta(use_case="wiener_linien", collection="wl_default")
+        plugin.enrich_metadata(meta, text, {})
+        assert meta.collection == "wl_default", f"unexpectedly rerouted: {text!r}"
 
 
-def test_wl_enrich_topic_strecke():
+def test_wl_topic_metadata_removed():
+    """Legacy ``topic``/topic-based extras must not be set – they leak
+    into citations and confuse consumers."""
     plugin = WienerLinienPlugin()
     meta = _make_meta(use_case="wiener_linien")
     result = plugin.enrich_metadata(meta, "Gleis und Weiche inspizieren.", {})
-    assert result.extra["topic"] == "strecke"
-    assert meta.collection == "wl_strecke"
-
-
-def test_wl_enrich_topic_betrieb_criticality_high():
-    plugin = WienerLinienPlugin()
-    meta = _make_meta(use_case="wiener_linien")
-    result = plugin.enrich_metadata(meta, "Störung im Betrieb, Vorfall melden.", {})
-    assert result.extra["topic"] == "betrieb"
-    assert result.extra["criticality"] == "high"
-    assert meta.collection == "wl_betrieb"
-
-
-def test_wl_enrich_topic_pruefung():
-    plugin = WienerLinienPlugin()
-    meta = _make_meta(use_case="wiener_linien")
-    result = plugin.enrich_metadata(meta, "Prüfung: Aufgabe zum Lernziel.", {})
-    assert result.extra["topic"] == "pruefung"
-    assert meta.collection == "wl_pruefung"
-
-
-def test_wl_enrich_topic_default():
-    plugin = WienerLinienPlugin()
-    meta = _make_meta(use_case="wiener_linien")
-    result = plugin.enrich_metadata(meta, "Allgemeine Information.", {})
-    assert result.extra["topic"] == "allgemein"
-    assert meta.collection == "wl_allgemein"
-
-
-def test_wl_enrich_topic_scoring_highest_wins():
-    """When multiple topics match, the one with most keyword hits wins."""
-    plugin = WienerLinienPlugin()
-    meta = _make_meta(use_case="wiener_linien")
-    # fahrzeug: bremse, antrieb (2 hits) vs strecke: gleis (1 hit)
-    result = plugin.enrich_metadata(meta, "Bremse und Antrieb auf dem Gleis.", {})
-    assert result.extra["topic"] == "fahrzeug"
+    assert "topic" not in result.extra
 
 
 def test_wl_enrich_audience_default():
@@ -403,13 +378,8 @@ def test_wl_difficulty_max_5():
 
 
 def test_wl_collections():
-    assert WienerLinienPlugin().get_collections() == [
-        "wl_fahrzeug",
-        "wl_strecke",
-        "wl_betrieb",
-        "wl_recht",
-        "wl_pruefung",
-    ]
+    # Single collection per use case after dropping topic-based routing.
+    assert WienerLinienPlugin().get_collections() == ["wl_default"]
 
 
 def test_wl_system_prompt_default():

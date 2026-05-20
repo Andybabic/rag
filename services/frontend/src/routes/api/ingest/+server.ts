@@ -102,7 +102,11 @@ export const POST: RequestHandler = async ({ request }) => {
 		const embeddings = embedData.embeddings as Array<{
 			chunk_id?: string;
 			vector: number[];
+			model?: string;
 		}>;
+		// Record which model produced these vectors so the index can later
+		// reject queries embedded with a different model.
+		const embedModel = embeddings[0]?.model ?? null;
 
 		// 4. Upsert – include file_hash + stored_path in metadata for document linking
 		const upsertItems = colChunks.map((chunk, i) => ({
@@ -119,7 +123,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		const upsertResp = await fetch(`${SERVICES.vectordb}/v1/upsert`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ collection, embeddings: upsertItems })
+			body: JSON.stringify({ collection, embeddings: upsertItems, embed_model: embedModel })
 		});
 
 		if (!upsertResp.ok) {

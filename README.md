@@ -87,7 +87,7 @@ Die Retrieval-Pipeline nutzt:
 
 - **Chunking mit Breadcrumbs** – jeder Chunk bekommt Header-Hierarchie
   (`H1 > H2 > H3`) als Präfix, damit Embeddings die Dokumentposition erfassen
-  (`DEFAULT_CHUNK_SIZE=512`, Overlap 64 Tokens)
+  (`DEFAULT_CHUNK_SIZE=256` Tokens, Overlap 32 Tokens)
 - **Hybrid Search** – dichte Vektorsuche (Qdrant, Embedding via `bge-m3`) +
   BM25 über denselben Kandidaten-Pool, fusioniert via Reciprocal Rank Fusion
 - **Cross-Encoder Reranker** – `BAAI/bge-reranker-v2-m3` scored jedes

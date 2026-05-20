@@ -288,7 +288,7 @@ async def test_agent_wiener_linien(mock_llm, client):
     resp = await client.post("/v1/agent/query", json=_agent_body(
         use_case="wiener_linien",
         query="Bremsprüfung Vorschrift",
-        config={"collection": "wl_fahrzeug", "max_steps": 3},
+        config={"collection": "wl_default", "max_steps": 3},
     ))
     assert resp.status_code == 200
     assert resp.json()["use_case"] == "wiener_linien"

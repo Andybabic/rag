@@ -55,7 +55,7 @@ def test_wl_actions_include_clarify():
 def test_default_collections():
     assert get_default_collection("neumann") == "neumann_machines"
     assert get_default_collection("gw_stpoelten") == "gw_cnc_steps"
-    assert get_default_collection("wiener_linien") == "wl_fahrzeug"
+    assert get_default_collection("wiener_linien") == "wl_default"
 
 
 @pytest.mark.asyncio

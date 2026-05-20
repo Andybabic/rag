@@ -33,6 +33,27 @@ class QdrantUnavailableError(Exception):
     """Raised when Qdrant is not reachable."""
 
 
+class EmbeddingModelMismatchError(Exception):
+    """Raised when a query is embedded with a different model than the one
+    the collection was built with. Same-dimension/different-model is the
+    silent killer: cosine similarities collapse to ~0 and nothing relevant
+    is ever retrieved. Fail loudly with both model names instead."""
+
+    def __init__(self, collection: str, index_model: str, query_model: str):
+        self.collection = collection
+        self.index_model = index_model
+        self.query_model = query_model
+        super().__init__(
+            f"Collection '{collection}' was indexed with embedding model "
+            f"'{index_model}', but the query uses '{query_model}'. "
+            f"Re-ingest the collection with the current model."
+        )
+
+
+# Payload key under which the embedding model name is stamped on every point.
+_EMBED_MODEL_KEY = "_embed_model"
+
+
 def get_client() -> QdrantClient:
     """Return the shared Qdrant client, creating it on first call."""
     global _client  # noqa: PLW0603
@@ -63,11 +84,15 @@ def _ensure_collection(client: QdrantClient, name: str, dimension: int) -> None:
 def upsert_vectors(
     collection: str,
     embeddings: list[dict],
+    embed_model: str | None = None,
 ) -> int:
     """Upsert embedding points into a Qdrant collection.
 
     Auto-creates the collection if it does not exist.
     Returns the number of upserted points.
+
+    ``embed_model`` (when provided) is stamped onto every point so a later
+    query with a different model can be detected.
     """
     client = get_client()
     if not embeddings:
@@ -79,11 +104,16 @@ def upsert_vectors(
     except Exception as exc:
         raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
 
+    model_stamp = {_EMBED_MODEL_KEY: embed_model} if embed_model else {}
     points = [
         PointStruct(
             id=_to_uuid(emb["chunk_id"]),
             vector=emb["vector"],
-            payload={**emb.get("metadata", {}), "chunk_id": emb["chunk_id"]},
+            payload={
+                **emb.get("metadata", {}),
+                **model_stamp,
+                "chunk_id": emb["chunk_id"],
+            },
         )
         for emb in embeddings
     ]
@@ -111,8 +141,14 @@ def search_vectors(
     vector: list[float],
     top_k: int = 5,
     filters: dict | None = None,
+    embed_model: str | None = None,
 ) -> list[dict]:
-    """Search for similar vectors in a collection."""
+    """Search for similar vectors in a collection.
+
+    If ``embed_model`` is given and the collection was stamped with a
+    different model at ingest, raises ``EmbeddingModelMismatchError`` rather
+    than returning silently meaningless results.
+    """
     client = get_client()
     query_filter = _build_filter(filters or {})
 
@@ -130,7 +166,7 @@ def search_vectors(
     except Exception as exc:
         raise QdrantUnavailableError(f"Qdrant search failed: {exc}") from exc
 
-    return [
+    results = [
         {
             "chunk_id": r.payload.get("chunk_id", str(r.id)),
             "score": r.score,
@@ -139,6 +175,23 @@ def search_vectors(
         }
         for r in response.points
     ]
+
+    # Consistency guard: compare the query model against the model stamped on
+    # the index. Only enforced when both are known — legacy points without a
+    # stamp can't be verified, so they pass (re-ingest stamps them).
+    if embed_model and results:
+        index_model = next(
+            (
+                r["metadata"].get(_EMBED_MODEL_KEY)
+                for r in results
+                if r["metadata"].get(_EMBED_MODEL_KEY)
+            ),
+            None,
+        )
+        if index_model and index_model != embed_model:
+            raise EmbeddingModelMismatchError(collection, index_model, embed_model)
+
+    return results
 
 
 def list_collections() -> list[dict]:
@@ -155,10 +208,20 @@ def list_collections() -> list[dict]:
         dimension = 0
         if info.config and info.config.params and info.config.params.vectors:
             dimension = info.config.params.vectors.size
+        embed_model = None
+        try:
+            sample, _ = client.scroll(
+                collection_name=c.name, limit=1, with_payload=True
+            )
+            if sample:
+                embed_model = (sample[0].payload or {}).get(_EMBED_MODEL_KEY)
+        except Exception:  # noqa: BLE001 — diagnostics only, never fail listing
+            pass
         result.append({
             "name": c.name,
             "count": info.points_count or 0,
             "dimension": dimension,
+            "embed_model": embed_model,
         })
     return result
 

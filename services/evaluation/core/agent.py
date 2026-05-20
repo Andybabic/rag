@@ -17,7 +17,7 @@ from core.actions import (
     action_search,
     action_search_cnc,
 )
-from core.citations import map_citations
+from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
@@ -31,6 +31,43 @@ _CLEANUP_RE = re.compile(
     r"(?:^|\n)\s*(?:THOUGHT|ACTION|OBSERVATION):.*",
     re.DOTALL,
 )
+
+# Detects answers that really mean "the documents don't contain this" so we
+# can (a) report sufficient=False instead of a confident-looking failure and
+# (b) force one broadened retry before giving up.
+_NO_INFO_RE = re.compile(
+    r"(keine\s+(?:passenden\s+|spezifischen\s+|konkreten\s+)?"
+    r"(?:information|informationen|angabe|angaben|hinweise|dokumente)"
+    r"|nicht\s+(?:in\s+den\s+|enthalten|dokumentiert|genannt|beschrieben)"
+    r"|enthalten\s+die\s+dokumente\s+keine"
+    r"|liegen\s+keine\s+.*vor"
+    r"|keine\s+\S+(?:\s+\S+){0,4}?\s+vorliegen"
+    r"|(?:handlungsempfehlung|empfehlung|aussage|antwort)\s+nicht\s+möglich"
+    r"|wurden\s+keine\s+.*gefunden)",
+    re.IGNORECASE,
+)
+
+
+def _is_no_info_answer(text: str) -> bool:
+    """True if the answer essentially says 'not found in the documents'."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    return bool(_NO_INFO_RE.search(t))
+
+
+def _broaden_query(original: str, narrowed: str) -> str:
+    """Build one broader retry query: union of the user's full question and
+    the model's (often narrowed) search terms, deduplicated word-wise. No
+    LLM call – deterministic and latency-free."""
+    seen: set[str] = set()
+    words: list[str] = []
+    for w in f"{original} {narrowed}".split():
+        key = w.lower().strip(".,;:!?\"'()[]„""")
+        if key and key not in seen:
+            seen.add(key)
+            words.append(w)
+    return " ".join(words).strip() or original
 
 
 def _extract_json_arg(text: str, start: int) -> str | None:
@@ -273,6 +310,8 @@ async def run_agent(
     sufficient = False
 
     has_searched = False
+    broadened_retry_done = False
+    last_search_query = enriched_query
 
     for step_num in range(1, max_steps + 1):
         if on_event:
@@ -293,6 +332,26 @@ async def run_agent(
                 + "[Auto-Korrektur: SEARCH erzwungen, bevor eine Antwort gegeben wird.]"
             )
 
+        # Second guard: don't accept a "not in the documents" answer on the
+        # first try. A narrowed query often misses content that a broader
+        # phrasing would surface. Force exactly one broadened REFINE_QUERY.
+        elif (
+            action_name == "FINAL_ANSWER"
+            and not broadened_retry_done
+            and _is_no_info_answer(action_args.get("answer", ""))
+        ):
+            broadened_retry_done = True
+            action_name = "REFINE_QUERY"
+            action_args = {
+                "query": _broaden_query(enriched_query, last_search_query),
+                "reason": "Erste Suche ohne belastbaren Treffer – breitere Formulierung",
+            }
+            thought = (
+                (thought + "\n" if thought else "")
+                + "[Auto-Korrektur: breitere Suche erzwungen, bevor 'keine "
+                "Information' zurückgegeben wird.]"
+            )
+
         if on_event:
             await on_event({
                 "type": "action",
@@ -309,6 +368,10 @@ async def run_agent(
             if "query" not in action_args:
                 action_args["query"] = enriched_query
             has_searched = True
+            last_search_query = action_args.get("query") or last_search_query
+        elif action_name == "REFINE_QUERY":
+            has_searched = True
+            last_search_query = action_args.get("query") or last_search_query
 
         # 2. Execute action
         result = await _execute_action(
@@ -351,7 +414,11 @@ async def run_agent(
         if action_name == "FINAL_ANSWER":
             answer = action_args.get("answer", observation)
             use_case_extras = action_args.get("extras", {})
-            sufficient = True
+            # Honest signal: a "not in the documents" answer is NOT a
+            # sufficient RAG result. This propagates to the manager,
+            # synthesizer, compliance and the UI/audit instead of looking
+            # like a confident answer.
+            sufficient = not _is_no_info_answer(answer)
             break
 
         if action_name == "CLARIFY":
@@ -408,6 +475,7 @@ async def run_agent(
 
     # Citation mapping
     citations = map_citations(answer, chunks_for_citations)
+    answer = strip_unresolved_refs(answer, citations)
 
     # Memory update (non-blocking)
     asyncio.create_task(_update_memory(use_case, query, answer))

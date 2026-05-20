@@ -35,7 +35,9 @@ async def action_search(args: dict, *, use_case: str) -> dict:
                 json={"type": "text", "content": query, "metadata": {}},
             )
             embed_resp.raise_for_status()
-            vector = embed_resp.json()["vector"]
+            embed_json = embed_resp.json()
+            vector = embed_json["vector"]
+            query_embed_model = embed_json.get("model")
 
         # 2. Resolve collections – HARD USE-CASE ISOLATION
         #    Only collections whose prefix matches the use_case are allowed.
@@ -86,12 +88,40 @@ async def action_search(args: dict, *, use_case: str) -> dict:
                         "vector": vector,
                         "top_k": 40,
                         "filters": filters,
+                        "embed_model": query_embed_model,
                     },
                 )
                 if search_resp.status_code == 200:
                     for r in search_resp.json()["results"]:
                         r.setdefault("metadata", {})["_collection"] = col
                         results.append(r)
+                elif search_resp.status_code == 409:
+                    # Embedding-model mismatch: the index was built with a
+                    # different model than this query uses → similarities are
+                    # meaningless. Surface this clearly instead of letting the
+                    # LLM hallucinate a "keine Information" answer.
+                    body = search_resp.json()
+                    logger.error(
+                        "Embedding-model mismatch on '%s': index=%s query=%s. "
+                        "Re-ingest required.",
+                        col,
+                        body.get("index_model"),
+                        body.get("query_model"),
+                    )
+                    return {
+                        "observation": (
+                            f"RETRIEVAL-FEHLER: Die Collection '{col}' wurde mit "
+                            f"Embedding-Modell '{body.get('index_model')}' "
+                            f"indexiert, die Anfrage nutzt aber "
+                            f"'{body.get('query_model')}'. Die Suche liefert "
+                            f"keine verwertbaren Treffer, bis die Collection mit "
+                            f"dem aktuellen Modell neu ingestiert wurde. "
+                            f"Antworte NICHT aus eigenem Wissen, sondern weise "
+                            f"auf dieses Konfigurationsproblem hin."
+                        ),
+                        "chunks": [],
+                        "searched_collections": collections_to_search,
+                    }
     except httpx.HTTPStatusError as exc:
         return {
             "observation": f"Suche fehlgeschlagen: {exc.response.status_code}. "
