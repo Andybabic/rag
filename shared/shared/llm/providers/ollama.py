@@ -25,7 +25,7 @@ class OllamaProvider(LLMProvider):
         return f"{self.config.ollama_base_url.rstrip('/')}{path}"
 
     async def chat(self, messages: list[dict], *, model: str, **opts) -> str:
-        options = {"temperature": 0.2}
+        options = {"temperature": 0.2, "num_ctx": self.config.ollama_num_ctx}
         options.update(opts.get("options") or {})
         # Unified knob: callers pass `max_tokens`; Ollama uses `num_predict`.
         if "max_tokens" in options and "num_predict" not in options:
@@ -97,20 +97,35 @@ class OllamaProvider(LLMProvider):
         *,
         model: str,
     ) -> str:
+        # Ollama-Doku: Vision-Modelle erwarten Bilder im /api/chat-Endpoint
+        # *innerhalb* des message-Objekts. Der frühere /api/generate-Pfad
+        # mit images im Top-Level wurde von einigen VL-Modellen ignoriert,
+        # sodass nur der Text-Prompt verarbeitet wurde.
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
-                    self._url("/api/generate"),
+                    self._url("/api/chat"),
                     headers=self._headers(),
                     json={
                         "model": model,
-                        "prompt": prompt,
-                        "images": [image_base64],
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": prompt,
+                                "images": [image_base64],
+                            }
+                        ],
                         "stream": False,
+                        "options": {
+                            "temperature": 0.2,
+                            "num_ctx": self.config.ollama_num_ctx,
+                        },
                     },
                 )
                 resp.raise_for_status()
-                return resp.json().get("response", "").strip()
+                return (
+                    resp.json().get("message", {}).get("content", "").strip()
+                )
         except httpx.ConnectError as exc:
             raise LLMUnavailableError(
                 f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"

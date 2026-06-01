@@ -392,6 +392,15 @@ REGELN (hart):
   das wörtlich.
 - KEINE eigenen Ergänzungen, kein Allgemeinwissen, keine Trainings-Daten.
 - Antworte ohne Vor- oder Nachspann, ohne Meta-Kommentare.
+
+BILDER:
+- Im AVAILABLE_IMAGES-Block stehen Bilder, die zu zitierten Chunks gehören
+  (mit ID, Seite und Kurzbeschreibung).
+- Wenn ein Bild deine konkrete Aussage stützt (z.B. ein Signal, ein
+  Diagramm, eine Tabelle, ein Schaltplan), zitiere es genau einmal an der
+  passenden Stelle im Fließtext mit dem Marker [BILD: <image_id>].
+- Erfinde NIE eine image_id. Verwende ausschliesslich IDs aus
+  AVAILABLE_IMAGES. Wenn kein Bild beiträgt, lasse alle Marker weg.
 """
 
 
@@ -433,6 +442,63 @@ def _format_global_chunks(chunks: list[dict]) -> str:
         ref = f"{file_name}, S. {page}" if page else file_name
         lines.append(f"[{i}] ({ref}) {text}")
     return "\n".join(lines)
+
+
+def _collect_available_images(chunks: list[dict]) -> list[dict]:
+    """Pull every image reference dropped by the chunker into a flat,
+    deduplicated catalog. The synthesizer offers these to the LLM as
+    'images you may cite with [BILD: <id>]'.
+    """
+    seen: dict[str, dict] = {}
+    for c in chunks:
+        extra = ((c.get("metadata") or {}).get("extra")) or {}
+        for img in extra.get("images") or []:
+            img_id = img.get("id") or img.get("image_id")
+            if not img_id or img_id in seen:
+                continue
+            seen[img_id] = {
+                "id": img_id,
+                "page": img.get("page"),
+                "alt_text": (img.get("alt_text") or "")[:300],
+                "url": img.get("url", ""),
+            }
+    return list(seen.values())
+
+
+def _format_available_images(images: list[dict]) -> str:
+    """Render the image catalog for the synthesizer prompt."""
+    if not images:
+        return "(Keine Bilder zu diesen Chunks.)"
+    lines = []
+    for img in images:
+        page = img.get("page")
+        page_hint = f" S.{page}" if page else ""
+        alt = img.get("alt_text") or "(ohne Beschreibung)"
+        lines.append(f"- {img['id']}{page_hint}: {alt}")
+    return "\n".join(lines)
+
+
+_BILD_MARKER_RE = re.compile(r"\[BILD:\s*(img_[A-Za-z0-9_]+)\s*\]")
+
+
+def select_used_images(answer: str, catalog: list[dict]) -> list[dict]:
+    """Return the subset of ``catalog`` that the answer actually cites.
+
+    Drops hallucinated IDs silently — the frontend only renders what is
+    backed by a real persisted image.
+    """
+    if not answer or not catalog:
+        return []
+    by_id = {img["id"]: img for img in catalog}
+    used: list[dict] = []
+    seen: set[str] = set()
+    for match in _BILD_MARKER_RE.finditer(answer):
+        img_id = match.group(1)
+        if img_id in seen or img_id not in by_id:
+            continue
+        seen.add(img_id)
+        used.append(by_id[img_id])
+    return used
 
 
 def _format_fragments(subagents: list[dict]) -> str:
@@ -485,6 +551,8 @@ async def synthesize(
             "global_chunk_count": len(global_chunks),
         })
 
+    available_images = _collect_available_images(global_chunks)
+
     system = _SYNTHESIZER_SYSTEM_TEMPLATE.format(strategy=plan["merge_strategy"])
     guidance_block = (
         f"\nKORREKTUR-HINWEIS DES COMPLIANCE-AGENTEN:\n{compliance_guidance}\n"
@@ -494,7 +562,9 @@ async def synthesize(
         f"ORIGINALFRAGE:\n{query}\n\n"
         f"PLAN-RATIONALE (Manager):\n{plan.get('rationale', '')}\n\n"
         f"ANTWORT-FRAGMENTE DER SPEZIALISTEN:\n{_format_fragments(subagents)}\n\n"
-        f"GLOBAL_CHUNK_POOL (für [n]-Verweise):\n{_format_global_chunks(global_chunks)}\n"
+        f"GLOBAL_CHUNK_POOL (für [n]-Verweise):\n{_format_global_chunks(global_chunks)}\n\n"
+        f"AVAILABLE_IMAGES (für [BILD: <id>]-Verweise):\n"
+        f"{_format_available_images(available_images)}\n"
         f"{guidance_block}\n"
         "Formuliere jetzt die finale Antwort."
     )
@@ -702,6 +772,41 @@ async def run_manager(
     # Drop any [n] the synthesizer invented beyond the chunk pool so every
     # citation number shown in the answer actually opens a document.
     final_answer = strip_unresolved_refs(final_answer, citations)
+
+    # Bind [BILD: <id>] markers in the final answer to the actual image
+    # catalog so the frontend can render them inline. Hallucinated IDs
+    # never make it into images_used and are silently dropped client-side.
+    available_images = _collect_available_images(global_chunks)
+    images_used = select_used_images(final_answer, available_images)
+
+    # Auto-attach fallback: kleine Synth-LLMs setzen den [BILD: <id>]-Marker
+    # oft nicht, auch wenn ein Bild zum zitierten Chunk gehört. Wenn der
+    # Synthesizer hier nichts markiert hat, aber ein [n]-zitierter Chunk
+    # Bilder trägt, hängen wir sie automatisch an — das Frontend rendert
+    # sie dann als "Quellbilder" am Ende der Antwort. Das verhindert,
+    # dass die visuelle Information (Tabellen-Screenshot, Diagramm) im
+    # RAG-Loop verschwindet.
+    if not images_used and available_images:
+        cited_indices: set[int] = set()
+        for m in re.finditer(r"\[(\d+)]", final_answer):
+            n = int(m.group(1))
+            if 1 <= n <= len(global_chunks):
+                cited_indices.add(n - 1)
+        cited_image_ids: set[str] = set()
+        for idx in cited_indices:
+            extra = ((global_chunks[idx].get("metadata") or {}).get("extra")) or {}
+            for img in extra.get("images") or []:
+                iid = img.get("id") or img.get("image_id")
+                if iid:
+                    cited_image_ids.add(iid)
+        if cited_image_ids:
+            by_id = {img["id"]: img for img in available_images}
+            images_used = [
+                {**by_id[iid], "auto_attached": True}
+                for iid in cited_image_ids
+                if iid in by_id
+            ]
+
     searched: set[str] = set()
     for sub in subagents:
         searched.update(sub.get("searched_collections") or [])
@@ -767,6 +872,8 @@ async def run_manager(
         "session_id": session_id,
         "use_case": use_case,
         "searched_collections": sorted(searched),
+        "available_images": available_images,
+        "images_used": images_used,
     }
     if on_event:
         await on_event({"type": "final", **result})

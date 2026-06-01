@@ -1,13 +1,16 @@
 <script lang="ts">
 	import { app } from '$lib/state.svelte';
-	import { getDocuments } from '$lib/api';
+	import { deleteDocument, getDocuments } from '$lib/api';
 	import TablePreviewModal from './TablePreviewModal.svelte';
+	import ImageGalleryModal from './ImageGalleryModal.svelte';
 
 	const TABLE_EXTS = new Set(['csv', 'xlsx', 'xls']);
+	const GALLERY_EXTS = new Set(['pdf']);
 
 	let documents: Array<{
 		id: string;
 		file_name: string;
+		file_hash?: string;
 		stored_path?: string;
 		collection: string;
 		use_case: string;
@@ -24,6 +27,9 @@
 
 	let loading = $state(false);
 	let preview = $state<{ url: string; fileName: string } | null>(null);
+	let gallery = $state<{ useCase: string; fileHash: string; fileName: string } | null>(null);
+	let deletingId = $state<string | null>(null);
+	let deleteError = $state<string | null>(null);
 
 	async function load() {
 		loading = true;
@@ -47,9 +53,41 @@
 		return TABLE_EXTS.has(getExtension(fileName));
 	}
 
+	function hasGallery(fileName: string): boolean {
+		return GALLERY_EXTS.has(getExtension(fileName));
+	}
+
 	function openPreview(fileName: string, storedPath: string | undefined) {
 		if (!storedPath) return;
 		preview = { url: `/api/documents/${storedPath}`, fileName };
+	}
+
+	function openGallery(doc: { file_name: string; use_case: string; file_hash?: string }) {
+		if (!doc.file_hash) return;
+		gallery = { useCase: doc.use_case, fileHash: doc.file_hash, fileName: doc.file_name };
+	}
+
+	async function handleDelete(doc: { id: string; file_name: string; chunk_count: number }) {
+		const msg =
+			`„${doc.file_name}" und alle damit verbundenen Daten ` +
+			`(Embeddings, extrahierte Bilder, Originaldatei, Log-Eintrag) ` +
+			`endgültig löschen?\n\n` +
+			`${doc.chunk_count.toLocaleString('de-AT')} Chunks aus Qdrant ` +
+			`werden ebenfalls entfernt.`;
+		if (!confirm(msg)) return;
+		deleteError = null;
+		deletingId = doc.id;
+		try {
+			const result = await deleteDocument(doc.id);
+			if (result.status === 'partial' && result.errors?.length) {
+				deleteError = `Teilweise erfolgreich: ${result.errors.join('; ')}`;
+			}
+			await load();
+		} catch (e) {
+			deleteError = e instanceof Error ? e.message : String(e);
+		} finally {
+			deletingId = null;
+		}
 	}
 
 	$effect(() => {
@@ -69,6 +107,12 @@
 				Aktualisieren
 			</button>
 		</div>
+
+		{#if deleteError}
+			<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">
+				{deleteError}
+			</div>
+		{/if}
 
 		{#if loading}
 			<p class="text-sm text-gray-400 animate-pulse">Laden...</p>
@@ -147,10 +191,29 @@
 											Tabelle anzeigen
 										</button>
 									{/if}
+									{#if doc.file_hash && hasGallery(doc.file_name)}
+										<button
+											type="button"
+											onclick={() => openGallery(doc)}
+											class="rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-600 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+											title="Extrahierte Bilder + Beschreibung anzeigen"
+										>
+											Bilder
+										</button>
+									{/if}
 									<span class="rounded-full px-2 py-0.5 text-[10px] font-semibold
 										{doc.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
 										{doc.status}
 									</span>
+									<button
+										type="button"
+										onclick={() => handleDelete(doc)}
+										disabled={deletingId !== null}
+										class="rounded-md border border-red-200 bg-white px-2 py-1 text-[11px] font-medium text-red-600 hover:border-red-400 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+										title="Dokument samt Embeddings, Bildern und Original entfernen"
+									>
+										{deletingId === doc.id ? 'Lösche…' : 'Löschen'}
+									</button>
 								</div>
 							</div>
 						{/each}
@@ -166,5 +229,14 @@
 		url={preview.url}
 		fileName={preview.fileName}
 		onClose={() => (preview = null)}
+	/>
+{/if}
+
+{#if gallery}
+	<ImageGalleryModal
+		useCase={gallery.useCase}
+		fileHash={gallery.fileHash}
+		fileName={gallery.fileName}
+		onClose={() => (gallery = null)}
 	/>
 {/if}
