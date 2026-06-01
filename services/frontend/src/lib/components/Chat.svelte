@@ -292,6 +292,7 @@
 				requestId: (result.request_id as string) ?? '',
 				sufficient: result.sufficient as boolean | undefined,
 				audit: (result.audit as AuditInfo | undefined) ?? undefined,
+				imagesUsed: (result.images_used as Message['imagesUsed']) ?? [],
 				durationMs: Math.round(performance.now() - startedAt),
 				streaming: false,
 				currentPhase: undefined

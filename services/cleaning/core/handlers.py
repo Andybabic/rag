@@ -538,18 +538,57 @@ class PDFHandler(BaseHandler):
 
         # Images: map filename → page via content_list, strip data-URI prefix
         # so the value stays raw base64 (the existing alt-text contract).
+        # Also capture the text immediately before/after each image in
+        # document order so vision gets richer context than just "all text
+        # on the page". Window keeps the prompt bounded.
         img_page: dict[str, int] = {}
-        for it in content_list:
+        img_context: dict[str, tuple[str, str]] = {}
+        ctx_window = 600
+        for i, it in enumerate(content_list):
             p = it.get("img_path") or ""
-            if p:
-                img_page[p.rsplit("/", 1)[-1]] = int(it.get("page_idx", 0)) + 1
+            if not p:
+                continue
+            name = p.rsplit("/", 1)[-1]
+            img_page[name] = int(it.get("page_idx", 0)) + 1
+
+            before_parts: list[str] = []
+            j = i - 1
+            while j >= 0 and sum(len(s) for s in before_parts) < ctx_window:
+                prev = content_list[j]
+                if prev.get("img_path"):
+                    break
+                t = self._content_item_text(prev)
+                if t:
+                    before_parts.insert(0, t)
+                j -= 1
+            after_parts: list[str] = []
+            j = i + 1
+            while j < len(content_list) and sum(len(s) for s in after_parts) < ctx_window:
+                nxt = content_list[j]
+                if nxt.get("img_path"):
+                    break
+                t = self._content_item_text(nxt)
+                if t:
+                    after_parts.append(t)
+                j += 1
+            text_before = "\n\n".join(before_parts).strip()[-ctx_window:]
+            text_after = "\n\n".join(after_parts).strip()[:ctx_window]
+            img_context[name] = (text_before, text_after)
+
         images: list[dict] = []
         for name, data_uri in images_map.items():
             b64 = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
+            # Ollama's /api/chat rejects base64 with embedded whitespace —
+            # multi-line "data:image/...;base64,\nAAAA\nBBBB" from MinerU
+            # silently produced "no image" on the model side.
+            b64 = "".join(b64.split())
+            text_before, text_after = img_context.get(name, ("", ""))
             images.append({
                 "page": img_page.get(name, 1),
                 "base64": b64,
                 "caption": name,
+                "text_before": text_before,
+                "text_after": text_after,
             })
 
         if pages:

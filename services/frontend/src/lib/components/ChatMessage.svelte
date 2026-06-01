@@ -137,6 +137,10 @@
 		return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '';
 	}
 
+	function escapeAttr(s: string): string {
+		return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+
 	function formatAnswer(text: string): string {
 		// First render markdown to HTML
 		let html = marked.parse(text) as string;
@@ -145,6 +149,22 @@
 			/\[(\d+)]/g,
 			'<span class="citation-badge inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold cursor-pointer hover:bg-blue-200" data-ref="$1" title="Quelle $1 öffnen – Dokument an der Fundstelle anzeigen">$1</span>'
 		);
+		// Replace [BILD: <id>] markers with the matching inline image. The
+		// server only ever forwards images that exist on disk, so anything
+		// not in the lookup map is a hallucinated id and is dropped silently.
+		const imgs = (message.imagesUsed ?? []).filter((i) => i.id && i.url);
+		if (imgs.length > 0 || /\[BILD:/i.test(html)) {
+			const lookup = new Map(imgs.map((i) => [i.id, i]));
+			html = html.replace(/\[BILD:\s*(img_[A-Za-z0-9_]+)\s*\]/g, (_m, id: string) => {
+				const img = lookup.get(id);
+				if (!img) return '';
+				const url = escapeAttr(img.url ?? '');
+				const alt = escapeAttr(img.alt_text ?? '');
+				const pageHint = img.page ? `Seite ${img.page}` : '';
+				const caption = alt || pageHint || 'Bild';
+				return `<figure class="chat-image my-2"><img src="${url}" alt="${alt}" class="max-h-96 rounded-md border border-gray-200" loading="lazy" /><figcaption class="mt-1 text-[10px] text-gray-500">${escapeAttr(caption)}</figcaption></figure>`;
+			});
+		}
 		return html;
 	}
 
@@ -261,6 +281,37 @@
 				>
 					{@html formatAnswer(message.text)}
 				</div>
+
+				{#if message.imagesUsed && message.imagesUsed.length > 0 && !/\[BILD:/i.test(message.text)}
+					<!-- Auto-attached image gallery: the synthesizer didn't place
+					     [BILD:] markers in the answer, but cited chunks carry
+					     images. Show them here so the visual source isn't lost. -->
+					<div class="mt-3 border-t border-gray-100 pt-3">
+						<p class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+							Bilder zu den Quellen
+						</p>
+						<div class="grid gap-3 sm:grid-cols-2">
+							{#each message.imagesUsed.filter((i) => i.id && i.url) as img}
+								<figure class="rounded-md border border-gray-200 bg-white p-2">
+									<img
+										src={img.url}
+										alt={img.alt_text ?? ''}
+										class="max-h-72 w-full rounded object-contain"
+										loading="lazy"
+									/>
+									{#if img.alt_text}
+										<figcaption class="mt-1 text-[10px] leading-snug text-gray-600">
+											{img.alt_text}
+											{#if img.page}<span class="text-gray-400"> · S. {img.page}</span>{/if}
+										</figcaption>
+									{:else if img.page}
+										<figcaption class="mt-1 text-[10px] text-gray-400">S. {img.page}</figcaption>
+									{/if}
+								</figure>
+							{/each}
+						</div>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- Searched Collections -->

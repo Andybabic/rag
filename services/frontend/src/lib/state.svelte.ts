@@ -87,6 +87,13 @@ export interface AuditInfo {
 	processing_ms?: number;
 }
 
+export interface ImageRef {
+	id: string;
+	page?: number | null;
+	alt_text?: string;
+	url?: string;
+}
+
 export interface Message {
 	role: 'user' | 'assistant';
 	text: string;
@@ -110,6 +117,10 @@ export interface Message {
 	error?: boolean;
 	streaming?: boolean;
 	currentPhase?: string;
+	/** Images the answer explicitly cited via [BILD: <id>] markers — only
+	 * those that match a persisted image are forwarded by the server, so
+	 * everything here is renderable. */
+	imagesUsed?: ImageRef[];
 }
 
 export interface SubCollection {

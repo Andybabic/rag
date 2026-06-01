@@ -5,13 +5,19 @@ from core.qdrant import (
     QdrantUnavailableError,
     cross_search,
     delete_collection,
+    delete_points_by_filter,
     list_collections,
     search_vectors,
     upsert_vectors,
 )
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from models import CrossSearchRequest, SearchRequest, UpsertRequest
+from models import (
+    CrossSearchRequest,
+    DeletePointsRequest,
+    SearchRequest,
+    UpsertRequest,
+)
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -134,6 +140,24 @@ async def collections(request: Request):
         return _qdrant_error_response(exc, request_id)
 
     return {"collections": result, "request_id": request_id}
+
+
+@router.post("/delete")
+async def delete_points(body: DeletePointsRequest, request: Request):
+    """Delete all points in ``collection`` matching ``filters`` (e.g.
+    ``{"file_hash": "abc..."}``). Idempotent — returns deleted=0 when the
+    collection or the matching points don't exist."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        deleted = delete_points_by_filter(body.collection, body.filters)
+    except QdrantUnavailableError as exc:
+        return _qdrant_error_response(exc, request_id)
+    return {
+        "status": "ok",
+        "deleted": deleted,
+        "collection": body.collection,
+        "request_id": request_id,
+    }
 
 
 @router.delete("/collection/{name}")

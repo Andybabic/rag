@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # File storage for original documents
     FILE_STORAGE_DIR: str = "/data/documents"
 
+    # When true, every MinerU image is persisted alongside a sidecar
+    # <image_id>.txt containing the generated alt-text + the surrounding
+    # document context that was sent to the vision LLM. Off by default;
+    # turn on for tuning the vision prompt / spotting bad descriptions.
+    DEBUG_IMAGE_CAPTIONS: bool = False
+
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = "./logs"
 
