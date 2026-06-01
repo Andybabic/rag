@@ -41,6 +41,7 @@ async def structure(body: StructureRequest, request: Request):
         chunk_size=body.config.chunk_size,
         chunk_overlap=body.config.chunk_overlap,
         plugin=plugin,
+        images=body.images,
     )
 
     return {

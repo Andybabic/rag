@@ -118,6 +118,31 @@ export async function getDocuments(useCase: string) {
 	return resp.json();
 }
 
+export async function getDocumentImages(useCase: string, fileHash: string) {
+	const resp = await fetch(
+		`/api/documents/${encodeURIComponent(useCase)}/${encodeURIComponent(fileHash)}/images`
+	);
+	if (!resp.ok) return { images: [] };
+	return resp.json();
+}
+
+export async function deleteDocument(docId: string) {
+	const resp = await fetch(`/api/admin/documents/${encodeURIComponent(docId)}`, {
+		method: 'DELETE'
+	});
+	if (!resp.ok) {
+		let detail = `HTTP ${resp.status}`;
+		try {
+			const body = await resp.json();
+			detail = body.detail ?? body.error ?? detail;
+		} catch {
+			/* keep default */
+		}
+		throw new Error(detail);
+	}
+	return resp.json();
+}
+
 export async function getMemory(useCase: string) {
 	const resp = await fetch(`${BASE}/admin/memory?use_case=${useCase}`);
 	return resp.json();

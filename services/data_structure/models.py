@@ -15,6 +15,7 @@ class StructureRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
     use_case: str
     config: StructureConfig = Field(default_factory=StructureConfig)
+    images: list[dict] = Field(default_factory=list)
 
 
 class CNCStructureRequest(BaseModel):
