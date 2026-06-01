@@ -10,6 +10,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -265,6 +266,44 @@ def cross_search(
         combined.append({"primary": result, "linked": linked})
 
     return combined
+
+
+def delete_points_by_filter(collection: str, filters: dict) -> int:
+    """Delete every point in ``collection`` matching ``filters``.
+
+    Returns the number of points that matched the filter (counted before
+    delete; Qdrant's delete response doesn't carry that number).
+    Silently returns 0 when the collection doesn't exist — the caller is
+    cleaning up after a doc and that situation is fine.
+    """
+    if not filters:
+        return 0
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
+    if collection not in existing:
+        return 0
+    qfilter = _build_filter(filters)
+    if qfilter is None:
+        return 0
+    try:
+        count_resp = client.count(
+            collection_name=collection,
+            count_filter=qfilter,
+            exact=True,
+        )
+        matched = int(getattr(count_resp, "count", 0) or 0)
+        if matched == 0:
+            return 0
+        client.delete(
+            collection_name=collection,
+            points_selector=FilterSelector(filter=qfilter),
+        )
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant delete failed: {exc}") from exc
+    return matched
 
 
 def delete_collection(name: str) -> bool:
