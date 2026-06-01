@@ -32,6 +32,20 @@ export const POST: RequestHandler = async ({ request }) => {
 	const fileHash = cleanData.metadata?.file_hash ?? '';
 	const storedPath = cleanData.metadata?.stored_path ?? '';
 
+	// Strip the heavy base64 payload before passing images through — the
+	// structuring service only needs the per-image metadata (id, page,
+	// alt_text, url) to bind chunks to images.
+	const rawImages = (cleanData.images ?? []) as Array<Record<string, unknown>>;
+	const images = rawImages
+		.filter((img) => typeof img.image_id === 'string')
+		.map((img) => ({
+			image_id: img.image_id,
+			page: img.page,
+			alt_text: img.alt_text ?? '',
+			url: img.url ?? '',
+			stored_path: img.stored_path ?? ''
+		}));
+
 	// 2. Structure
 	const structureResp = await fetch(`${SERVICES.dataStructure}/v1/structure`, {
 		method: 'POST',
@@ -39,7 +53,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		body: JSON.stringify({
 			markdown: cleanData.markdown,
 			metadata: cleanData.metadata ?? {},
-			use_case: useCase
+			use_case: useCase,
+			images
 		})
 	});
 

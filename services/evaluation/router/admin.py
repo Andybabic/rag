@@ -468,3 +468,30 @@ async def list_documents(use_case: str = ""):
             for r in rows
         ]
     }
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_document_log(doc_id: str):
+    """Remove one ingestion_log row and return the row's payload so the
+    orchestrator can chase the file_hash through Qdrant + cleaning."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT id, file_name, file_hash, stored_path, collection,
+                  use_case, chunk_count, status
+           FROM ingestion_log WHERE id = $1""",
+        doc_id,
+    )
+    if row is None:
+        return {"error": "not_found", "detail": f"Document {doc_id} not found"}
+    await pool.execute("DELETE FROM ingestion_log WHERE id = $1", doc_id)
+    return {
+        "status": "ok",
+        "document": {
+            "id": str(row["id"]),
+            "file_name": row["file_name"],
+            "file_hash": row["file_hash"],
+            "stored_path": row.get("stored_path", ""),
+            "collection": row["collection"],
+            "use_case": row["use_case"],
+        },
+    }

@@ -59,6 +59,7 @@ class LLMConfig:
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_api_key: str | None = None
+    ollama_num_ctx: int = 32768
 
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str | None = None
@@ -82,6 +83,7 @@ class LLMConfig:
             vision_provider=(_env("VISION_PROVIDER", "ollama") or "ollama").lower(),
             ollama_base_url=_env("OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434",
             ollama_api_key=_env("OLLAMA_API_KEY"),
+            ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 32768) or 32768,
             openai_base_url=_env("OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1",
             openai_api_key=_env("OPENAI_API_KEY"),
             llm_model=_env("LLM_MODEL"),
