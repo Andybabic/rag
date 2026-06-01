@@ -28,6 +28,11 @@ class SearchRequest(BaseModel):
     embed_model: str | None = None
 
 
+class DeletePointsRequest(BaseModel):
+    collection: str
+    filters: dict = Field(default_factory=dict)
+
+
 class CrossSearchRequest(BaseModel):
     primary_collection: str
     linked_collections: list[str]

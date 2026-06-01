@@ -20,6 +20,13 @@ if TYPE_CHECKING:
 _PAGE_ANCHOR_RE = re.compile(r"<!--\s*[Pp]age\s*[:.]?\s*(\d+)\s*-->")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 
+# Cleaning-service injects "<!-- image id:<image_id> page:<N> -->" right
+# before each [Bild S.N | image_id]: <alt_text> block. We strip the anchor
+# from the embedding text but use it to bind the chunk to the image.
+_IMAGE_ANCHOR_RE = re.compile(
+    r"<!--\s*image id:(?P<id>\S+)\s+page:(?P<page>\d+)\s*-->"
+)
+
 # Patterns that indicate low-value boilerplate chunks
 _TOC_DOTS_RE = re.compile(r"\.{5,}")  # Lines of dots (TOC filler)
 _WHITESPACE_HEAVY_RE = re.compile(r"\s{3,}")  # Excessive whitespace
@@ -101,6 +108,7 @@ def _page_for_offset(page_index: list[tuple[int, int]], offset: int) -> int | No
 
 
 def _strip_page_anchors(text: str) -> str:
+    text = _IMAGE_ANCHOR_RE.sub("", text)
     return _PAGE_ANCHOR_RE.sub("", text).strip()
 
 
@@ -142,6 +150,7 @@ def chunk_markdown(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     plugin: BasePlugin | None = None,
+    images: list[dict] | None = None,
 ) -> list[Chunk]:
     """Split markdown into Chunks with page-aware metadata.
 
@@ -153,6 +162,20 @@ def chunk_markdown(
     """
     size = chunk_size or settings.DEFAULT_CHUNK_SIZE
     overlap = chunk_overlap or settings.DEFAULT_CHUNK_OVERLAP
+
+    # Lookup table id → image dict from the cleaning service so we can
+    # attach the full {id, page, alt_text, url} payload (not just the id)
+    # to every chunk that mentions the image.
+    images_by_id: dict[str, dict] = {}
+    for img in images or []:
+        img_id = img.get("image_id") or img.get("id")
+        if img_id:
+            images_by_id[img_id] = {
+                "id": img_id,
+                "page": img.get("page"),
+                "alt_text": img.get("alt_text", ""),
+                "url": img.get("url", ""),
+            }
 
     # Heading index is built once on the full markdown so breadcrumbs
     # carry across pages even when a section continues onto the next page.
@@ -167,6 +190,8 @@ def chunk_markdown(
         raw_nodes = splitter.split_text(section_text)
         search_start = 0
         for node_text in raw_nodes:
+            # Capture image anchors BEFORE _strip_page_anchors removes them.
+            chunk_image_ids = [m.group("id") for m in _IMAGE_ANCHOR_RE.finditer(node_text)]
             clean_text = _strip_page_anchors(node_text).strip()
             if not clean_text:
                 continue
@@ -193,6 +218,12 @@ def chunk_markdown(
                 embed_text = clean_text
 
             chunk_id = str(uuid4())
+            chunk_images = [
+                images_by_id[i] for i in chunk_image_ids if i in images_by_id
+            ]
+            meta_extra = {**(extra or {}), "breadcrumb": breadcrumb}
+            if chunk_images:
+                meta_extra["images"] = chunk_images
             meta = ChunkMetadata(
                 chunk_id=chunk_id,
                 file_name=file_name,
@@ -201,7 +232,7 @@ def chunk_markdown(
                 doc_type=doc_type,
                 use_case=use_case,
                 collection=collection,
-                extra={**(extra or {}), "breadcrumb": breadcrumb},
+                extra=meta_extra,
             )
 
             if plugin is not None:
