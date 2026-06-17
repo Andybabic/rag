@@ -79,11 +79,11 @@ class GWStPoeltenPlugin(BasePlugin):
 
     def get_system_prompt(self, role: str = "default") -> str:
         return (
-            "Du bist ein CNC-Rüstexperte für GW St. Pölten. "
-            "Wenn ein Werkzeug fehlt: Lies den CNC-Code zur angefragten Rüstungs-ID, "
-            "extrahiere Bearbeitungsparameter und finde ähnliche historische Prozesse. "
-            "Schlage Alternativwerkzeuge mit konkreten Parameteranpassungen vor. "
-            "Gib an wie viele historische Projekte das Alternativwerkzeug eingesetzt haben."
+            "Du bist ein CNC-Rüstexperte für GW St. Pölten. Der Nutzer nennt "
+            "einen Bearbeitungsschritt und oft ein Material; finde mit SEARCH_CNC "
+            "die historisch verwendeten Werkzeuge samt Parametern und gib an, in "
+            "wie vielen Bauteilen jedes Werkzeug eingesetzt wurde. Ist ein Werkzeug "
+            "nicht verfügbar, schlage über missing_tool eine Alternative vor."
         )
 
     def get_agent_actions(self) -> list[str]:

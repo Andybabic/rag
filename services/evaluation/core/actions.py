@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 from config import settings
@@ -180,64 +181,283 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     return {"observation": "\n".join(lines), "chunks": chunks, "searched_collections": collections_to_search}
 
 
-async def action_search_cnc(args: dict, *, use_case: str) -> str:
-    """SEARCH_CNC – cross-collection search for GW St. Pölten.
+def _op_facet(meta: dict, key: str):
+    """Read an operation facet, tolerating both nested (extra.<key>) and
+    flat payload layouts."""
+    extra = meta.get("extra")
+    if isinstance(extra, dict) and key in extra:
+        return extra[key]
+    return meta.get(key)
 
-    Hard isolation: only allowed for use cases whose prefixes cover the
-    gw_* collections.
+
+def _fmt_tool(tool_type, diameter) -> str:
+    dia = ""
+    if isinstance(diameter, (int, float)):
+        dia = f" Ø{int(diameter) if diameter == int(diameter) else diameter} mm"
+    return f"{tool_type or 'unbekanntes Werkzeug'}{dia}"
+
+
+# Schneidstoff-/Werkzeug-Begriffe – KEINE Werkstücke. Das LLM verwechselt
+# gern „VHM" (Vollhartmetall = Werkzeug) mit dem Werkstück-Material.
+_TOOL_MATERIAL_RE = re.compile(
+    r"\b(VHMI?|VHM|HM|HSS|HB|SF|FF|HARTMETALL|VOLLHARTMETALL|CBN|PKD|DIAMANT)\b",
+    re.I,
+)
+# Durchmesser mit explizitem Marker (Ø, D, DM= oder „mm"-Suffix) – stark.
+_DIA_STRONG = re.compile(
+    r"(?:Ø|DM\s*=?\s*|\bD)\s*(\d{1,3}(?:[.,]\d+)?)|(\d{1,3}(?:[.,]\d+)?)\s*mm\b",
+    re.I,
+)
+# Bloße Zahl, aber NICHT vor „Schneiden/Zähne" (das ist die Schneidenzahl) – schwach.
+_DIA_WEAK = re.compile(
+    r"\b(\d{1,3}(?:[.,]\d+)?)\b(?!\s*(?:schneid|zähn|zaehn))", re.I
+)
+
+
+def _is_tool_material(text: str) -> bool:
+    """True, wenn ``text`` ein Schneidstoff/Werkzeugbegriff ist (kein Werkstück)."""
+    t = text.strip()
+    return bool(t) and bool(_TOOL_MATERIAL_RE.fullmatch(t))
+
+
+def _parse_diameter(*texts: str) -> float | None:
+    """Plausibler Werkzeugdurchmesser (mm) aus den Texten (z.B. „10 VHM-Fräser").
+
+    Bevorzugt explizit markierte Maße (Ø/D/DM=/„mm"); fällt sonst auf eine
+    bloße Zahl zurück, schließt aber Schneidenzahlen („3 Schneiden") aus.
     """
-    # Guard: CNC-search is only valid for use cases owning gw_* collections
+    def _first(rx: re.Pattern[str]) -> float | None:
+        for text in texts:
+            for m in rx.finditer(text or ""):
+                raw = next((g for g in m.groups() if g), None)
+                try:
+                    d = float(raw.replace(",", "."))
+                except (ValueError, AttributeError):
+                    continue
+                if 0.5 <= d <= 200:
+                    return d
+        return None
+
+    return _first(_DIA_STRONG) or _first(_DIA_WEAK)
+
+
+def _dia_eq(a, b, tol: float = 0.01) -> bool:
+    return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= tol
+
+
+async def action_search_cnc(args: dict, *, use_case: str) -> dict:
+    """SEARCH_CNC – Werkzeugempfehlung für GW St. Pölten.
+
+    Beantwortet „Mit welchem Werkzeug kann ich Bearbeitungsschritt X auf
+    Material Y fertigen?" Sucht semantisch in ``gw_cnc_steps`` (die Chunks
+    tragen Operation + Werkzeug + Parameter + Material), aggregiert die
+    Treffer nach Werkzeug und zählt, in wie vielen historischen Bauteilen
+    jedes Werkzeug für diese Operation eingesetzt wurde.
+
+    Args:
+        operation: Bearbeitungsschritt (z.B. „Taschenfräsen", „Bohren Ø10").
+        material:  Werkstoff (z.B. „EN AW-6005A T6", „Aluminium").
+        missing_tool: optional – Werkzeug, das NICHT verfügbar ist; wird aus
+                      den Empfehlungen ausgeschlossen (Alternativsuche).
+
+    Hard isolation: nur für Use Cases erlaubt, die gw_*-Collections besitzen.
+    """
     if not collection_belongs_to_use_case("gw_cnc_steps", use_case):
-        return f"SEARCH_CNC ist für Use Case '{use_case}' nicht verfügbar."
+        return {
+            "observation": f"SEARCH_CNC ist für Use Case '{use_case}' nicht verfügbar.",
+            "chunks": [],
+            "searched_collections": [],
+        }
 
-    ruest_id = args.get("ruest_id", "")
-    filters = {}
-    if ruest_id:
-        filters["ruest_map_id"] = ruest_id
+    operation = (args.get("operation") or args.get("query") or "").strip()
+    material = (args.get("material") or "").strip()
+    missing_tool = (args.get("missing_tool") or "").strip()
 
-    # Get embedding for the query context
-    query = f"CNC Rüstung {ruest_id} {args.get('missing_tool', '')}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        embed_resp = await client.post(
-            f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
-            json={"type": "text", "content": query, "metadata": {}},
-        )
-        embed_resp.raise_for_status()
-        vector = embed_resp.json()["vector"]
+    # Robustheit gegen Arg-Verwechslung kleiner Modelle: „VHM" o.ä. ist ein
+    # Schneidstoff (Werkzeug), kein Werkstück. Niemals als Werkstück-Material
+    # filtern. Liegt schon ein missing_tool vor (Alternativ-Modus), gehört der
+    # Schneidstoff dorthin; sonst nur semantischer Hinweis, kein Ausschluss.
+    tool_hint = ""
+    if material and _is_tool_material(material):
+        if missing_tool:
+            missing_tool = f"{missing_tool} {material}".strip()
+        else:
+            tool_hint = material
+        material = ""
 
-    # Cross-collection search
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{settings.VECTORDB_SERVICE_URL}/v1/search/cross",
-            json={
-                "primary_collection": "gw_cnc_steps",
-                "linked_collections": ["gw_ruest_data", "gw_material_info"],
-                "vector": vector,
-                "link_key": "cnc_step_id",
-                "top_k": 5,
-                "filters": filters,
-            },
-        )
-        resp.raise_for_status()
-        results = resp.json()["results"]
+    # Der Nutzer nennt oft einen Durchmesser („10 VHM-Fräser") – als harte
+    # Eingrenzung nutzen, damit nicht Werkzeuge anderer Größe (Ø9, Ø16 …)
+    # die Antwort verwässern.
+    requested_dia = _parse_diameter(operation, missing_tool)
+
+    query = " ".join(p for p in (
+        f"Bearbeitungsschritt: {operation}." if operation else "",
+        f"Werkzeug: {tool_hint}." if tool_hint else "",
+        f"Material: {material}." if material else "",
+    ) if p) or "CNC Bearbeitung Werkzeug"
+
+    # Optional harte Material-Eingrenzung (exakte Legierung). Schlägt sie
+    # fehl (kein Treffer), wird ohne Filter erneut gesucht – Robustheit vor
+    # Präzision, damit nie fälschlich „nichts gefunden" herauskommt.
+    material_filter = {"extra.material_class": material} if material else {}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            embed_resp = await client.post(
+                f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
+                json={"type": "text", "content": query, "metadata": {}},
+            )
+            embed_resp.raise_for_status()
+            embed_json = embed_resp.json()
+            vector = embed_json["vector"]
+            embed_model = embed_json.get("model")
+
+            async def _search(filters: dict) -> list[dict]:
+                r = await client.post(
+                    f"{settings.VECTORDB_SERVICE_URL}/v1/search",
+                    json={
+                        "collection": "gw_cnc_steps",
+                        "vector": vector,
+                        "top_k": 40,
+                        "filters": filters,
+                        "embed_model": embed_model,
+                    },
+                )
+                if r.status_code != 200:
+                    return []
+                return r.json()["results"]
+
+            results = await _search(material_filter)
+            material_filtered = bool(results)
+            if not results and material_filter:
+                results = await _search({})
+                material_filtered = False
+    except httpx.HTTPError as exc:
+        return {
+            "observation": f"Suchservice nicht erreichbar: {exc}.",
+            "chunks": [],
+            "searched_collections": [],
+        }
 
     if not results:
-        return "Keine CNC-Schritte gefunden."
+        return {
+            "observation": "Keine passenden CNC-Schritte in der Datenbank gefunden.",
+            "chunks": [],
+            "searched_collections": ["gw_cnc_steps"],
+        }
 
-    lines = [f"Gefunden: {len(results)} ähnliche CNC-Schritte"]
-    for i, r in enumerate(results[:5], 1):
-        primary = r["primary"]
-        meta = primary.get("metadata", {})
-        op = meta.get("operation_type", "?")
-        spd = meta.get("cutting_speed", "?")
-        line = f"[{i}] Op: {op}, Speed: {spd}"
-        linked = r.get("linked", {})
-        if linked.get("gw_ruest_data"):
-            line += f" | Rüst: {linked['gw_ruest_data'].get('text', '')[:80]}"
-        if linked.get("gw_material_info"):
-            line += f" | Material: {linked['gw_material_info'].get('text', '')[:80]}"
-        lines.append(line)
-    return "\n".join(lines)
+    # Auf den angefragten Durchmesser eingrenzen (mit Fallback, falls leer).
+    dia_filtered = False
+    if requested_dia is not None:
+        narrowed = [
+            r for r in results
+            if _dia_eq(_op_facet(r.get("metadata", {}), "diameter"), requested_dia)
+        ]
+        if narrowed:
+            results, dia_filtered = narrowed, True
+
+    # Token-basierter Ausschluss des ausgefallenen Werkzeugs (Alternativsuche).
+    # Robust gegen freie Formulierungen („VHM-Fräser 3 Schneiden"). 2-Zeichen
+    # zugelassen, weil Werkzeugcodes wie HB/SF/FF kurz sind – Füllwörter raus.
+    _STOP = {"mm", "und", "der", "die", "das", "mit", "den", "ein", "eine"}
+    missing_tokens = [
+        t for t in re.findall(r"[a-zäöü]{2,}", missing_tool.lower())
+        if t not in _STOP and not t.startswith("durchmess") and t not in ("schneiden", "schneide")
+    ]
+
+    # Aggregation nach Werkzeug (tool_type + Durchmesser).
+    agg: dict[tuple, dict] = {}
+    for r in results:
+        meta = r.get("metadata", {})
+        tool_type = _op_facet(meta, "tool_type")
+        tt_low = str(tool_type or "").lower()
+        if missing_tokens and any(tok in tt_low for tok in missing_tokens):
+            continue  # Alternativsuche: ausgefallenes Werkzeug ausblenden
+        diameter = _op_facet(meta, "diameter")
+        key = (str(tool_type), diameter)
+        a = agg.setdefault(key, {
+            "tool_type": tool_type, "diameter": diameter,
+            "products": set(), "speeds": [], "feeds": [],
+            "materials": set(), "operations": set(), "best_score": 0.0,
+        })
+        if pid := _op_facet(meta, "product_id"):
+            a["products"].add(pid)
+        if (s := _op_facet(meta, "spindle_speed")):
+            a["speeds"].append(s)
+        if (f := _op_facet(meta, "feed")):
+            a["feeds"].append(f)
+        if (mc := _op_facet(meta, "material_class")):
+            a["materials"].add(mc)
+        if (op := _op_facet(meta, "operation_type")):
+            a["operations"].add(op)
+        a["best_score"] = max(a["best_score"], r.get("score", 0.0))
+
+    # Ranking: häufigste Verwendung (Projekte) zuerst, dann Score.
+    ranked = sorted(
+        agg.values(),
+        key=lambda a: (len(a["products"]), a["best_score"]),
+        reverse=True,
+    )
+
+    if not ranked:
+        msg = (
+            "Keine alternativen Werkzeuge gefunden – die gesuchte Operation "
+            "wurde historisch nur mit dem ausgeschlossenen Werkzeug gefahren."
+            if missing_tokens else
+            "Keine passenden Werkzeuge in der Datenbank gefunden."
+        )
+        return {"observation": msg, "chunks": [], "searched_collections": ["gw_cnc_steps"]}
+
+    head = f"Bearbeitungsschritt: {operation or '—'}"
+    if requested_dia is not None:
+        d = int(requested_dia) if requested_dia == int(requested_dia) else requested_dia
+        head += f" | Ø {d} mm" + ("" if dia_filtered else " (kein exakter Ø-Treffer)")
+    if material:
+        head += f" | Material: {material}"
+        if not material_filtered:
+            head += " (kein exakter Material-Treffer – semantische Suche)"
+    if missing_tokens:
+        head += f" | Alternativen ohne: {missing_tool}"
+    lines = [head, f"{len(ranked)} Werkzeug-Option(en) aus historischen Programmen:"]
+
+    chunks = []
+    for i, a in enumerate(ranked[:5], 1):
+        n = len(a["products"])
+        params = []
+        if a["speeds"]:
+            params.append(f"S {min(a['speeds'])}–{max(a['speeds'])}" if len(set(a["speeds"])) > 1 else f"S {a['speeds'][0]}")
+        if a["feeds"]:
+            params.append(f"F {min(a['feeds'])}–{max(a['feeds'])}" if len(set(a["feeds"])) > 1 else f"F {a['feeds'][0]}")
+        param_str = f", Parameter {', '.join(params)}" if params else ""
+        mat_str = f", Material {', '.join(sorted(a['materials']))}" if a["materials"] else ""
+        ops_str = "/".join(sorted(a["operations"])) or "?"
+        lines.append(
+            f"[{i}] {_fmt_tool(a['tool_type'], a['diameter'])} – "
+            f"in {n} Bauteil(en) für {ops_str}{param_str}{mat_str}"
+        )
+        chunks.append({
+            "text": f"{_fmt_tool(a['tool_type'], a['diameter'])} ({ops_str}) – {n} Projekte",
+            "score": a["best_score"],
+            "metadata": {
+                "tool_type": a["tool_type"], "diameter": a["diameter"],
+                "operation_type": ops_str, "project_count": n,
+                "products": sorted(a["products"]),
+            },
+        })
+
+    if ranked:
+        top = ranked[0]
+        lines.append(
+            f"Empfehlung: {_fmt_tool(top['tool_type'], top['diameter'])} "
+            f"(häufigstes Werkzeug für diese Operation"
+            + (f", {len(top['products'])} Bauteile)." if top["products"] else ").")
+        )
+
+    return {
+        "observation": "\n".join(lines),
+        "chunks": chunks,
+        "searched_collections": ["gw_cnc_steps"],
+    }
 
 
 async def action_refine_query(args: dict, *, use_case: str, collection: str, filters: dict | None) -> dict:

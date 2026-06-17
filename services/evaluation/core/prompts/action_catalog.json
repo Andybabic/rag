@@ -1,6 +1,6 @@
 {
   "SEARCH": "Semantische Suche in der Vektordatenbank. Embedding der Query, Suche in den zugewiesenen Collections, Reranking.",
-  "SEARCH_CNC": "Cross-Collection-Suche für CNC-Rüstdaten. Verknüpft CNC-Schritte mit Rüstungs- und Materialdaten.",
+  "SEARCH_CNC": "Werkzeugempfehlung aus historischen CNC-Programmen. Sucht zu einem Bearbeitungsschritt (operation) und optional Material die tatsächlich verwendeten Werkzeuge, aggregiert sie und zählt, in wie vielen Bauteilen jedes Werkzeug eingesetzt wurde. missing_tool blendet ein ausgefallenes Werkzeug aus (Alternativsuche).",
   "REFINE_QUERY": "Formuliere die Suchanfrage um – mit Synonymen, Oberbegriffen oder anderer Granularität – und führe eine neue Suche durch. Nur sinnvoll, wenn die vorherige SEARCH mager war.",
   "CLARIFY": "Rückfrage an den Benutzer stellen, wenn die Anfrage unklar oder mehrdeutig ist.",
   "RECALL_MEMORY": "Agent-Gedächtnis abrufen – gespeicherte Erkenntnisse aus früheren Anfragen.",

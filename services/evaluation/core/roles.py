@@ -119,11 +119,20 @@ def get_role(name: str) -> RoleConfig:
 def filter_actions(role: RoleConfig, available_actions: list[str]) -> list[str]:
     """Intersect role-allowed actions with what the use case has enabled.
 
+    Use-case-specific retrieval variants (any enabled ``SEARCH*`` action,
+    e.g. ``SEARCH_CNC``) augment every role that can already ``SEARCH``.
+    Without this, the role allowlist silently strips a specialised retrieval
+    tool the use case enabled, so the manager path can never reach it.
+
     Guarantees FINAL_ANSWER stays in the list — otherwise the loop can never
     terminate properly.
     """
     enabled = set(available_actions)
     filtered = [a for a in role.actions if a in enabled]
+    if "SEARCH" in filtered:
+        for a in available_actions:
+            if a.startswith("SEARCH") and a not in filtered:
+                filtered.append(a)
     if "FINAL_ANSWER" not in filtered:
         filtered.append("FINAL_ANSWER")
     return filtered

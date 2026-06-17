@@ -1,6 +1,6 @@
 {
   "SEARCH": "SEARCH({\"query\": \"...\", \"collection\": \"...\", \"filters\": {}})",
-  "SEARCH_CNC": "SEARCH_CNC({\"ruest_id\": \"...\", \"missing_tool\": \"...\"})",
+  "SEARCH_CNC": "SEARCH_CNC({\"operation\": \"Bearbeitungsschritt z.B. Taschenfräsen\", \"material\": \"z.B. EN AW-6005A T6\", \"missing_tool\": \"optional: ausgefallenes Werkzeug für Alternativsuche\"})",
   "REFINE_QUERY": "REFINE_QUERY({\"query\": \"umformulierte Suchanfrage\", \"reason\": \"warum die vorherige Suche nicht reichte\"})",
   "CLARIFY": "CLARIFY({\"question\": \"...\"})",
   "RECALL_MEMORY": "RECALL_MEMORY({})",

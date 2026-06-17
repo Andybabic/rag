@@ -136,57 +136,123 @@ async def test_structure_request_id_present(client):
 # ── POST /v1/structure/cnc ─────────────────────────────────
 
 
+# Minimal Sinumerik program (simple dialect) – one chunk per tool operation.
+_CNC_MD = (
+    "%_N_112217126_MPF\n"
+    ";11221.7126\n"
+    ";T-PROFILE CC1500_073A06\n"
+    ";Z-NR.: 6AAE00000067693-B\n\n"
+    "T1 M16 ;DM=9 VHMI-BOHRER\n"
+    "G0 G54 X1155 Y28 S10900 F3000 M3 M7 M8\n"
+    "MCALL CYCLE82(5,0,5,-9.5,,0.1)\n"
+    "M30\n"
+)
+
+
 def _cnc_body(**overrides):
     body = {
-        "markdown": (
-            "N10 G01 X100 F0.3 S1200\nN20 G01 Y50\n\n"
-            "Materialangabe Stahl ST52\n\n"
-            "Allgemeine Rüstanweisung für Werkzeug A."
-        ),
-        "metadata": {"product_id": "P-100", "ruest_map_id": "R-200"},
+        "markdown": _CNC_MD,
+        "metadata": {"file_name": "112217126", "material_class": "EN AW-6005A T6"},
     }
     body.update(overrides)
     return body
 
 
 @pytest.mark.anyio
-async def test_cnc_endpoint_separates_lists(client):
+async def test_cnc_endpoint_returns_operation_chunks(client):
     resp = await client.post("/v1/structure/cnc", json=_cnc_body())
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert "cnc_blocks" in body
-    assert "ruest_chunks" in body
-    assert "material_chunks" in body
+    assert body["product_id"] == "11221.7126"
+    assert body["dialect"] == "simple"
+    assert body["routing"]["collection"] == "gw_cnc_steps"
+    assert body["total_chunks"] == 1
+    assert len(body["chunks"]) == 1
 
 
 @pytest.mark.anyio
-async def test_cnc_endpoint_cnc_block_fields(client):
-    md = "N10 G01 X100 F0.3 S1200\nN20 G01 Y50 F0.2 S1000"
-    resp = await client.post("/v1/structure/cnc", json=_cnc_body(markdown=md))
-    body = resp.json()
-    cnc = body["cnc_blocks"]
-    assert len(cnc) >= 1
-    block = cnc[0]
-    assert "cnc_step_id" in block
-    assert block["operation_type"] == "Linearfraesen"
-    assert block["cutting_speed"] == 1200
+async def test_cnc_endpoint_chunk_fields(client):
+    resp = await client.post("/v1/structure/cnc", json=_cnc_body())
+    chunk = resp.json()["chunks"][0]
+    extra = chunk["metadata"]["extra"]
+    assert chunk["metadata"]["collection"] == "gw_cnc_steps"
+    assert extra["operation_type"] == "Bohren"
+    assert extra["tool_type"] == "VHMI-BOHRER"
+    assert extra["diameter"] == 9.0
+    assert extra["spindle_speed"] == 10900
+    assert extra["feed"] == 3000
+    assert extra["product_id"] == "11221.7126"
+    assert extra["material_class"] == "EN AW-6005A T6"
+    assert extra["cnc_step_id"] == chunk["id"]
 
 
 @pytest.mark.anyio
-async def test_cnc_endpoint_material_chunks(client):
-    md = "Material: Edelstahl, Härte 58 HRC, Dichte hoch. " * 50
-    resp = await client.post("/v1/structure/cnc", json=_cnc_body(markdown=md))
-    body = resp.json()
-    assert len(body["material_chunks"]) >= 1
+async def test_cnc_endpoint_material_woven_into_text(client):
+    resp = await client.post("/v1/structure/cnc", json=_cnc_body())
+    chunk = resp.json()["chunks"][0]
+    assert "EN AW-6005A T6" in chunk["text"]
+    assert "Bohren" in chunk["text"]
+
+
+# ── POST /v1/structure/folder ──────────────────────────────
+
+
+def _make_zip(entries: dict) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for path, data in entries.items():
+            zf.writestr(path, data)
+    return buf.getvalue()
+
+
+_FOLDER_ZIP = {
+    "11221.7126/112217126": _CNC_MD,                       # CNC (extension-less)
+    "11221.7126/StÅckliste.csv": "Pos;Bez\n10;EN AW-6005A T6\n",
+    "11221.7126/Einstellblatt 3.pdf": "%PDF-1.4 fake",
+    "11221.7126/7126_1.jpg": "\xff\xd8\xff",
+    "11221.7126/112217126_VORLAGE": _CNC_MD,               # template → skipped
+}
 
 
 @pytest.mark.anyio
-async def test_cnc_endpoint_ruest_chunks(client):
-    md = "Allgemeine Rüstanweisung für Werkzeug A. " * 20
-    resp = await client.post("/v1/structure/cnc", json=_cnc_body(markdown=md))
+async def test_folder_endpoint_groups_and_links(client):
+    resp = await client.post(
+        "/v1/structure/folder",
+        content=_make_zip(_FOLDER_ZIP),
+        headers={"content-type": "application/zip"},
+    )
+    assert resp.status_code == 200
     body = resp.json()
-    assert len(body["ruest_chunks"]) >= 1
+    assert len(body["products"]) == 1
+    prod = body["products"][0]
+    assert prod["product_id"] == "11221.7126"
+    assert prod["cnc_files"] == 1                  # VORLAGE excluded
+    assert prod["material_class"] == "EN AW-6005A T6"
+    assert prod["einstellblaetter"] == ["Einstellblatt 3.pdf"]
+    assert prod["images"] == 1
+
+    cnc = [c for c in body["chunks"] if c["metadata"]["collection"] == "gw_cnc_steps"]
+    mat = [c for c in body["chunks"] if c["metadata"]["collection"] == "gw_material_info"]
+    assert len(cnc) == 1
+    assert len(mat) == 1
+    # Material aus der Stückliste ist in die CNC-Operation eingewoben
+    assert cnc[0]["metadata"]["extra"]["material_class"] == "EN AW-6005A T6"
+    assert "EN AW-6005A T6" in cnc[0]["text"]
+
+
+@pytest.mark.anyio
+async def test_folder_endpoint_rejects_non_zip(client):
+    resp = await client.post(
+        "/v1/structure/folder",
+        content=b"not a zip",
+        headers={"content-type": "application/zip"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "bad_zip"
 
 
 # ── GET /v1/use-cases ────────────────────────────────────────

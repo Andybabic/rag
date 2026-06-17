@@ -45,6 +45,54 @@ class TextHandler(BaseHandler):
         )
 
 
+def decode_cnc_bytes(raw: bytes) -> str:
+    """Dekodiere rohe CNC-Bytes robust zu Text.
+
+    Echte UTF-8-Exporte (mit ``Ø``) zuerst; schlägt das fehl (einzelnes
+    ``0xE4`` = ``ä`` ist kein gültiges UTF-8), greift cp1252. Die
+    semantische Umlaut-Normalisierung (``Frdsen`` → ``Fräsen`` etc.)
+    passiert erst im data-structure-Parser (``core.cnc_parser``).
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
+def looks_like_cnc(text: str) -> bool:
+    """Content-Sniffing für endungslose Sinumerik/MPF-Maschinendateien.
+
+    Spiegelt ``core.cnc_parser.looks_like_cnc`` im data-structure-Service –
+    bewusst dupliziert, um keine Cross-Service-Abhängigkeit einzuführen.
+    """
+    head = text[:2000]
+    if re.search(r"%_N_.*_MPF", head):
+        return True
+    tokens = len(re.findall(r"\b[GMT]\d+\b|CYCLE\d+|MCALL", head))
+    return tokens >= 8
+
+
+class GCodeHandler(BaseHandler):
+    """CNC-/G-Code-Programme (Sinumerik MPF).
+
+    Diese Dateien kommen aus der Maschine/CAM meist OHNE Endung. Der
+    Handler dekodiert robust und reicht den Text unverändert weiter; die
+    eigentliche Zerlegung in Werkzeug-Operationen übernimmt der
+    data-structure-Service (``POST /v1/structure/cnc``).
+    """
+
+    supported_extensions = [".mpf", ".spf", ".nc", ".cnc"]
+
+    async def parse(self, file_bytes: bytes, filename: str) -> ParsedDocument:
+        text = decode_cnc_bytes(file_bytes)
+        return ParsedDocument(
+            text=text,
+            pages=[{"page": 1, "text": text}],
+            images=[],
+            metadata={"format": "cnc", "doc_type": "cnc"},
+        )
+
+
 class CsvHandler(BaseHandler):
     supported_extensions = [".csv"]
 
@@ -624,10 +672,16 @@ def supported_formats() -> list[str]:
     return sorted(HANDLER_REGISTRY.keys())
 
 
+_GCODE_HANDLER = GCodeHandler()
+
 HANDLER_REGISTRY: dict[str, BaseHandler] = {
     ".pdf": PDFHandler(),
     ".docx": DocxHandler(),
     ".csv": CsvHandler(),
     ".txt": TextHandler(),
     ".md": TextHandler(),
+    ".mpf": _GCODE_HANDLER,
+    ".spf": _GCODE_HANDLER,
+    ".nc": _GCODE_HANDLER,
+    ".cnc": _GCODE_HANDLER,
 }
