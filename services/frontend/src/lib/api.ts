@@ -96,6 +96,33 @@ export async function uploadFile(file: File, useCase: string) {
 	return resp.json();
 }
 
+export interface FolderUploadResult {
+	status: string;
+	chunks: number;
+	products?: Array<{
+		product_id: string;
+		cnc_files: number;
+		operations: number;
+		material_class: string | null;
+		einstellblaetter: string[];
+		images: number;
+	}>;
+	skipped_noncanonical?: string[];
+}
+
+/** Upload a whole product folder as a single ZIP (CNC use case). */
+export async function uploadFolder(file: File, useCase: string): Promise<FolderUploadResult> {
+	const form = new FormData();
+	form.append('file', file);
+	form.append('use_case', useCase);
+	const resp = await fetch(`${BASE}/ingest/folder`, {
+		method: 'POST',
+		body: form
+	});
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
 export async function getCollections() {
 	const resp = await fetch(`${BASE}/collections`);
 	return resp.json();

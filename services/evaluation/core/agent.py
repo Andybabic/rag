@@ -372,6 +372,12 @@ async def run_agent(
         elif action_name == "REFINE_QUERY":
             has_searched = True
             last_search_query = action_args.get("query") or last_search_query
+        elif action_name == "SEARCH_CNC":
+            # SEARCH_CNC ist eine vollwertige Retrieval-Action. Ohne dies
+            # erzwingt der Guardrail unten ein generisches SEARCH und holt
+            # damit irrelevante Treffer (Bohrer/Anbohrer) zurück, die eine
+            # saubere CNC-Werkzeugempfehlung wieder verwässern.
+            has_searched = True
 
         # 2. Execute action
         result = await _execute_action(

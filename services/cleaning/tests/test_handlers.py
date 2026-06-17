@@ -207,7 +207,43 @@ async def test_pdf_handler_pymupdf_idempotent():
 
 def test_supported_formats():
     fmts = supported_formats()
-    assert fmts == [".csv", ".docx", ".md", ".pdf", ".txt"]
+    assert fmts == [
+        ".cnc", ".csv", ".docx", ".md", ".mpf", ".nc", ".pdf", ".spf", ".txt"
+    ]
+
+
+# ── CNC / G-Code handler ─────────────────────────────────────
+
+_CNC_BYTES = (
+    b"%_N_112217126_MPF\r\n;11221.7126\r\n"
+    b"T1 M16 ;DM=9 VHMI-BOHRER\r\n"
+    b"G0 G54 X1155 Y28 S10900 F3000 M3 M7 M8\r\nMCALL CYCLE82(5,0,5,-9.5,,0.1)\r\nM30\r\n"
+)
+
+
+@pytest.mark.anyio
+async def test_cnc_extensionless_sniffed_and_parsed():
+    """A file WITHOUT extension is recognised as CNC by content."""
+    from core.cleaner import clean
+
+    doc = await clean(_CNC_BYTES, "112217126")  # no extension
+    assert doc.metadata["format"] == "cnc"
+    assert "VHMI-BOHRER" in doc.text
+
+
+@pytest.mark.anyio
+async def test_cnc_by_extension():
+    from core.cleaner import clean
+
+    doc = await clean(_CNC_BYTES, "prog.mpf")
+    assert doc.metadata["format"] == "cnc"
+
+
+def test_cnc_decode_cp1252_umlaut():
+    from core.handlers import decode_cnc_bytes
+
+    # 0xE4 = ä in cp1252 (invalid UTF-8) must not crash and must round-trip
+    assert decode_cnc_bytes(b"Fr\xe4sen") == "Fräsen"
 
 
 # ── Unsupported format via cleaner ───────────────────────────
@@ -217,6 +253,7 @@ def test_supported_formats():
 async def test_unsupported_format_raises():
     from core.cleaner import clean
 
+    # Non-CNC content with an unknown extension still raises.
     with pytest.raises(ValueError, match="Unsupported file format"):
         await clean(b"data", "file.xyz")
 

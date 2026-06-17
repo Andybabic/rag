@@ -1,6 +1,12 @@
 <script lang="ts">
 	import { app } from '$lib/state.svelte';
-	import { deleteDocument, getDocuments } from '$lib/api';
+	import {
+		deleteDocument,
+		getDocuments,
+		uploadFile,
+		uploadFolder,
+		type FolderUploadResult
+	} from '$lib/api';
 	import TablePreviewModal from './TablePreviewModal.svelte';
 	import ImageGalleryModal from './ImageGalleryModal.svelte';
 
@@ -30,6 +36,66 @@
 	let gallery = $state<{ useCase: string; fileHash: string; fileName: string } | null>(null);
 	let deletingId = $state<string | null>(null);
 	let deleteError = $state<string | null>(null);
+
+	// ── Upload state ──────────────────────────────────────────────
+	let pdfUploading = $state(false);
+	let pdfProgress = $state({ done: 0, total: 0 });
+	let pdfResults = $state<Array<{ name: string; ok: boolean; msg: string }>>([]);
+
+	let zipUploading = $state(false);
+	let zipName = $state<string | null>(null);
+	let zipResult = $state<FolderUploadResult | null>(null);
+	let zipError = $state<string | null>(null);
+
+	async function handlePdfFiles(files: FileList | null) {
+		if (!files || files.length === 0) return;
+		const list = Array.from(files);
+		pdfUploading = true;
+		pdfResults = [];
+		pdfProgress = { done: 0, total: list.length };
+		// Sequential – the cleaning + ingest pipeline is heavy.
+		for (let i = 0; i < list.length; i++) {
+			const file = list[i];
+			try {
+				const result = await uploadFile(file, app.useCase);
+				pdfResults = [...pdfResults, { name: file.name, ok: true, msg: `${result.chunks ?? 0} Chunks` }];
+			} catch (err) {
+				const message = err instanceof Error ? err.message : 'Upload fehlgeschlagen';
+				pdfResults = [...pdfResults, { name: file.name, ok: false, msg: message }];
+			}
+			pdfProgress = { done: i + 1, total: list.length };
+		}
+		pdfUploading = false;
+		await load();
+	}
+
+	async function handleZipFile(files: FileList | null) {
+		if (!files || files.length === 0) return;
+		const file = files[0];
+		zipUploading = true;
+		zipResult = null;
+		zipError = null;
+		zipName = file.name;
+		try {
+			zipResult = await uploadFolder(file, app.useCase);
+		} catch (err) {
+			zipError = err instanceof Error ? err.message : 'Upload fehlgeschlagen';
+		}
+		zipUploading = false;
+		await load();
+	}
+
+	function onPdfInput(e: Event) {
+		const target = e.target as HTMLInputElement;
+		handlePdfFiles(target.files);
+		target.value = '';
+	}
+
+	function onZipInput(e: Event) {
+		const target = e.target as HTMLInputElement;
+		handleZipFile(target.files);
+		target.value = '';
+	}
 
 	async function load() {
 		loading = true;
@@ -113,6 +179,92 @@
 				{deleteError}
 			</div>
 		{/if}
+
+		<!-- Upload -->
+		<section>
+			<h3 class="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-400">Upload</h3>
+			<div class="grid gap-3 sm:grid-cols-2">
+				<!-- PDF / Dokument-Upload -->
+				<div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+					<p class="mb-2 text-sm font-medium text-gray-700">Dokumente (PDF)</p>
+					<label
+						class="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 px-4 py-6 text-center transition-colors hover:border-blue-400 hover:bg-blue-50"
+					>
+						{#if pdfUploading}
+							<span class="text-sm text-gray-500">Verarbeite {pdfProgress.done}/{pdfProgress.total} …</span>
+						{:else}
+							<span class="text-sm text-gray-500">PDFs hierher ziehen oder wählen</span>
+							<span class="mt-1 text-xs text-blue-600">Mehrfachauswahl möglich</span>
+						{/if}
+						<input
+							type="file"
+							accept=".pdf,.docx,.pptx,.txt"
+							multiple
+							class="hidden"
+							disabled={pdfUploading}
+							onchange={onPdfInput}
+						/>
+					</label>
+					{#if pdfResults.length > 0}
+						<ul class="mt-2 space-y-1 text-xs">
+							{#each pdfResults as r}
+								<li class="flex items-center justify-between gap-2">
+									<span class="truncate text-gray-600" title={r.name}>{r.name}</span>
+									<span class={r.ok ? 'shrink-0 text-green-600' : 'shrink-0 text-red-600'} title={r.msg}>
+										{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg.slice(0, 50)}`}
+									</span>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+
+				<!-- ZIP / Ordner-Upload -->
+				<div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+					<p class="mb-2 text-sm font-medium text-gray-700">Produkt-Ordner (ZIP)</p>
+					<label
+						class="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-300 px-4 py-6 text-center transition-colors hover:border-blue-400 hover:bg-blue-50"
+					>
+						{#if zipUploading}
+							<span class="text-sm text-gray-500">Verarbeite {zipName} …</span>
+						{:else}
+							<span class="text-sm text-gray-500">ZIP des Produkt-Ordners wählen</span>
+							<span class="mt-1 text-xs text-blue-600">CNC-Code, Stückliste, Einstellblätter</span>
+						{/if}
+						<input
+							type="file"
+							accept=".zip"
+							class="hidden"
+							disabled={zipUploading}
+							onchange={onZipInput}
+						/>
+					</label>
+
+					{#if zipError}
+						<p class="mt-2 text-xs text-red-600" title={zipError}>✗ {zipError.slice(0, 80)}</p>
+					{:else if zipResult}
+						<div class="mt-2 space-y-1 text-xs">
+							<p class="font-medium text-green-700">
+								✓ {zipResult.chunks} Chunks aus {zipResult.products?.length ?? 0} Produkt(en)
+							</p>
+							{#each zipResult.products ?? [] as p}
+								<div class="flex items-center justify-between gap-2 text-gray-600">
+									<span class="truncate" title={p.product_id}>{p.product_id}</span>
+									<span class="shrink-0 text-gray-400">
+										{p.operations} Op. · {p.material_class ?? 'kein Material'}
+									</span>
+								</div>
+							{/each}
+							{#if zipResult.skipped_noncanonical?.length}
+								<p class="text-gray-400">
+									{zipResult.skipped_noncanonical.length} Datei(en) übersprungen (Vorlagen/CAM)
+								</p>
+							{/if}
+						</div>
+					{/if}
+				</div>
+			</div>
+		</section>
 
 		{#if loading}
 			<p class="text-sm text-gray-400 animate-pulse">Laden...</p>
