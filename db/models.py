@@ -37,6 +37,8 @@ class Query(Base):
     answer_text = Column(Text)
     chunks_used = Column(JSONB)
     agent_steps = Column(JSONB)
+    citations = Column(JSONB)
+    images = Column(JSONB)
     scores = Column(JSONB)
     sufficient = Column(Boolean)
     created_at = Column(
@@ -166,6 +168,58 @@ class UseCasePrompt(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("use_case", "prompt_key", name="pk_usecase_prompts"),
+    )
+
+
+class UseCase(Base):
+    """DB-backed use-case registry — seeded from config/use_cases.json at boot,
+    editable via the dashboard afterwards.
+
+    ``id`` is the API id (e.g. ``gw_stpoelten``) used as the ``use_case`` key in
+    every other table. ``slug`` is the URL form used by the frontend router.
+    Prompts live in :class:`UseCasePrompt` (key ``agent.system.{role}``).
+    """
+
+    __tablename__ = "use_cases"
+
+    id = Column(String(50), primary_key=True)
+    slug = Column(String(50), nullable=False, unique=True)
+    label = Column(String(100), nullable=False)
+    description = Column(Text, server_default="")
+    color = Column(String(40), server_default="")
+    accent = Column(String(20), server_default="")
+    roles = Column(JSONB, nullable=False)
+    agent_action_names = Column(JSONB, nullable=False)
+    default_collection = Column(String(100), nullable=False)
+    collection_prefixes = Column(JSONB)
+    enabled = Column(Boolean, nullable=False, server_default="true")
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class User(Base):
+    """Dashboard/app user account. Passwords stored hashed (PBKDF2-SHA256).
+
+    Roles: ``admin`` (manage users + use cases) and ``user`` (chat only).
+    The first admin is seeded from env at startup.
+    """
+
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username = Column(String(100), nullable=False, unique=True)
+    password_hash = Column(Text, nullable=False)
+    role = Column(String(20), nullable=False, server_default="user")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('admin', 'user')",
+            name="ck_users_role",
+        ),
     )
 
 

@@ -1,0 +1,117 @@
+{
+  "_comment": "Kanonische Use-Case-Konfiguration. Beim Start werden FEHLENDE Use Cases hieraus in die DB geseedet (bestehende DB-/Dashboard-Stände bleiben unberührt). Im Dashboard editierbar und als JSON exportierbar.",
+  "version": 1,
+  "use_cases": [
+    {
+      "id": "neumann",
+      "slug": "neumann",
+      "label": "Firma Neumann",
+      "description": "Maschinenwartung",
+      "color": "bg-blue-600",
+      "accent": "#2563eb",
+      "enabled": true,
+      "roles": [
+        "default"
+      ],
+      "agent_action_names": [
+        "SEARCH",
+        "REFINE_QUERY",
+        "CLARIFY",
+        "RECALL_MEMORY",
+        "LOOKUP_SOURCES",
+        "FINAL_ANSWER"
+      ],
+      "default_collection": "neumann_machines",
+      "collection_prefixes": [
+        "neumann_"
+      ],
+      "prompts": {
+        "default": "Du bist ein Wartungsassistent für industrielle Maschinen. Beantworte Störungsmeldungen basierend auf den Wartungshandbüchern.\n\nREGELN:\n- Antworte KNAPP und PRÄZISE (max. 5-8 Sätze).\n- Verwende [1], [2] etc. als Quellenverweise, die den Suchergebnissen entsprechen.\n- Wenn du keine passende Information findest, sage das klar.\n- Erfinde KEINE Quellen. Verwende NUR die Informationen aus den OBSERVATION-Ergebnissen."
+      }
+    },
+    {
+      "id": "gw_stpoelten",
+      "slug": "gw-stpoelten",
+      "label": "GW St. Poelten",
+      "description": "CNC-Ruestung",
+      "color": "bg-emerald-600",
+      "accent": "#059669",
+      "enabled": true,
+      "roles": [
+        "default"
+      ],
+      "agent_action_names": [
+        "SEARCH",
+        "SEARCH_CNC",
+        "REFINE_QUERY",
+        "CLARIFY",
+        "RECALL_MEMORY",
+        "LOOKUP_SOURCES",
+        "FINAL_ANSWER"
+      ],
+      "default_collection": "gw_cnc_steps",
+      "collection_prefixes": [
+        "gw_"
+      ],
+      "prompts": {
+        "default": "Du bist ein CNC-Rüstexperte für GW St. Pölten. Du empfiehlst Werkzeuge auf Basis historischer CNC-Programme.\n\nVORGEHEN:\n- Der Nutzer nennt einen Bearbeitungsschritt (z.B. \"Taschenfräsen\", \"Bohren Ø10\") und oft ein Material (z.B. \"EN AW-6005A T6\", \"Aluminium\").\n- Rufe SEARCH_CNC mit operation und (falls genannt) material auf. Das liefert die historisch verwendeten Werkzeuge, ihre Parameter und in wie vielen Bauteilen sie eingesetzt wurden.\n- Ist ein bestimmtes Werkzeug nicht verfügbar, gib es als missing_tool an – dann erhältst du gleichwertige Alternativen.\n- Fehlen operation oder material und sind sie für die Antwort nötig, nutze CLARIFY.\n\nREGELN:\n- Antworte KNAPP und PRÄZISE (max. 5-8 Sätze).\n- Nenne das empfohlene Werkzeug konkret: Typ, Durchmesser und – wenn vorhanden – Drehzahl/Vorschub.\n- Gib an, in wie vielen historischen Bauteilen das Werkzeug verwendet wurde.\n- Verwende [1], [2] etc. als Quellenverweise auf die OBSERVATION-Treffer.\n- Erfinde KEINE Werkzeuge, Parameter oder Quellen. Verwende NUR Informationen aus den OBSERVATION-Ergebnissen. Findet SEARCH_CNC nichts, sage das klar."
+      }
+    },
+    {
+      "id": "wiener_linien",
+      "slug": "wiener-linien",
+      "label": "Wiener Linien",
+      "description": "Wissensassistent",
+      "color": "bg-purple-600",
+      "accent": "#7c3aed",
+      "enabled": true,
+      "roles": [
+        "default",
+        "trainee"
+      ],
+      "agent_action_names": [
+        "SEARCH",
+        "REFINE_QUERY",
+        "CLARIFY",
+        "RECALL_MEMORY",
+        "LOOKUP_SOURCES",
+        "FINAL_ANSWER"
+      ],
+      "default_collection": "wl_default",
+      "collection_prefixes": [
+        "wl_"
+      ],
+      "prompts": {
+        "default": "Du bist ein Wissensassistent für Fachpersonal der Wiener Linien. Beantworte Fragen fachlich präzise mit direkten Handlungsschritten.\n\nREGELN:\n- Antworte KNAPP und PRÄZISE (max. 5-8 Sätze).\n- Verwende [1], [2] etc. als Quellenverweise.\n- Zitiere Gesetzestexte mit korrekter §-Angabe.\n- Erfinde KEINE Quellen. Verwende NUR Informationen aus den OBSERVATION-Ergebnissen.",
+        "trainee": "Du bist ein Lern-Assistent für Auszubildende der Wiener Linien. Erkläre Konzepte in einfacher, verständlicher Sprache. Verwende Beispiele aus dem Alltag.\n\nREGELN:\n- Antworte KNAPP und VERSTÄNDLICH (max. 5-8 Sätze).\n- Verwende [1], [2] etc. als Quellenverweise.\n- Bei Unklarheit frage nach, bevor du antwortest.\n- Erfinde KEINE Quellen. Verwende NUR Informationen aus den OBSERVATION-Ergebnissen."
+      }
+    },
+    {
+      "id": "ustp",
+      "slug": "ustp",
+      "label": "USTP",
+      "description": "Neuer Use Case",
+      "color": "bg-amber-600",
+      "accent": "#d97706",
+      "enabled": true,
+      "roles": [
+        "default"
+      ],
+      "agent_action_names": [
+        "SEARCH",
+        "REFINE_QUERY",
+        "CLARIFY",
+        "RECALL_MEMORY",
+        "LOOKUP_SOURCES",
+        "FINAL_ANSWER"
+      ],
+      "default_collection": "ustp_default",
+      "collection_prefixes": [
+        "ustp_"
+      ],
+      "prompts": {
+        "default": "Du bist der Auskunfts-Assistent. Deine einzige Wissensquelle sind die OBSERVATION-Chunks\naus der Dokumentensuche.\n\nAntwortregeln:\n- Antworte ausschließlich mit Informationen, die in den Chunks stehen.\n- Jede Tatsachenbehauptung (Name, Adresse, Raumnummer, Öffnungszeit,\n  Telefonnummer, Gebäude, Service, …) muss mit einer Quelle [n] belegt sein.\n- Wenn die Frage nicht (oder nur teilweise) durch die Chunks beantwortbar\n  ist, sage wörtlich: „Dazu enthalten die Dokumente keine Information.\" –\n  und gib KEINE Vermutung, KEIN Allgemeinwissen, KEINE Adresse von außen.\n- Verwende einen sachlichen, knappen Ton. Lange Spekulationen vermeiden."
+      }
+    }
+  ]
+}

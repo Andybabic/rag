@@ -11,7 +11,19 @@ import httpx
 
 from shared.llm.base import LLMProvider
 from shared.llm.errors import LLMUnavailableError
+from shared.llm.images import to_raw_base64
 from shared.llm.registry import register
+
+
+def _normalize_images(messages: list[dict]) -> list[dict]:
+    """Ollama wants raw base64 in a message's ``images`` array — strip any
+    data-URI prefix. Messages without images pass through unchanged."""
+    out: list[dict] = []
+    for m in messages:
+        if m.get("images"):
+            m = {**m, "images": [to_raw_base64(img) for img in m["images"]]}
+        out.append(m)
+    return out
 
 
 @register("ollama")
@@ -37,7 +49,7 @@ class OllamaProvider(LLMProvider):
                     headers=self._headers(),
                     json={
                         "model": model,
-                        "messages": messages,
+                        "messages": _normalize_images(messages),
                         "stream": False,
                         "options": options,
                     },

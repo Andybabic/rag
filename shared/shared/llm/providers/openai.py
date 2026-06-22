@@ -14,7 +14,27 @@ import httpx
 
 from shared.llm.base import LLMProvider
 from shared.llm.errors import LLMUnavailableError
+from shared.llm.images import to_data_uri
 from shared.llm.registry import register
+
+
+def _normalize_images(messages: list[dict]) -> list[dict]:
+    """Convert any message carrying an ``images`` list into OpenAI's
+    multimodal ``content`` array (text part + image_url parts). Messages
+    without images pass through unchanged."""
+    out: list[dict] = []
+    for m in messages:
+        images = m.get("images")
+        if not images:
+            out.append(m)
+            continue
+        parts: list[dict] = []
+        if m.get("content"):
+            parts.append({"type": "text", "text": m["content"]})
+        for img in images:
+            parts.append({"type": "image_url", "image_url": {"url": to_data_uri(img)}})
+        out.append({"role": m.get("role", "user"), "content": parts})
+    return out
 
 
 @register("openai")
@@ -35,7 +55,7 @@ class OpenAIProvider(LLMProvider):
     async def chat(self, messages: list[dict], *, model: str, **opts) -> str:
         body: dict = {
             "model": model,
-            "messages": messages,
+            "messages": _normalize_images(messages),
             "stream": False,
         }
         options = opts.get("options") or {}

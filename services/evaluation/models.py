@@ -65,6 +65,9 @@ class AgentQueryRequest(BaseModel):
     role: str = "default"
     config: AgentConfig = Field(default_factory=AgentConfig)
     history: list[HistoryMessage] = Field(default_factory=list)
+    # User-attached images (data URIs or raw base64), processed by the
+    # vision-capable chat model in the same prompt as the query.
+    images: list[str] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):

@@ -4,12 +4,19 @@
 	import { goto } from '$app/navigation';
 	import { initSession, app } from '$lib/state.svelte';
 	import { getUseCaseCollections } from '$lib/api';
-	import { USE_CASES, type UseCaseDef } from '$lib/use-cases';
+	import { type UseCaseDef } from '$lib/use-cases';
 	import FileUpload from '$lib/components/FileUpload.svelte';
 
 	let { children, data } = $props();
 
 	const uc: UseCaseDef = $derived(data.useCase);
+	const useCases: UseCaseDef[] = $derived(data.useCases ?? []);
+	const currentUser = $derived(data.user);
+
+	async function logout() {
+		await fetch('/api/auth/logout', { method: 'POST' });
+		goto('/login');
+	}
 
 	onMount(() => {
 		initSession();
@@ -68,7 +75,7 @@
 		<!-- Use Case Navigation -->
 		<div class="space-y-2 p-4">
 			<p class="mb-2 text-xs uppercase tracking-wider text-gray-400">Use Case</p>
-			{#each USE_CASES as item}
+			{#each useCases as item}
 				<a
 					href="/{item.slug}"
 					class="block w-full rounded-lg p-3 text-left transition-colors
@@ -173,7 +180,23 @@
 
 		<!-- Session Info -->
 		<div class="mt-auto border-t border-gray-700 p-4">
-			<p class="truncate text-xs text-gray-500">Session: {app.sessionId.slice(0, 8)}...</p>
+			{#if currentUser?.role === 'admin'}
+				<a
+					href="/admin/use-cases"
+					class="mb-2 block rounded-lg bg-gray-800 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700"
+				>
+					⚙ Dashboard
+				</a>
+			{/if}
+			{#if currentUser}
+				<div class="flex items-center justify-between gap-2">
+					<p class="truncate text-xs text-gray-400">{currentUser.username} · {currentUser.role}</p>
+					<button onclick={logout} class="shrink-0 text-xs text-gray-400 hover:text-white">
+						Abmelden
+					</button>
+				</div>
+			{/if}
+			<p class="mt-1 truncate text-xs text-gray-600">Session: {app.sessionId.slice(0, 8)}...</p>
 		</div>
 	</aside>
 

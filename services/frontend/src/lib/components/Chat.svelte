@@ -20,6 +20,34 @@
 	let input = $state('');
 	let chatContainer: HTMLDivElement | undefined = $state();
 
+	// Images attached to the next prompt (data URIs). Sent to the vision model.
+	const MAX_IMAGES = 6;
+	let attachedImages = $state<string[]>([]);
+	let fileInput: HTMLInputElement | undefined = $state();
+
+	function fileToDataUrl(file: File): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(reader.result as string);
+			reader.onerror = () => reject(reader.error);
+			reader.readAsDataURL(file);
+		});
+	}
+
+	async function onFilesSelected(e: Event) {
+		const el = e.currentTarget as HTMLInputElement;
+		const files = Array.from(el.files ?? []).filter((f) => f.type.startsWith('image/'));
+		for (const f of files) {
+			if (attachedImages.length >= MAX_IMAGES) break;
+			attachedImages.push(await fileToDataUrl(f));
+		}
+		el.value = ''; // allow re-selecting the same file
+	}
+
+	function removeImage(i: number) {
+		attachedImages.splice(i, 1);
+	}
+
 	// Use case comes from the URL — single source of truth. app.useCase can
 	// be stale (e.g. when the layout's $effect hasn't run yet, or after HMR
 	// resets state to the 'neumann' default), which led to queries being
@@ -116,7 +144,8 @@
 
 	async function send() {
 		const text = input.trim();
-		if (!text || app.isLoading) return;
+		const images = attachedImages.slice();
+		if ((!text && images.length === 0) || app.isLoading) return;
 
 		// Build conversation history from previous messages (only text, no metadata)
 		const history = app.messages
@@ -127,7 +156,13 @@
 			}));
 
 		input = '';
-		app.messages.push({ role: 'user', text, createdAt: new Date().toISOString() });
+		attachedImages = [];
+		app.messages.push({
+			role: 'user',
+			text,
+			images: images.length ? images : undefined,
+			createdAt: new Date().toISOString()
+		});
 		app.isLoading = true;
 		const startedAt = performance.now();
 
@@ -269,7 +304,8 @@
 						});
 					}
 					scrollToBottom();
-				}
+				},
+				images
 			);
 			if (!result) throw new Error('Kein Ergebnis vom Stream');
 			// Prefer the rich sub-agent traces from the server (with full
@@ -466,22 +502,68 @@
 
 	<!-- Input -->
 	<div class="border-t border-gray-200 bg-white p-4">
-		<div class="mx-auto flex max-w-3xl gap-3">
-			<textarea
-				bind:value={input}
-				onkeydown={onKeyDown}
-				placeholder="Frage eingeben..."
-				rows={1}
-				class="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
-				disabled={app.isLoading}
-			></textarea>
-			<button
-				onclick={send}
-				disabled={app.isLoading || !input.trim()}
-				class="rounded-xl bg-blue-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
-			>
-				Senden
-			</button>
+		<div class="mx-auto flex max-w-3xl flex-col gap-2">
+			{#if attachedImages.length > 0}
+				<div class="flex flex-wrap gap-2">
+					{#each attachedImages as img, i}
+						<div class="relative">
+							<img
+								src={img}
+								alt="Anhang {i + 1}"
+								class="h-16 w-16 rounded-lg border border-gray-200 object-cover"
+							/>
+							<button
+								onclick={() => removeImage(i)}
+								class="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-xs text-white shadow hover:bg-gray-900"
+								title="Bild entfernen"
+								aria-label="Bild entfernen"
+							>
+								&times;
+							</button>
+						</div>
+					{/each}
+				</div>
+			{/if}
+			<div class="flex gap-3">
+				<input
+					type="file"
+					accept="image/*"
+					multiple
+					bind:this={fileInput}
+					onchange={onFilesSelected}
+					class="hidden"
+				/>
+				<button
+					onclick={() => fileInput?.click()}
+					disabled={app.isLoading || attachedImages.length >= MAX_IMAGES}
+					class="shrink-0 rounded-xl border border-gray-300 px-4 py-3 text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+					title="Bild anhängen (max. {MAX_IMAGES})"
+					aria-label="Bild anhängen"
+				>
+					<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+						<path
+							fill-rule="evenodd"
+							d="M8 4a3 3 0 00-3 3v6a2 2 0 104 0V7a1 1 0 10-2 0v6a.5.5 0 01-1 0V7a1.5 1.5 0 013 0v6a3 3 0 11-6 0V7a5 5 0 0110 0v6a1 1 0 11-2 0V7a3 3 0 00-3-3z"
+							clip-rule="evenodd"
+						/>
+					</svg>
+				</button>
+				<textarea
+					bind:value={input}
+					onkeydown={onKeyDown}
+					placeholder="Frage eingeben..."
+					rows={1}
+					class="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+					disabled={app.isLoading}
+				></textarea>
+				<button
+					onclick={send}
+					disabled={app.isLoading || (!input.trim() && attachedImages.length === 0)}
+					class="rounded-xl bg-blue-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+				>
+					Senden
+				</button>
+			</div>
 		</div>
 	</div>
 </main>

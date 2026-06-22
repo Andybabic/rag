@@ -6,7 +6,8 @@ export async function sendQuery(
 	sessionId: string,
 	role: string,
 	config: Record<string, unknown> = {},
-	history: Array<{ role: string; content: string }> = []
+	history: Array<{ role: string; content: string }> = [],
+	images: string[] = []
 ) {
 	const resp = await fetch(`${BASE}/query`, {
 		method: 'POST',
@@ -17,7 +18,8 @@ export async function sendQuery(
 			session_id: sessionId,
 			role,
 			config,
-			history
+			history,
+			images
 		})
 	});
 	if (!resp.ok) throw new Error(await resp.text());
@@ -31,7 +33,8 @@ export async function streamQuery(
 	role: string,
 	config: Record<string, unknown> = {},
 	history: Array<{ role: string; content: string }> = [],
-	onEvent?: (event: Record<string, unknown>) => void
+	onEvent?: (event: Record<string, unknown>) => void,
+	images: string[] = []
 ) {
 	const resp = await fetch(`${BASE}/query/stream`, {
 		method: 'POST',
@@ -42,7 +45,8 @@ export async function streamQuery(
 			session_id: sessionId,
 			role,
 			config,
-			history
+			history,
+			images
 		})
 	});
 	if (!resp.ok || !resp.body) throw new Error(await resp.text());
