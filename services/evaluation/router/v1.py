@@ -27,8 +27,32 @@ from models import (
     FeedbackRequest,
     RerankRequest,
 )
+from shared.usecase_config import list_use_cases
 
 router = APIRouter(prefix="/v1", tags=["v1"])
+
+
+@router.get("/use-cases")
+async def get_use_cases():
+    """List enabled use cases in the frontend's shape (for the use-case picker).
+
+    Mirrors the ``UseCaseDef`` interface used by the SvelteKit frontend.
+    """
+    cases = await list_use_cases(only_enabled=True)
+    return {
+        "use_cases": [
+            {
+                "apiId": uc.id,
+                "slug": uc.slug,
+                "label": uc.label,
+                "desc": uc.description,
+                "color": uc.color,
+                "accent": uc.accent,
+                "roles": uc.roles,
+            }
+            for uc in cases
+        ]
+    }
 
 
 @router.post("/rerank")
@@ -101,6 +125,7 @@ async def agent_query(body: AgentQueryRequest, request: Request):
         collection=collection,
         filters=body.config.filters,
         history=history,
+        images=body.images,
     )
 
     # Persist query to database (non-blocking)
@@ -108,14 +133,16 @@ async def agent_query(body: AgentQueryRequest, request: Request):
         pool = await get_pool()
         await pool.execute(
             """INSERT INTO queries (id, use_case, session_id, role, query_text, answer_text,
-                                    agent_steps, sufficient)
-               VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7)""",
+                                    agent_steps, citations, images, sufficient)
+               VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9)""",
             body.use_case,
             body.session_id,
             body.role,
             body.query,
             result.get("answer", ""),
             json.dumps(result.get("agent_steps", [])),
+            json.dumps(result.get("citations", [])),
+            json.dumps(body.images),
             result.get("sufficient", False),
         )
     except Exception as exc:
@@ -163,6 +190,7 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                 collection=collection,
                 filters=body.config.filters,
                 history=history,
+                images=body.images,
                 on_event=on_event,
             )
             # Persist query (best-effort, same as non-streaming endpoint)
@@ -170,11 +198,13 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                 pool = await get_pool()
                 await pool.execute(
                     """INSERT INTO queries (id, use_case, session_id, role, query_text,
-                                            answer_text, agent_steps, sufficient)
-                       VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7)""",
+                                            answer_text, agent_steps, citations, images, sufficient)
+                       VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9)""",
                     body.use_case, body.session_id, body.role, body.query,
                     result.get("answer", ""),
                     json.dumps(result.get("agent_steps", [])),
+                    json.dumps(result.get("citations", [])),
+                    json.dumps(body.images),
                     result.get("sufficient", False),
                 )
             except Exception as exc:

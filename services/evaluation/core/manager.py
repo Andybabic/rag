@@ -265,6 +265,7 @@ async def _run_one_subagent(
     available_actions: list[str],
     collection: str,
     filters: dict | None,
+    images: list[str] | None,
     on_event: StepCallback,
 ) -> dict:
     """Run a single sub-agent. Wraps ``run_agent`` with the role config."""
@@ -292,6 +293,7 @@ async def _run_one_subagent(
             filters=filters,
             max_steps=role.max_steps,
             history=None,  # sub-agents work on the focused sub-query directly
+            images=images,
             on_event=_wrap_event(on_event, sub_id=sub_id, role=role.name),
         )
     except Exception as exc:
@@ -684,6 +686,7 @@ async def run_manager(
     collection: str = "",
     filters: dict | None = None,
     history: list[dict] | None = None,
+    images: list[str] | None = None,
     on_event: StepCallback = None,
 ) -> dict:
     """Top-level orchestration: plan → fan-out → synthesize.
@@ -726,6 +729,7 @@ async def run_manager(
                 available_actions=available_actions,
                 collection=collection,
                 filters=filters,
+                images=images,
                 on_event=on_event,
             )
         )

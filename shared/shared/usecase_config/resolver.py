@@ -18,11 +18,12 @@ Fallback:
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, replace
 from typing import Any
 
+from shared.db import get_pool as _get_pool
+from shared.db import set_pool
 from shared.llm.config import LLMConfig
 from shared.security.crypto import CryptoError, decrypt
 
@@ -31,37 +32,9 @@ logger = logging.getLogger(__name__)
 GLOBAL_USE_CASE = "*"
 _CACHE_TTL_SECONDS = 60.0
 
-
-# ── pool management ──────────────────────────────────────────────────────────
-
-
-_pool: Any | None = None  # asyncpg.Pool, kept untyped to avoid hard import
-
-
-def set_pool(pool: Any) -> None:
-    """Inject an existing asyncpg pool. Call this from your service startup."""
-    global _pool
-    _pool = pool
-
-
-async def _get_pool() -> Any | None:
-    global _pool
-    if _pool is not None:
-        return _pool
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        return None
-    try:
-        import asyncpg  # local import: services without DB don't pay the cost
-    except ImportError:
-        logger.warning("asyncpg is not installed; usecase config will use .env only")
-        return None
-    try:
-        _pool = await asyncpg.create_pool(url, min_size=1, max_size=3)
-        return _pool
-    except Exception as exc:  # noqa: BLE001 — DB unreachable is non-fatal
-        logger.warning("Could not create resolver DB pool: %s", exc)
-        return None
+# ``set_pool``/``_get_pool`` now live in ``shared.db`` (shared across resolver
+# and auth). They are imported above so existing
+# ``from shared.usecase_config import set_pool`` keeps working.
 
 
 # ── cache ────────────────────────────────────────────────────────────────────
@@ -444,3 +417,183 @@ async def delete_skill(skill_id: str) -> bool:
         return False
     invalidate(row["use_case"])
     return True
+
+
+# ── use cases (DB-backed registry) ───────────────────────────────────────────
+#
+# The use-case registry (roles, agent actions, default collection, frontend
+# metadata) is seeded from ``config/use_cases.json`` at boot and lives in the
+# ``use_cases`` table afterwards, so it can be edited via the dashboard. Prompts
+# stay in ``usecase_prompts`` (see ``resolve_prompt``).
+
+
+@dataclass(frozen=True)
+class UseCase:
+    id: str  # API id, e.g. "gw_stpoelten" — also the `use_case` key everywhere
+    slug: str  # URL path, e.g. "gw-stpoelten"
+    label: str
+    description: str
+    color: str  # Tailwind bg class, e.g. "bg-emerald-600"
+    accent: str  # hex colour for borders etc.
+    roles: list[str]
+    agent_action_names: list[str]
+    default_collection: str
+    collection_prefixes: list[str]
+    enabled: bool
+
+
+# cache: a single snapshot of all use cases (small table, read on every request)
+_use_cases_cache: tuple[float, list[UseCase]] | None = None
+
+
+def invalidate_use_cases() -> None:
+    """Drop the cached use-case list. Call after any use-case write."""
+    global _use_cases_cache
+    _use_cases_cache = None
+
+
+def _row_to_use_case(row: Any) -> UseCase:
+    return UseCase(
+        id=row["id"],
+        slug=row["slug"],
+        label=row["label"],
+        description=row["description"] or "",
+        color=row["color"] or "",
+        accent=row["accent"] or "",
+        roles=_json_list(row["roles"]),
+        agent_action_names=_json_list(row["agent_action_names"]),
+        default_collection=row["default_collection"] or "",
+        collection_prefixes=_json_list(row["collection_prefixes"]),
+        enabled=row["enabled"],
+    )
+
+
+def _json_list(value: Any) -> list[str]:
+    """asyncpg returns JSONB as a JSON-encoded string by default."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        import json
+
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+        return list(parsed) if isinstance(parsed, list) else []
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+async def list_use_cases(*, only_enabled: bool = False) -> list[UseCase]:
+    """Return all use cases ordered by id. Cached briefly.
+
+    Returns ``[]`` if the DB is unreachable (callers fall back to file defaults).
+    """
+    global _use_cases_cache
+    if _use_cases_cache and (time.monotonic() - _use_cases_cache[0]) < _CACHE_TTL_SECONDS:
+        cases = _use_cases_cache[1]
+    else:
+        pool = await _get_pool()
+        if pool is None:
+            return []
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, slug, label, description, color, accent, roles, "
+                    "agent_action_names, default_collection, collection_prefixes, "
+                    "enabled FROM use_cases ORDER BY id ASC"
+                )
+            cases = [_row_to_use_case(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("use_cases read failed: %s", exc)
+            return []
+        _use_cases_cache = (time.monotonic(), cases)
+
+    if only_enabled:
+        return [uc for uc in cases if uc.enabled]
+    return cases
+
+
+async def get_use_case(use_case_id: str) -> UseCase | None:
+    pool = await _get_pool()
+    if pool is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, slug, label, description, color, accent, roles, "
+            "agent_action_names, default_collection, collection_prefixes, "
+            "enabled FROM use_cases WHERE id = $1",
+            use_case_id,
+        )
+    return _row_to_use_case(row) if row else None
+
+
+async def upsert_use_case(
+    use_case_id: str,
+    *,
+    slug: str,
+    label: str,
+    description: str = "",
+    color: str = "",
+    accent: str = "",
+    roles: list[str],
+    agent_action_names: list[str],
+    default_collection: str,
+    collection_prefixes: list[str] | None = None,
+    enabled: bool = True,
+) -> UseCase:
+    """Insert or update a full use-case row. Returns the stored row."""
+    import json
+
+    pool = await _get_pool()
+    if pool is None:
+        raise RuntimeError("No DB pool available — cannot persist use_cases")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO use_cases "
+            "(id, slug, label, description, color, accent, roles, "
+            " agent_action_names, default_collection, collection_prefixes, enabled) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+            "ON CONFLICT (id) DO UPDATE SET "
+            "  slug = EXCLUDED.slug, label = EXCLUDED.label, "
+            "  description = EXCLUDED.description, color = EXCLUDED.color, "
+            "  accent = EXCLUDED.accent, roles = EXCLUDED.roles, "
+            "  agent_action_names = EXCLUDED.agent_action_names, "
+            "  default_collection = EXCLUDED.default_collection, "
+            "  collection_prefixes = EXCLUDED.collection_prefixes, "
+            "  enabled = EXCLUDED.enabled, updated_at = NOW() "
+            "RETURNING id, slug, label, description, color, accent, roles, "
+            "agent_action_names, default_collection, collection_prefixes, enabled",
+            use_case_id,
+            slug,
+            label,
+            description,
+            color,
+            accent,
+            json.dumps(roles),
+            json.dumps(agent_action_names),
+            default_collection,
+            json.dumps(collection_prefixes or []),
+            enabled,
+        )
+    invalidate(use_case_id)
+    invalidate_use_cases()
+    return _row_to_use_case(row)
+
+
+async def delete_use_case(use_case_id: str) -> bool:
+    """Delete a use case by id. Returns True if a row was removed.
+
+    Does not cascade to prompts/config/skills — those are keyed by the same
+    ``use_case`` string and can be cleaned up separately if desired.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        raise RuntimeError("No DB pool available — cannot persist use_cases")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM use_cases WHERE id = $1 RETURNING id",
+            use_case_id,
+        )
+    invalidate(use_case_id)
+    invalidate_use_cases()
+    return row is not None

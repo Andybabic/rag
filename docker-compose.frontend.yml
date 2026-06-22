@@ -40,6 +40,7 @@ services:
       - "3000:3000"
     environment:
       PORT: "3000"
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET muss gesetzt sein (Cookie-Signatur; python -c \"import secrets; print(secrets.token_urlsafe(48))\")}"
       EVALUATION_SERVICE_URL: "${EVALUATION_SERVICE_URL:?EVALUATION_SERVICE_URL muss gesetzt sein (z.B. http://server-b:8005)}"
       CLEANING_SERVICE_URL: "${CLEANING_SERVICE_URL:?CLEANING_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8001)}"
       DATA_STRUCTURE_SERVICE_URL: "${DATA_STRUCTURE_SERVICE_URL:?DATA_STRUCTURE_SERVICE_URL muss gesetzt sein (z.B. http://server-a:8002)}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from core.database import get_pool
 from core.memory import read_memory, write_memory
@@ -13,24 +14,29 @@ from core.use_cases import (
     get_agent_actions_full,
     get_react_suffix,
     get_system_prompt,
+    refresh_use_cases,
     set_action_description,
     set_action_enabled,
     set_react_suffix,
     set_system_prompt,
 )
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from shared.security.crypto import CryptoError, encrypt, is_configured
 from shared.usecase_config import (
     Skill,
     create_skill,
     delete_skill,
+    delete_use_case,
+    get_use_case,
     list_prompts,
     list_skills,
+    list_use_cases,
     resolve_config,
     update_skill,
     upsert_config,
     upsert_prompt,
+    upsert_use_case,
 )
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
@@ -46,7 +52,7 @@ async def list_queries(use_case: str = "", limit: int = 50, offset: int = 0):
     if use_case:
         rows = await pool.fetch(
             """SELECT id, use_case, session_id, role, query_text, answer_text,
-                      agent_steps, sufficient, created_at
+                      agent_steps, citations, images, sufficient, created_at
                FROM queries
                WHERE use_case = $1
                ORDER BY created_at DESC
@@ -58,7 +64,7 @@ async def list_queries(use_case: str = "", limit: int = 50, offset: int = 0):
     else:
         rows = await pool.fetch(
             """SELECT id, use_case, session_id, role, query_text, answer_text,
-                      agent_steps, sufficient, created_at
+                      agent_steps, citations, images, sufficient, created_at
                FROM queries
                ORDER BY created_at DESC
                LIMIT $1 OFFSET $2""",
@@ -75,6 +81,8 @@ async def list_queries(use_case: str = "", limit: int = 50, offset: int = 0):
                 "query_text": r["query_text"],
                 "answer_text": r["answer_text"],
                 "agent_steps": json.loads(r["agent_steps"]) if r["agent_steps"] else [],
+                "citations": json.loads(r["citations"]) if r["citations"] else [],
+                "images": json.loads(r["images"]) if r["images"] else [],
                 "sufficient": r["sufficient"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
@@ -495,3 +503,98 @@ async def delete_document_log(doc_id: str):
             "use_case": row["use_case"],
         },
     }
+
+
+# ── Use-Case Registry (editable + exportable) ──────────────────
+
+_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class UseCaseInput(BaseModel):
+    slug: str
+    label: str
+    description: str = ""
+    color: str = ""
+    accent: str = ""
+    roles: list[str] = ["default"]
+    agent_action_names: list[str] = []
+    default_collection: str
+    collection_prefixes: list[str] = []
+    enabled: bool = True
+    prompts: dict[str, str] = {}
+
+
+def _system_prompt_key(role: str) -> str:
+    return f"agent.system.{role}"
+
+
+async def _serialize_use_case(uc) -> dict:
+    """Use case in the config-JSON shape (incl. system prompts)."""
+    db_prompts = await list_prompts(uc.id)
+    prompts = {
+        role: db_prompts[_system_prompt_key(role)]
+        for role in uc.roles
+        if _system_prompt_key(role) in db_prompts
+    }
+    return {
+        "id": uc.id,
+        "slug": uc.slug,
+        "label": uc.label,
+        "description": uc.description,
+        "color": uc.color,
+        "accent": uc.accent,
+        "enabled": uc.enabled,
+        "roles": uc.roles,
+        "agent_action_names": uc.agent_action_names,
+        "default_collection": uc.default_collection,
+        "collection_prefixes": uc.collection_prefixes,
+        "prompts": prompts,
+    }
+
+
+@router.get("/use-cases")
+async def admin_list_use_cases():
+    """Full use-case list (incl. disabled) in the config-JSON shape.
+
+    The frontend uses this both to edit and to build the exportable JSON.
+    """
+    cases = await list_use_cases()
+    return {"version": 1, "use_cases": [await _serialize_use_case(uc) for uc in cases]}
+
+
+@router.put("/use-cases/{use_case_id}")
+async def admin_upsert_use_case(use_case_id: str, body: UseCaseInput):
+    """Create or update a use case (and its system prompts), then hot-reload."""
+    if not _ID_RE.match(use_case_id):
+        raise HTTPException(
+            status_code=400,
+            detail="id must match ^[a-z][a-z0-9_]*$ (lowercase, digits, underscore)",
+        )
+    await upsert_use_case(
+        use_case_id,
+        slug=body.slug,
+        label=body.label,
+        description=body.description,
+        color=body.color,
+        accent=body.accent,
+        roles=body.roles,
+        agent_action_names=body.agent_action_names,
+        default_collection=body.default_collection,
+        collection_prefixes=body.collection_prefixes,
+        enabled=body.enabled,
+    )
+    for role, content in body.prompts.items():
+        await upsert_prompt(use_case_id, _system_prompt_key(role), content)
+    await refresh_use_cases()
+    uc = await get_use_case(use_case_id)
+    return await _serialize_use_case(uc)
+
+
+@router.delete("/use-cases/{use_case_id}")
+async def admin_delete_use_case(use_case_id: str):
+    """Delete a use case, then hot-reload the in-memory registry."""
+    removed = await delete_use_case(use_case_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Use case not found")
+    await refresh_use_cases()
+    return {"status": "ok", "deleted": use_case_id}

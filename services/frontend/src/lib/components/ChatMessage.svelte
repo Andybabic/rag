@@ -250,7 +250,20 @@
 		<div
 			class="max-w-2xl rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-3 text-white shadow-sm"
 		>
-			<p class="whitespace-pre-wrap text-sm">{message.text}</p>
+			{#if message.images && message.images.length > 0}
+				<div class="mb-2 flex flex-wrap justify-end gap-2">
+					{#each message.images as img, i}
+						<img
+							src={img}
+							alt="Anhang {i + 1}"
+							class="h-24 w-24 rounded-lg border border-blue-400/40 object-cover"
+						/>
+					{/each}
+				</div>
+			{/if}
+			{#if message.text}
+				<p class="whitespace-pre-wrap text-sm">{message.text}</p>
+			{/if}
 		</div>
 	</div>
 {:else}

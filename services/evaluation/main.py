@@ -2,12 +2,17 @@ import os
 
 from contextlib import asynccontextmanager
 
+from config import settings
 from core.database import close_pool, get_pool
 from core.reranker import preload_model as preload_reranker
+from core.seed import seed_use_cases
+from core.use_cases import refresh_use_cases
 from fastapi import FastAPI, Request
 from models import HealthResponse
 from router.admin import router as admin_router
+from router.auth import router as auth_router
 from router.v1 import router as v1_router
+from shared.auth import ensure_bootstrap_admin
 from shared.errors import handle_error
 from shared.logging import setup_logging
 from shared.tracing import RequestIDMiddleware
@@ -23,6 +28,12 @@ setup_logging(SERVICE_NAME, os.getenv("LOG_LEVEL", "INFO"))
 async def lifespan(app: FastAPI):
     pool = await get_pool()
     set_resolver_pool(pool)
+    # Seed the first admin from env if no users exist yet (idempotent).
+    await ensure_bootstrap_admin(settings.ADMIN_USERNAME, settings.ADMIN_PASSWORD)
+    # Seed missing use cases from config/use_cases.json, then load the registry
+    # (meta + collection prefixes) from the DB into memory.
+    await seed_use_cases()
+    await refresh_use_cases()
     # Start the cross-encoder download in the background so the first query
     # doesn't block for minutes on a cold HF cache. Until it's ready, the
     # reranker falls back to hybrid-fusion ordering (still good quality).
@@ -40,6 +51,7 @@ app = FastAPI(
 app.add_middleware(RequestIDMiddleware)
 app.include_router(v1_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.exception_handler(Exception)

@@ -97,6 +97,8 @@ export interface ImageRef {
 export interface Message {
 	role: 'user' | 'assistant';
 	text: string;
+	/** Data-URI images attached to a user message (sent to the vision model). */
+	images?: string[];
 	/** ISO timestamp set client-side when the message is created. */
 	createdAt?: string;
 	/** Client-perceived round-trip duration for the assistant reply, ms. */

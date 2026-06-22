@@ -1,7 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getCollections, getUseCaseCollections } from '$lib/api';
-	import { USE_CASES, type UseCaseDef } from '$lib/use-cases';
+	import { type UseCaseDef } from '$lib/use-cases';
+
+	let { data } = $props();
+	const useCases: UseCaseDef[] = $derived(data.useCases ?? []);
 
 	interface CollectionInfo {
 		name: string;
@@ -40,7 +43,7 @@
 		const assigned = new Set<string>();
 		const results: UseCaseSection[] = [];
 
-		for (const uc of USE_CASES) {
+		for (const uc of useCases) {
 			try {
 				const data = await getUseCaseCollections(uc.apiId);
 				const cols: CollectionInfo[] = data.collections ?? [];
@@ -81,7 +84,7 @@
 		<!-- Use Case Navigation -->
 		<div class="space-y-2 p-4">
 			<p class="mb-2 text-xs uppercase tracking-wider text-gray-400">Use Case</p>
-			{#each USE_CASES as item}
+			{#each useCases as item}
 				<a
 					href="/{item.slug}"
 					class="block w-full rounded-lg bg-gray-800 p-3 text-left text-gray-300 transition-colors hover:bg-gray-700"
@@ -140,7 +143,7 @@
 						<div class="text-xs text-gray-500">Chunks gesamt</div>
 					</div>
 					<div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-						<div class="text-2xl font-bold text-gray-800">{USE_CASES.length}</div>
+						<div class="text-2xl font-bold text-gray-800">{useCases.length}</div>
 						<div class="text-xs text-gray-500">Use Cases</div>
 					</div>
 				</div>

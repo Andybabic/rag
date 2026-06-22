@@ -270,6 +270,7 @@ async def run_agent(
     filters: dict | None = None,
     max_steps: int = 5,
     history: list[dict] | None = None,
+    images: list[str] | None = None,
     on_event: StepCallback = None,
 ) -> dict:
     """Run the ReAct agent loop.
@@ -300,7 +301,13 @@ async def run_agent(
         for msg in history[-6:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
 
-    messages.append({"role": "user", "content": enriched_query})
+    # Attach user-supplied images to the first user turn so the (vision-capable)
+    # chat model processes them in the same prompt. They stay in the message
+    # list across ReAct iterations, so the model keeps seeing them.
+    user_msg: dict = {"role": "user", "content": enriched_query}
+    if images:
+        user_msg["images"] = images
+    messages.append(user_msg)
 
     steps: list[dict] = []
     answer = ""

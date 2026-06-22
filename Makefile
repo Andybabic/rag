@@ -40,6 +40,15 @@ dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173
 		echo ""; \
 		exit 1; \
 	fi
+	@if ! grep -qE '^AUTH_SECRET=.' .env 2>/dev/null; then \
+		echo "AUTH_SECRET fehlt/leer in .env – generiere einen ..."; \
+		SECRET=$$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))'); \
+		if grep -qE '^AUTH_SECRET=' .env 2>/dev/null; then \
+			sed -i.bak "s|^AUTH_SECRET=.*|AUTH_SECRET=$$SECRET|" .env && rm -f .env.bak; \
+		else \
+			printf 'AUTH_SECRET=%s\n' "$$SECRET" >> .env; \
+		fi; \
+	fi
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
 		postgres qdrant cleaning data_structure embedding vectordb evaluation
@@ -48,7 +57,7 @@ dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173
 	@echo "Frontend dev server mit Hot-Reload → http://localhost:5173"
 	@echo "Backend-Logs:  make logs   |   Stop:  make down"
 	@echo ""
-	cd services/frontend && $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
+	cd services/frontend && AUTH_SECRET="$$(grep -E '^AUTH_SECRET=' ../../.env 2>/dev/null | head -1 | cut -d= -f2-)" $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
 
 dev-fe: dev ## Alias fuer 'make dev' (frueheres Verhalten beibehalten)
 
@@ -65,7 +74,7 @@ dev-bundled: frontend-build ## Wie 'make dev', aber mit gebautem Frontend-Contai
 frontend-dev: ## Nur das Frontend im Dev-Modus (Backend muss bereits laufen)
 	@cd services/frontend && [ -d node_modules ] || npm install
 	@echo "Frontend dev server → http://localhost:5173"
-	cd services/frontend && $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
+	cd services/frontend && AUTH_SECRET="$$(grep -E '^AUTH_SECRET=' ../../.env 2>/dev/null | head -1 | cut -d= -f2-)" $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
 
 down: ## Stop all services
 	$(COMPOSE) --profile local-ollama down

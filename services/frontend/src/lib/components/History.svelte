@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { app } from '$lib/state.svelte';
+	import { app, type Message, type AgentStep, type Citation } from '$lib/state.svelte';
 	import { goto } from '$app/navigation';
 	import { getQueries } from '$lib/api';
 	import { getUseCaseByApiId } from '$lib/use-cases';
@@ -7,12 +7,15 @@
 	interface QueryRecord {
 		id: string;
 		use_case: string;
+		session_id: string | null;
 		role: string;
 		query_text: string;
 		answer_text: string;
 		sufficient: boolean;
 		created_at: string;
-		agent_steps: Array<{ step: number; action: string; thought?: string }>;
+		agent_steps: AgentStep[];
+		citations: Citation[];
+		images: string[];
 	}
 
 	let queries: QueryRecord[] = $state([]);
@@ -46,6 +49,42 @@
 				}
 			}, 100);
 		});
+	}
+
+	/**
+	 * Load the full conversation into the chat: every Q&A round of the same
+	 * session (chronological), each with its persisted intermediate steps.
+	 * Falls back to just this entry if it has no session id.
+	 */
+	function loadConversation(q: QueryRecord) {
+		const convo = q.session_id
+			? queries.filter((x) => x.session_id === q.session_id)
+			: [q];
+		convo.sort(
+			(a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+		);
+
+		const msgs: Message[] = [];
+		for (const item of convo) {
+			msgs.push({
+				role: 'user',
+				text: item.query_text,
+				images: item.images?.length ? item.images : undefined,
+				createdAt: item.created_at
+			});
+			msgs.push({
+				role: 'assistant',
+				text: item.answer_text ?? '',
+				createdAt: item.created_at,
+				agentSteps: item.agent_steps ?? [],
+				citations: item.citations ?? [],
+				sufficient: item.sufficient
+			});
+		}
+
+		app.messages = msgs;
+		const uc = getUseCaseByApiId(app.useCase);
+		goto(`/${uc?.slug ?? 'neumann'}`);
 	}
 
 	$effect(() => {
@@ -96,13 +135,22 @@
 									{/if}
 								</p>
 							</div>
-							<button
-								class="shrink-0 rounded border border-gray-200 px-2 py-1 text-[10px] text-gray-500 hover:bg-gray-100"
-								onclick={(e: MouseEvent) => { e.stopPropagation(); reuse(q.query_text); }}
-								title="Frage wiederverwenden"
-							>
-								Wiederholen
-							</button>
+							<div class="flex shrink-0 gap-1.5">
+								<button
+									class="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-100"
+									onclick={(e: MouseEvent) => { e.stopPropagation(); loadConversation(q); }}
+									title="Gesamte Unterhaltung inkl. Zwischenschritte in den Chat laden"
+								>
+									Laden
+								</button>
+								<button
+									class="rounded border border-gray-200 px-2 py-1 text-[10px] text-gray-500 hover:bg-gray-100"
+									onclick={(e: MouseEvent) => { e.stopPropagation(); reuse(q.query_text); }}
+									title="Nur den Prompt erneut verwenden"
+								>
+									Wiederholen
+								</button>
+							</div>
 						</div>
 
 						{#if isOpen}

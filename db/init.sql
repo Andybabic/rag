@@ -12,6 +12,8 @@ CREATE TABLE queries (
     answer_text TEXT,
     chunks_used JSONB,
     agent_steps JSONB,
+    citations JSONB,
+    images JSONB,
     scores JSONB,
     sufficient BOOLEAN,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -105,6 +107,35 @@ CREATE TABLE usecase_skills (
     UNIQUE (use_case, name)
 );
 CREATE INDEX idx_usecase_skills_use_case ON usecase_skills(use_case);
+
+-- DB-gestuetzte Use-Case-Registry. Wird aus config/use_cases.json geseedet
+-- und danach ueber das Dashboard editierbar. 'id' = API-Id (use_case-Key
+-- ueberall), 'slug' = URL-Form im Frontend. Prompts liegen in usecase_prompts.
+CREATE TABLE use_cases (
+    id VARCHAR(50) PRIMARY KEY,
+    slug VARCHAR(50) NOT NULL UNIQUE,
+    label VARCHAR(100) NOT NULL,
+    description TEXT DEFAULT '',
+    color VARCHAR(40) DEFAULT '',
+    accent VARCHAR(20) DEFAULT '',
+    roles JSONB NOT NULL,
+    agent_action_names JSONB NOT NULL,
+    default_collection VARCHAR(100) NOT NULL,
+    collection_prefixes JSONB,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Dashboard-/App-Benutzer. Passwoerter gehasht (PBKDF2-SHA256).
+-- Rollen: 'admin' (User + Use Cases verwalten) und 'user' (nur Chat).
+-- Der erste Admin wird beim Start aus den Env-Variablen geseedet.
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(100) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
 -- Indizes
 CREATE INDEX idx_queries_use_case ON queries(use_case);

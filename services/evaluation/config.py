@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     MEMORY_MAX_CHARS: int = 4000
     LOG_LEVEL: str = "INFO"
 
+    # ── Auth bootstrap ───────────────────────────────────────
+    # The first admin is seeded from these on startup if the users table is
+    # empty. Leave unset to skip seeding (e.g. once an admin already exists).
+    ADMIN_USERNAME: str | None = None
+    ADMIN_PASSWORD: str | None = None
+
     model_config = {"env_prefix": ""}
 
 
