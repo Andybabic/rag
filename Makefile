@@ -3,7 +3,7 @@ DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker
 COMPOSE = $(DOCKER_COMPOSE) -f docker-compose.dev.yml --env-file .env
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: _ensure-env _ensure-auth-secret frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
+.PHONY: _ensure-env _ensure-auth-secret _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -41,12 +41,25 @@ _ensure-auth-secret:
 		fi; \
 	fi
 
+# Prueft ob der konfigurierte Host-Port fuer Postgres frei ist.
+_check-postgres-port:
+	@PORT=$$(grep -E '^POSTGRES_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r'); \
+	PORT=$${PORT:-5432}; \
+	if bash -c "echo >/dev/tcp/127.0.0.1/$$PORT" 2>/dev/null; then \
+		echo ""; \
+		echo "FEHLER: Host-Port $$PORT ist bereits belegt (POSTGRES_PORT in .env)."; \
+		echo "Setzen Sie einen freien Port, z.B.:  POSTGRES_PORT=5433"; \
+		echo "DATABASE_URL bleibt @postgres:5432 (nur der externe Port aendert sich)."; \
+		echo ""; \
+		exit 1; \
+	fi
+
 frontend-build: ## Frontend bauen (SvelteKit)
 	@echo "Baue Frontend ..."
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-env _ensure-auth-secret frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
+up: _ensure-env _ensure-auth-secret _check-postgres-port frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
 	@echo "Starte alle Services (Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
 	$(COMPOSE) up --build -d
 	@echo ""
@@ -63,7 +76,7 @@ up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
 	@echo "Ollama-Modelle laden:  make pull-models"
 	@echo "Logs anzeigen:         make dev-logs"
 
-dev: _ensure-env _ensure-auth-secret ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
+dev: _ensure-env _ensure-auth-secret _check-postgres-port ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
 		postgres qdrant cleaning data_structure embedding vectordb evaluation
@@ -186,8 +199,8 @@ help: ## Show this help
 	@echo "Wartung:"
 	@echo "  make reset          Alle Daten loeschen (DB, Vektoren, Dokumente)"
 	@echo ""
-	@echo "Konfiguration fuer dev-up-light:"
-	@echo "  In .env die externen URLs setzen:"
-	@echo "    OLLAMA_BASE_URL=http://<externer-server>:11434"
-	@echo "    USE_MINERU=true"
-	@echo "    MINERU_API_URL=http://<externer-server>:8000"
+	@echo "Konfiguration (.env):"
+	@echo "  OLLAMA_BASE_URL=http://<externer-server>:11434"
+	@echo "  POSTGRES_PORT=5433          falls Host-Port 5432 schon belegt ist"
+	@echo "  USE_MINERU=true"
+	@echo "  MINERU_API_URL=http://<externer-server>:8000"
