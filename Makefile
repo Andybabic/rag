@@ -1,9 +1,8 @@
-# Docker Compose V2 (Plugin) bevorzugen; sonst standalone docker-compose.
-DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
-COMPOSE = $(DOCKER_COMPOSE) -f docker-compose.dev.yml --env-file .env
+# Docker Compose V2 (Plugin) ist Pflicht – docker-compose 1.29 ist mit Docker Engine 29 inkompatibel.
+COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: _ensure-env _ensure-auth-secret _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
+.PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -14,6 +13,21 @@ FE_DEV_ENV = \
 	VECTORDB_SERVICE_URL=http://localhost:8004
 
 # ── Docker Compose ───────────────────────────────────────────
+
+_ensure-compose-v2:
+	@if ! docker compose version >/dev/null 2>&1; then \
+		echo ""; \
+		echo "FEHLER: Docker Compose V2 (Plugin) ist nicht installiert."; \
+		echo "docker-compose 1.29 funktioniert nicht mit Docker Engine 29 (KeyError: ContainerConfig)."; \
+		echo ""; \
+		echo "Installieren (Ubuntu/Debian):"; \
+		echo "  sudo apt update && sudo apt install -y docker-compose-plugin"; \
+		echo "  docker compose version"; \
+		echo ""; \
+		echo "Falls Container haengen:  make clean-stack"; \
+		echo ""; \
+		exit 1; \
+	fi
 
 _ensure-env:
 	@test -f .env || cp .env.example .env
@@ -59,7 +73,7 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-env _ensure-auth-secret _check-postgres-port frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
+up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
 	@echo "Starte alle Services (Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
 	$(COMPOSE) up --build -d
 	@echo ""
@@ -68,15 +82,15 @@ up: _ensure-env _ensure-auth-secret _check-postgres-port frontend-build ## Alle 
 	@echo "  Logs:     make logs"
 	@echo "  Stop:     make down"
 
-up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
+up-dev-full: _ensure-compose-v2 frontend-build ## Start all services (inkl. lokales Ollama)
 	@test -f .env || cp .env.example .env
 	$(COMPOSE) --profile local-ollama up --build -d
 	@echo ""
 	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
 	@echo "Ollama-Modelle laden:  make pull-models"
-	@echo "Logs anzeigen:         make dev-logs"
+	@echo "Logs anzeigen:         make logs"
 
-dev: _ensure-env _ensure-auth-secret _check-postgres-port ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
+dev: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
 		postgres qdrant cleaning data_structure embedding vectordb evaluation
@@ -96,10 +110,18 @@ frontend-dev: ## Nur das Frontend im Dev-Modus (Backend muss bereits laufen)
 	@echo "Frontend dev server → http://localhost:5173"
 	cd services/frontend && AUTH_SECRET="$$(grep -E '^AUTH_SECRET=' ../../.env 2>/dev/null | head -1 | cut -d= -f2-)" $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
 
-down: ## Stop all services
+down: _ensure-compose-v2 ## Stop all services
 	$(COMPOSE) --profile local-ollama down
 
-logs: ## Tail logs of all services
+clean-stack: ## Haengende kermit-Container entfernen (nach ContainerConfig-Fehler)
+	@echo "Entferne kermit-Container ..."
+	@docker ps -aq --filter name=kermit | xargs -r docker rm -f 2>/dev/null || true
+	@if docker compose version >/dev/null 2>&1; then \
+		docker compose -f docker-compose.dev.yml --env-file .env down --remove-orphans 2>/dev/null || true; \
+	fi
+	@echo "Bereinigt. Neu starten mit: make up"
+
+logs: _ensure-compose-v2 ## Tail logs of all services
 	$(COMPOSE) --profile local-ollama logs -f
 
 pull-models: ## Ollama-Modelle herunterladen (LLM + Embedding)
@@ -133,12 +155,12 @@ lint: ## Run ruff + mypy across the entire codebase
 		cd $(CURDIR)/services/$$svc && mypy main.py --ignore-missing-imports; \
 	done
 
-integration-test: ## Run E2E integration tests in Docker
+integration-test: _ensure-compose-v2 ## Run E2E integration tests in Docker
 	$(COMPOSE) --profile test run --rm integration-test
 
 # ── Reset ────────────────────────────────────────────────────
 
-reset: ## Alle Daten loeschen und Originalzustand herstellen
+reset: _ensure-compose-v2 ## Alle Daten loeschen und Originalzustand herstellen
 	@echo ""
 	@echo "WARNUNG: Dies loescht ALLE Daten unwiderruflich:"
 	@echo "  - PostgreSQL (Queries, Feedback, Ingestion-Log, Agent-Memory)"
@@ -197,7 +219,8 @@ help: ## Show this help
 	@echo "  make doc            Interface Agreement als HTML generieren"
 	@echo ""
 	@echo "Wartung:"
-	@echo "  make reset          Alle Daten loeschen (DB, Vektoren, Dokumente)"
+	@echo "  make clean-stack      Haengende Container nach Compose-Fehler entfernen"
+	@echo "  make reset            Alle Daten loeschen (DB, Vektoren, Dokumente)"
 	@echo ""
 	@echo "Konfiguration (.env):"
 	@echo "  OLLAMA_BASE_URL=http://<externer-server>:11434"
