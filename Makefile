@@ -1,7 +1,9 @@
-COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env
+# Docker Compose V2 (Plugin) bevorzugen; sonst standalone docker-compose.
+DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+COMPOSE = $(DOCKER_COMPOSE) -f docker-compose.dev.yml --env-file .env
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: frontend-build up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
+.PHONY: _ensure-env _ensure-auth-secret frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs test lint integration-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -13,20 +15,7 @@ FE_DEV_ENV = \
 
 # ── Docker Compose ───────────────────────────────────────────
 
-frontend-build: ## Frontend bauen (SvelteKit)
-	@echo "Baue Frontend ..."
-	cd services/frontend && npm install && npm run build
-	@echo "Frontend-Build fertig."
-
-up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
-	@test -f .env || cp .env.example .env
-	$(COMPOSE) --profile local-ollama up --build -d
-	@echo ""
-	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
-	@echo "Ollama-Modelle laden:  make pull-models"
-	@echo "Logs anzeigen:         make dev-logs"
-
-dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
+_ensure-env:
 	@test -f .env || cp .env.example .env
 	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
 		echo ""; \
@@ -40,6 +29,8 @@ dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173
 		echo ""; \
 		exit 1; \
 	fi
+
+_ensure-auth-secret:
 	@if ! grep -qE '^AUTH_SECRET=.' .env 2>/dev/null; then \
 		echo "AUTH_SECRET fehlt/leer in .env – generiere einen ..."; \
 		SECRET=$$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))'); \
@@ -49,6 +40,30 @@ dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173
 			printf 'AUTH_SECRET=%s\n' "$$SECRET" >> .env; \
 		fi; \
 	fi
+
+frontend-build: ## Frontend bauen (SvelteKit)
+	@echo "Baue Frontend ..."
+	cd services/frontend && npm install && npm run build
+	@echo "Frontend-Build fertig."
+
+up: _ensure-env _ensure-auth-secret frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
+	@echo "Starte alle Services (Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
+	$(COMPOSE) up --build -d
+	@echo ""
+	@echo "Plattform laeuft:"
+	@echo "  Frontend  → http://localhost:3000"
+	@echo "  Logs:     make logs"
+	@echo "  Stop:     make down"
+
+up-dev-full: frontend-build ## Start all services (inkl. lokales Ollama)
+	@test -f .env || cp .env.example .env
+	$(COMPOSE) --profile local-ollama up --build -d
+	@echo ""
+	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
+	@echo "Ollama-Modelle laden:  make pull-models"
+	@echo "Logs anzeigen:         make dev-logs"
+
+dev: _ensure-env _ensure-auth-secret ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
 		postgres qdrant cleaning data_structure embedding vectordb evaluation
@@ -61,15 +76,7 @@ dev: ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173
 
 dev-fe: dev ## Alias fuer 'make dev' (frueheres Verhalten beibehalten)
 
-dev-bundled: frontend-build ## Wie 'make dev', aber mit gebautem Frontend-Container statt Vite
-	@test -f .env || cp .env.example .env
-	@if ! grep -q '^OLLAMA_BASE_URL=' .env 2>/dev/null; then \
-		echo "FEHLER: OLLAMA_BASE_URL fehlt in .env – siehe 'make dev'."; exit 1; \
-	fi
-	$(COMPOSE) up --build -d
-	@echo ""
-	@echo "Services + gebautes Frontend gestartet (Frontend → http://localhost:3000)."
-	@echo "Ollama-URL: $$(grep '^OLLAMA_BASE_URL=' .env)"
+dev-bundled: up ## Alias fuer 'make up'
 
 frontend-dev: ## Nur das Frontend im Dev-Modus (Backend muss bereits laufen)
 	@cd services/frontend && [ -d node_modules ] || npm install
@@ -138,7 +145,7 @@ reset: ## Alle Daten loeschen und Originalzustand herstellen
 	rm -rf services/frontend/.svelte-kit
 	@echo ""
 	@echo "Reset abgeschlossen. Originalzustand wiederhergestellt."
-	@echo "Neu starten mit:  make dev  oder  make up-dev-full"
+	@echo "Neu starten mit:  make up  oder  make up-dev-full"
 
 # ── Documentation ────────────────────────────────────────────
 
@@ -156,10 +163,13 @@ doc: ## HTML-Doku generieren (Services muessen laufen fuer volle Endpoint-Doku)
 help: ## Show this help
 	@echo "RAG Platform – Makefile Targets"
 	@echo ""
+	@echo "Start:"
+	@echo "  make up                Alle Services fuer Hosting (externes Ollama, :3000)"
+	@echo "  make up-dev-full       Alle Services inkl. lokalem Ollama-Container"
+	@echo ""
 	@echo "Entwicklung:"
 	@echo "  make dev               Backend in Docker + Vite-Hot-Reload (localhost:5173)"
-	@echo "  make dev-bundled       Wie dev, aber mit gebautem Frontend-Container (:3000)"
-	@echo "  make up-dev-full       Alle Services starten (inkl. lokales Ollama)"
+	@echo "  make dev-bundled       Alias fuer make up"
 	@echo "  make frontend-dev      Nur Frontend im Dev-Modus (Backend muss laufen)"
 	@echo "  make down              Alle Services stoppen"
 	@echo "  make logs              Live-Logs aller Services"
