@@ -1,5 +1,7 @@
 # Docker Compose V2 (Plugin) ist Pflicht – docker-compose 1.29 ist mit Docker Engine 29 inkompatibel.
-COMPOSE = docker compose -f docker-compose.dev.yml --env-file .env
+COMPOSE_DEV = docker compose -f docker-compose.dev.yml --env-file .env
+COMPOSE_BUILD = docker compose -f docker-compose.build.yml --env-file .env
+COMPOSE = $(COMPOSE_DEV)
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
 .PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test pull-models doc reset help
@@ -73,18 +75,18 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port frontend-build ## Alle Services fuer Hosting (externes Ollama, Frontend :3000)
-	@echo "Starte alle Services (Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
-	$(COMPOSE) up --build -d
+up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama, :3000)
+	@echo "Starte alle Services (docker-compose.build.yml, Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
+	$(COMPOSE_BUILD) up --build -d
 	@echo ""
 	@echo "Plattform laeuft:"
 	@echo "  Frontend  → http://localhost:3000"
 	@echo "  Logs:     make logs"
 	@echo "  Stop:     make down"
 
-up-dev-full: _ensure-compose-v2 frontend-build ## Start all services (inkl. lokales Ollama)
+up-dev-full: _ensure-compose-v2 ## Alle Services inkl. lokalem Ollama (Docker-Build)
 	@test -f .env || cp .env.example .env
-	$(COMPOSE) --profile local-ollama up --build -d
+	$(COMPOSE_BUILD) --profile local-ollama up --build -d
 	@echo ""
 	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
 	@echo "Ollama-Modelle laden:  make pull-models"
@@ -111,18 +113,24 @@ frontend-dev: ## Nur das Frontend im Dev-Modus (Backend muss bereits laufen)
 	cd services/frontend && AUTH_SECRET="$$(grep -E '^AUTH_SECRET=' ../../.env 2>/dev/null | head -1 | cut -d= -f2-)" $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
 
 down: _ensure-compose-v2 ## Stop all services
-	$(COMPOSE) --profile local-ollama down
+	$(COMPOSE_BUILD) --profile local-ollama down --remove-orphans 2>/dev/null || true
+	$(COMPOSE_DEV) --profile local-ollama down --remove-orphans 2>/dev/null || true
 
 clean-stack: ## Haengende kermit-Container entfernen (nach ContainerConfig-Fehler)
 	@echo "Entferne kermit-Container ..."
 	@docker ps -aq --filter name=kermit | xargs -r docker rm -f 2>/dev/null || true
 	@if docker compose version >/dev/null 2>&1; then \
+		docker compose -f docker-compose.build.yml --env-file .env down --remove-orphans 2>/dev/null || true; \
 		docker compose -f docker-compose.dev.yml --env-file .env down --remove-orphans 2>/dev/null || true; \
 	fi
 	@echo "Bereinigt. Neu starten mit: make up"
 
 logs: _ensure-compose-v2 ## Tail logs of all services
-	$(COMPOSE) --profile local-ollama logs -f
+	@if $(COMPOSE_BUILD) ps -q 2>/dev/null | grep -q .; then \
+		$(COMPOSE_BUILD) logs -f; \
+	else \
+		$(COMPOSE_DEV) --profile local-ollama logs -f; \
+	fi
 
 pull-models: ## Ollama-Modelle herunterladen (LLM + Embedding)
 	@if docker ps --format '{{.Names}}' | grep -q ollama; then \
@@ -171,7 +179,8 @@ reset: _ensure-compose-v2 ## Alle Daten loeschen und Originalzustand herstellen
 	@read -p "Fortfahren? [y/N] " confirm && [ "$$confirm" = "y" ] || (echo "Abgebrochen."; exit 1)
 	@echo ""
 	@echo "Stoppe alle Services und loesche Volumes ..."
-	$(COMPOSE) --profile local-ollama --profile test down --volumes --remove-orphans
+	$(COMPOSE_BUILD) --profile local-ollama down --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE_DEV) --profile local-ollama --profile test down --volumes --remove-orphans 2>/dev/null || true
 	@echo "Entferne verbleibende Container und Volumes ..."
 	@docker ps -aq --filter name=kermit | xargs -r docker rm -f 2>/dev/null || true
 	@docker volume ls -q --filter name=kermit | xargs -r docker volume rm -f 2>/dev/null || true
@@ -199,8 +208,8 @@ help: ## Show this help
 	@echo "RAG Platform – Makefile Targets"
 	@echo ""
 	@echo "Start:"
-	@echo "  make up                Alle Services fuer Hosting (externes Ollama, :3000)"
-	@echo "  make up-dev-full       Alle Services inkl. lokalem Ollama-Container"
+	@echo "  make up                Hosting via docker-compose.build.yml (Docker-Build, :3000)"
+	@echo "  make up-dev-full       Wie up, inkl. lokalem Ollama-Container"
 	@echo ""
 	@echo "Entwicklung:"
 	@echo "  make dev               Backend in Docker + Vite-Hot-Reload (localhost:5173)"
