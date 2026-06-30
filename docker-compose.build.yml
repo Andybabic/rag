@@ -176,10 +176,26 @@ services:
       PORT: "3000"
       ORIGIN: "${ORIGIN:-http://localhost:3000}"
       BODY_SIZE_LIMIT: "52428800"
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET muss gesetzt sein (Cookie-Signatur; python -c \"import secrets; print(secrets.token_urlsafe(48))\")}"
+      EVALUATION_SERVICE_URL: "${EVALUATION_SERVICE_URL:-http://evaluation:8005}"
+      CLEANING_SERVICE_URL: "${CLEANING_SERVICE_URL:-http://cleaning:8001}"
+      DATA_STRUCTURE_SERVICE_URL: "${DATA_STRUCTURE_SERVICE_URL:-http://data_structure:8002}"
+      EMBEDDING_SERVICE_URL: "${EMBEDDING_SERVICE_URL:-http://embedding:8003}"
+      VECTORDB_SERVICE_URL: "${VECTORDB_SERVICE_URL:-http://vectordb:8004}"
     env_file: .env
     depends_on:
+      postgres:
+        condition: service_healthy
+      cleaning:
+        condition: service_healthy
+      data_structure:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      vectordb:
+        condition: service_healthy
       evaluation:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
       interval: 15s

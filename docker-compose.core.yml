@@ -34,8 +34,6 @@ services:
         SERVICE_PORT: "8001"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8001
-    ports:
-      - "8001:8001"
     environment:
       USE_MINERU: "${USE_MINERU:-false}"
       MINERU_API_URL: "${MINERU_API_URL:-http://mineru:8000}"
@@ -64,8 +62,7 @@ services:
         SERVICE_PORT: "8002"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8002
-    ports:
-      - "8002:8002"
+
     environment:
       DEFAULT_CHUNK_SIZE: "${DEFAULT_CHUNK_SIZE:-512}"
       DEFAULT_CHUNK_OVERLAP: "${DEFAULT_CHUNK_OVERLAP:-64}"
@@ -88,8 +85,7 @@ services:
         SERVICE_PORT: "8003"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8003
-    ports:
-      - "8003:8003"
+
     environment:
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-ollama}"
       OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:?OLLAMA_BASE_URL muss gesetzt sein (z.B. http://server-b:11434)}"
@@ -117,8 +113,7 @@ services:
         SERVICE_PORT: "8004"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8004
-    ports:
-      - "8004:8004"
+
     environment:
       QDRANT_HOST: "qdrant"
       QDRANT_PORT: "6333"
