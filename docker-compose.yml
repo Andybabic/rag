@@ -1,0 +1,4 @@
+# Single-Server-Hosting – Standard-Entry fuer: docker compose up
+# Entspricht docker-compose.build.yml (Backend + Frontend, alles per Docker-Build).
+include:
+  - docker-compose.build.yml
