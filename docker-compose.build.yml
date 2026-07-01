@@ -9,6 +9,10 @@
 # /home/kermit). Vor dem ersten Start:
 #   sudo mkdir -p /home/kermit/{postgres,qdrant,documents,hf-cache}
 #   sudo chown -R 999:999 /home/kermit/postgres   # postgres:16-alpine
+#
+# Coolify: Kein zusaetzliches Persistent Storage fuer den qdrant-Service noetig
+# (Daten liegen unter ${KERMIT_DATA_DIR}/qdrant). Falls vorhanden: entfernen
+# oder Destination hoechstens /var/lib/qdrant – niemals /qdrant mounten.
 # ══════════════════════════════════════════════════════════════
 
 services:
@@ -33,13 +37,10 @@ services:
       start_period: 10s
 
   qdrant:
-    image: qdrant/qdrant:v1.9.7
+    build:
+      context: .
+      dockerfile: Dockerfile.qdrant
     restart: unless-stopped
-    # Storage bewusst AUSSERHALB von /qdrant mounten – sonst kann ein Bind-Mount
-    # (oder Coolify Persistent Storage auf /qdrant) entrypoint.sh verdecken.
-    entrypoint: ["/qdrant/entrypoint.sh"]
-    environment:
-      QDRANT__STORAGE__STORAGE_PATH: /var/lib/qdrant
     volumes:
       - ${KERMIT_DATA_DIR:-/home/kermit}/qdrant:/var/lib/qdrant
     healthcheck:
