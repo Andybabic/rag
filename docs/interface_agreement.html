@@ -1,0 +1,3959 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kermit – Projektdokumentation</title>
+<style>
+:root {
+    --bg: #f8fafc; --fg: #0f172a; --accent: #2563eb;
+    --card: #fff; --border: #e2e8f0; --muted: #64748b;
+    --green: #16a34a; --red: #dc2626; --orange: #ea580c;
+    --tag-bg: #eff6ff; --tag-fg: #1e40af;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg); color: var(--fg); line-height: 1.6;
+    max-width: 1320px; margin: 0 auto; padding: 0 1.5rem 3rem;
+}
+
+/* Hero */
+.hero {
+    background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+    color: #f1f5f9; border-radius: 12px; padding: 2rem 2.5rem;
+    margin: 1.5rem 0 2rem;
+}
+.hero h1 { font-size: 2rem; margin-bottom: .35rem; color: #fff; }
+.hero p { color: #cbd5e1; font-size: .95rem; }
+.hero .meta { font-size: .82rem; color: #94a3b8; margin-top: .5rem; }
+
+/* Nav */
+nav { margin-bottom: 2rem; position: sticky; top: 0; z-index: 10;
+      background: var(--bg); padding: .75rem 0; border-bottom: 1px solid var(--border); }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem; }
+nav a {
+    display: inline-block; padding: .35rem .75rem; border-radius: 6px;
+    background: var(--tag-bg); color: var(--tag-fg); font-size: .85rem;
+    font-weight: 500; text-decoration: none; transition: background .15s;
+}
+nav a:hover { background: #dbeafe; }
+
+/* Headings */
+h2 { font-size: 1.4rem; margin: 2.5rem 0 1rem; padding-bottom: .4rem;
+     border-bottom: 2px solid var(--border); }
+h3 { font-size: 1.1rem; margin: 1.8rem 0 .75rem; }
+h4 { font-size: .95rem; margin: 1rem 0 .5rem; color: var(--muted); }
+small { font-size: .75em; color: var(--muted); font-weight: 400; }
+.section-desc { color: var(--muted); font-size: .9rem; margin-bottom: 1rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Service Grid */
+.service-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+                gap: 1rem; margin: 1rem 0; }
+.service-card { background: var(--card); border: 1px solid var(--border);
+                border-radius: 10px; padding: 1rem; }
+.service-header { display: flex; justify-content: space-between; align-items: center;
+                  padding-left: .75rem; margin-bottom: .5rem; }
+.service-name { font-weight: 700; font-size: 1rem; }
+.status-badge { font-size: .72rem; padding: .2rem .5rem; border-radius: 20px;
+                font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.status-badge.online { background: #dcfce7; color: #166534; }
+.status-badge.offline { background: #fef2f2; color: #991b1b; }
+.service-meta { font-size: .82rem; color: var(--muted); margin-bottom: .35rem; }
+.service-desc { font-size: .85rem; color: var(--fg); margin-bottom: .5rem; }
+.service-stats { display: flex; gap: 1rem; font-size: .8rem; color: var(--muted); }
+
+/* Cards */
+.card { background: var(--card); border: 1px solid var(--border);
+        border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.card-title { font-size: 1rem; font-weight: 600; margin-bottom: .15rem; }
+.card-doc { font-size: .85rem; color: var(--muted); margin-bottom: .75rem;
+            white-space: pre-line; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: .875rem; margin-bottom: .5rem; }
+th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--border); }
+th { background: #f8fafc; font-weight: 600; white-space: nowrap; }
+td code { background: #f1f5f9; padding: .1rem .35rem; border-radius: 4px; font-size: .82rem; }
+
+/* Enum badges */
+.enum-values { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .25rem; }
+.enum-val { background: var(--tag-bg); color: var(--tag-fg); padding: .15rem .5rem;
+            border-radius: 4px; font-size: .8rem; font-family: monospace; }
+
+/* Endpoints */
+.svc-heading { padding-left: .75rem; border-left: 4px solid; margin: 2rem 0 .75rem; }
+.port-badge { font-size: .75rem; color: var(--muted); font-weight: 400; }
+.offline-hint { font-size: .8rem; color: var(--red); font-weight: 400; }
+.tag-heading { color: var(--muted); font-weight: 500; text-transform: uppercase;
+               letter-spacing: .05em; font-size: .78rem; margin: 1.25rem 0 .5rem; }
+
+.endpoint-card { background: var(--card); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 1rem; margin-bottom: .6rem; }
+.endpoint-header { display: flex; align-items: center; gap: .6rem; margin-bottom: .35rem; }
+.method-badge { display: inline-block; padding: .2rem .5rem; border-radius: 4px;
+                font-size: .72rem; font-weight: 700; color: #fff; min-width: 52px;
+                text-align: center; font-family: monospace; }
+.endpoint-path { font-size: .92rem; font-weight: 500; }
+.endpoint-desc { font-size: .85rem; color: var(--muted); margin-bottom: .4rem; }
+
+.param-section { font-size: .82rem; margin: .25rem 0; display: flex;
+                 flex-wrap: wrap; align-items: center; gap: .4rem; }
+.param-label { color: var(--muted); font-weight: 500; }
+.param-section code { background: #f1f5f9; padding: .15rem .4rem; border-radius: 4px; }
+
+.schema-links { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
+.schema-tag { font-size: .78rem; padding: .2rem .55rem; border-radius: 4px; font-weight: 500; }
+.schema-tag.req { background: #eff6ff; color: #1e40af; }
+.schema-tag.resp { background: #f0fdf4; color: #166534; }
+.schema-tag a { text-decoration: none; }
+.schema-tag a:hover { text-decoration: underline; }
+
+/* Dependency matrix */
+.dep-matrix td, .dep-matrix th { text-align: center; padding: .4rem .5rem; }
+.dep-matrix .check { color: var(--green); font-weight: 700; font-size: 1.1rem; }
+.dep-matrix td:first-child, .dep-matrix th:first-child { text-align: left; font-weight: 600; }
+
+/* Diagram */
+.diagram { background: #1e293b; color: #e2e8f0; border-radius: 10px;
+           padding: 1.25rem; overflow-x: auto;
+           font-family: 'JetBrains Mono', 'Fira Code', monospace;
+           font-size: .82rem; line-height: 1.7; white-space: pre; margin: 1rem 0; }
+.diagram .hl { color: #38bdf8; }
+.diagram .arrow { color: #94a3b8; }
+.diagram .svc { color: #4ade80; font-weight: 600; }
+.diagram .ep { color: #fbbf24; }
+
+/* Footer */
+footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
+         font-size: .8rem; color: var(--muted); }
+
+/* Print */
+@media print { nav { position: static; } .hero { background: #334155; } }
+</style>
+</head>
+<body>
+<header class="hero">
+<h1>Kermit RAG Platform</h1>
+<p>Vollständige Projektdokumentation – generiert aus den OpenAPI-Specs der laufenden Services</p>
+<p class="meta">Generiert: 2026-07-01 09:27 UTC · 5/6 Services erreichbar</p>
+</header>
+<nav><ul>
+<li><a href="#services">Services</a></li>
+<li><a href="#endpoints">Alle Endpoints</a></li>
+<li><a href="#schemas">Schemas</a></li>
+<li><a href="#interface-models">Interface Models</a></li>
+<li><a href="#dependencies">Abhängigkeiten</a></li>
+<li><a href="#dataflow">Datenfluss</a></li>
+<li><a href="#env">Konfiguration</a></li>
+</ul></nav>
+<h2 id="services">Services</h2>
+<div class="service-grid">
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #059669">
+<div class="service-name">Cleaning Service</div>
+<span class="status-badge online">online</span>
+</div>
+<div class="service-meta">Port: <strong>8001</strong> · Version: <strong>1.0.0</strong></div>
+<div class="service-desc">Document cleaning and text extraction service</div>
+<div class="service-stats"><span>8 Endpoints</span><span>5 Schemas</span></div>
+</div>
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #0891b2">
+<div class="service-name">Data Structure Service</div>
+<span class="status-badge online">online</span>
+</div>
+<div class="service-meta">Port: <strong>8002</strong> · Version: <strong>1.0.0</strong></div>
+<div class="service-desc">Markdown chunking and metadata enrichment</div>
+<div class="service-stats"><span>5 Endpoints</span><span>6 Schemas</span></div>
+</div>
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #7c3aed">
+<div class="service-name">Embedding Service</div>
+<span class="status-badge online">online</span>
+</div>
+<div class="service-meta">Port: <strong>8003</strong> · Version: <strong>1.0.0</strong></div>
+<div class="service-desc">FastAPI wrapper around Ollama embeddings</div>
+<div class="service-stats"><span>4 Endpoints</span><span>6 Schemas</span></div>
+</div>
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #2563eb">
+<div class="service-name">VectorDB Service</div>
+<span class="status-badge online">online</span>
+</div>
+<div class="service-meta">Port: <strong>8004</strong> · Version: <strong>1.0.0</strong></div>
+<div class="service-desc">Qdrant wrapper for vector storage and similarity search</div>
+<div class="service-stats"><span>7 Endpoints</span><span>8 Schemas</span></div>
+</div>
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #d97706">
+<div class="service-name">Evaluation Service</div>
+<span class="status-badge online">online</span>
+</div>
+<div class="service-meta">Port: <strong>8005</strong> · Version: <strong>1.0.0</strong></div>
+<div class="service-desc">Reranking, evaluation, and citation mapping</div>
+<div class="service-stats"><span>37 Endpoints</span><span>26 Schemas</span></div>
+</div>
+<div class="service-card">
+<div class="service-header" style="border-left: 4px solid #dc2626">
+<div class="service-name">Frontend Service</div>
+<span class="status-badge offline">offline</span>
+</div>
+<div class="service-meta">Port: <strong>3000</strong> · Version: <strong>—</strong></div>
+<div class="service-stats"><span>0 Endpoints</span><span>0 Schemas</span></div>
+</div>
+</div>
+<h2 id="endpoints">Alle Endpoints</h2>
+<h3 id="svc-cleaning" class="svc-heading" style="border-color: #059669">Cleaning Service <span class="port-badge">:8001</span></h3>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health</code>
+</div>
+<div class="endpoint-desc">Health</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-HealthResponse">HealthResponse</a></span>
+</div>
+</div>
+<h4 class="tag-heading">v1</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/clean</code>
+</div>
+<div class="endpoint-desc">Clean File</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-multipart/form-data">multipart/form-data</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/clean/batch</code>
+</div>
+<div class="endpoint-desc">Clean Batch</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-multipart/form-data">multipart/form-data</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/documents/{path}</code>
+</div>
+<div class="endpoint-desc">Serve Document</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>path: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/documents/{use_case}/{file_hash}</code>
+</div>
+<div class="endpoint-desc">Delete Document</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+<code>file_hash: string</code>
+</div>
+<div class="param-section">
+<span class="param-label">Query-Parameter:</span>
+<code>stored_path: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/documents/{use_case}/{file_hash}/images</code>
+</div>
+<div class="endpoint-desc">List Document Image Gallery</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+<code>file_hash: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/formats</code>
+</div>
+<div class="endpoint-desc">Formats</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-list">list</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/images/{use_case}/{image_id}</code>
+</div>
+<div class="endpoint-desc">Serve Image</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+<code>image_id: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<h3 id="svc-data_structure" class="svc-heading" style="border-color: #0891b2">Data Structure Service <span class="port-badge">:8002</span></h3>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health</code>
+</div>
+<div class="endpoint-desc">Health</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-HealthResponse">HealthResponse</a></span>
+</div>
+</div>
+<h4 class="tag-heading">v1</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/structure</code>
+</div>
+<div class="endpoint-desc">Structure</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-StructureRequest">StructureRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/structure/cnc</code>
+</div>
+<div class="endpoint-desc">Structure Cnc</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-CNCStructureRequest">CNCStructureRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/structure/folder</code>
+</div>
+<div class="endpoint-desc">Structure Folder</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/use-cases</code>
+</div>
+<div class="endpoint-desc">Use Cases</div>
+<div class="schema-links">
+</div>
+</div>
+<h3 id="svc-embedding" class="svc-heading" style="border-color: #7c3aed">Embedding Service <span class="port-badge">:8003</span></h3>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health</code>
+</div>
+<div class="endpoint-desc">Health</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-HealthResponse">HealthResponse</a></span>
+</div>
+</div>
+<h4 class="tag-heading">v1</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/embed</code>
+</div>
+<div class="endpoint-desc">Embed</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-EmbedRequest">EmbedRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/embed/batch</code>
+</div>
+<div class="endpoint-desc">Embed Batch Endpoint</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-BatchEmbedRequest">BatchEmbedRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/models</code>
+</div>
+<div class="endpoint-desc">Models Endpoint</div>
+<div class="schema-links">
+</div>
+</div>
+<h3 id="svc-vectordb" class="svc-heading" style="border-color: #2563eb">VectorDB Service <span class="port-badge">:8004</span></h3>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health</code>
+</div>
+<div class="endpoint-desc">Health</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-HealthResponse">HealthResponse</a></span>
+</div>
+</div>
+<h4 class="tag-heading">v1</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/collection/{name}</code>
+</div>
+<div class="endpoint-desc">Collection Delete</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>name: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/collections</code>
+</div>
+<div class="endpoint-desc">Collections</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/delete</code>
+</div>
+<div class="endpoint-desc">Delete Points</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-DeletePointsRequest">DeletePointsRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/search</code>
+</div>
+<div class="endpoint-desc">Search</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-SearchRequest">SearchRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/search/cross</code>
+</div>
+<div class="endpoint-desc">Search Cross</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-CrossSearchRequest">CrossSearchRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/upsert</code>
+</div>
+<div class="endpoint-desc">Upsert</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-UpsertRequest">UpsertRequest</a></span>
+</div>
+</div>
+<h3 id="svc-evaluation" class="svc-heading" style="border-color: #d97706">Evaluation Service <span class="port-badge">:8005</span></h3>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health</code>
+</div>
+<div class="endpoint-desc">Health</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-HealthResponse">HealthResponse</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/health/reranker</code>
+</div>
+<div class="endpoint-desc">Health Reranker</div>
+<div class="schema-links">
+</div>
+</div>
+<h4 class="tag-heading">admin</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/actions/catalog</code>
+</div>
+<div class="endpoint-desc">Get Action Catalog</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/actions/{use_case}</code>
+</div>
+<div class="endpoint-desc">Get Actions</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/actions/{use_case}/{action_name}</code>
+</div>
+<div class="endpoint-desc">Update Action</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+<code>action_name: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-ActionUpdate">ActionUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/config/{use_case}</code>
+</div>
+<div class="endpoint-desc">Get Config</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/config/{use_case}</code>
+</div>
+<div class="endpoint-desc">Update Config</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-ConfigUpdate">ConfigUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/documents</code>
+</div>
+<div class="endpoint-desc">List Documents</div>
+<div class="param-section">
+<span class="param-label">Query-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/admin/documents/{doc_id}</code>
+</div>
+<div class="endpoint-desc">Delete Document Log</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>doc_id: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/memory/{use_case}</code>
+</div>
+<div class="endpoint-desc">Get Memory</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/memory/{use_case}</code>
+</div>
+<div class="endpoint-desc">Update Memory</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-MemoryUpdate">MemoryUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/prompt-keys</code>
+</div>
+<div class="endpoint-desc">Update Prompt Key</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-PromptKeyUpdate">PromptKeyUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/prompt-keys/{use_case}</code>
+</div>
+<div class="endpoint-desc">List Prompt Keys</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/prompts/{use_case}</code>
+</div>
+<div class="endpoint-desc">Get Prompts</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="param-section">
+<span class="param-label">Query-Parameter:</span>
+<code>role: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/prompts/{use_case}</code>
+</div>
+<div class="endpoint-desc">Update Prompt</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-PromptUpdate">PromptUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/queries</code>
+</div>
+<div class="endpoint-desc">List Queries</div>
+<div class="param-section">
+<span class="param-label">Query-Parameter:</span>
+<code>use_case: string</code>
+<code>limit: integer</code>
+<code>offset: integer</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/skills/{skill_id}</code>
+</div>
+<div class="endpoint-desc">Update Skill Endpoint</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>skill_id: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-SkillUpdate">SkillUpdate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/admin/skills/{skill_id}</code>
+</div>
+<div class="endpoint-desc">Delete Skill Endpoint</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>skill_id: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/skills/{use_case}</code>
+</div>
+<div class="endpoint-desc">Get Skills</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/admin/skills/{use_case}</code>
+</div>
+<div class="endpoint-desc">Create Skill Endpoint</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-SkillCreate">SkillCreate</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/admin/use-cases</code>
+</div>
+<div class="endpoint-desc">Admin List Use Cases</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#ea580c">PUT</span>
+<code class="endpoint-path">/v1/admin/use-cases/{use_case_id}</code>
+</div>
+<div class="endpoint-desc">Admin Upsert Use Case</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case_id: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-UseCaseInput">UseCaseInput</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/admin/use-cases/{use_case_id}</code>
+</div>
+<div class="endpoint-desc">Admin Delete Use Case</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case_id: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<h4 class="tag-heading">v1</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/agent/query</code>
+</div>
+<div class="endpoint-desc">Agent Query</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-AgentQueryRequest">AgentQueryRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/agent/query/stream</code>
+</div>
+<div class="endpoint-desc">Agent Query Stream</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-AgentQueryRequest">AgentQueryRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/citations</code>
+</div>
+<div class="endpoint-desc">Citations</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-CitationsRequest">CitationsRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/evaluate</code>
+</div>
+<div class="endpoint-desc">Evaluate</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-EvaluateRequest">EvaluateRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/ingest-log</code>
+</div>
+<div class="endpoint-desc">Log Ingestion</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-Body">Body</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/log</code>
+</div>
+<div class="endpoint-desc">Log Feedback</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-FeedbackRequest">FeedbackRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/rerank</code>
+</div>
+<div class="endpoint-desc">Rerank</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-RerankRequest">RerankRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/use-case/{use_case_id}/collections</code>
+</div>
+<div class="endpoint-desc">Use Case Collections</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>use_case_id: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/use-cases</code>
+</div>
+<div class="endpoint-desc">Get Use Cases</div>
+<div class="schema-links">
+</div>
+</div>
+<h4 class="tag-heading">auth</h4>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/auth/login</code>
+</div>
+<div class="endpoint-desc">Login</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-LoginRequest">LoginRequest</a></span>
+<span class="schema-tag resp">Response: <a href="#schema-UserOut">UserOut</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#16a34a">GET</span>
+<code class="endpoint-path">/v1/auth/users</code>
+</div>
+<div class="endpoint-desc">Get Users</div>
+<div class="schema-links">
+<span class="schema-tag resp">Response: <a href="#schema-list[UserOut]">list[UserOut]</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#2563eb">POST</span>
+<code class="endpoint-path">/v1/auth/users</code>
+</div>
+<div class="endpoint-desc">Post User</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-CreateUserRequest">CreateUserRequest</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#7c3aed">PATCH</span>
+<code class="endpoint-path">/v1/auth/users/{username}</code>
+</div>
+<div class="endpoint-desc">Patch User</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>username: string</code>
+</div>
+<div class="schema-links">
+<span class="schema-tag req">Request: <a href="#schema-UpdateUserRequest">UpdateUserRequest</a></span>
+<span class="schema-tag resp">Response: <a href="#schema-UserOut">UserOut</a></span>
+</div>
+</div>
+<div class="endpoint-card">
+<div class="endpoint-header">
+<span class="method-badge" style="background:#dc2626">DELETE</span>
+<code class="endpoint-path">/v1/auth/users/{username}</code>
+</div>
+<div class="endpoint-desc">Remove User</div>
+<div class="param-section">
+<span class="param-label">Path-Parameter:</span>
+<code>username: string</code>
+</div>
+<div class="schema-links">
+</div>
+</div>
+<h3 class="svc-heading" style="border-color: #dc2626">Frontend Service <span class="offline-hint">(nicht erreichbar)</span></h3>
+<h2 id="schemas">Schemas <small>(aus OpenAPI / Swagger)</small></h2>
+<p class="section-desc">Automatisch aus den <code>/openapi.json</code>-Specs der laufenden Services extrahiert.</p>
+<div class="card" id="schema-ActionUpdate">
+<div class="card-title"><code>ActionUpdate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>enabled</code></td>
+<td><code>Optional[bool]</code></td>
+<td><code>—</code></td>
+<td>Enabled</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Description</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-AgentConfig">
+<div class="card-title"><code>AgentConfig</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td>Collection</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Filters</td>
+</tr>
+<tr>
+<td><code>max_steps</code></td>
+<td><code>int</code></td>
+<td><code>3</code></td>
+<td>Max Steps</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-AgentQueryRequest">
+<div class="card-title"><code>AgentQueryRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Query</td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Use Case</td>
+</tr>
+<tr>
+<td><code>session_id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Session Id</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;default&#x27;</code></td>
+<td>Role</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><a href="#schema-AgentConfig"><code>AgentConfig</code></a></td>
+<td><code>—</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>history</code></td>
+<td><a href="#schema-HistoryMessage"><code>list[HistoryMessage]</code></a></td>
+<td><code>—</code></td>
+<td>History</td>
+</tr>
+<tr>
+<td><code>images</code></td>
+<td><code>list[str]</code></td>
+<td><code>—</code></td>
+<td>Images</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-BatchChunk">
+<div class="card-title"><code>BatchChunk</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;text&#x27;</code></td>
+<td>Type</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Content</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-BatchEmbedRequest">
+<div class="card-title"><code>BatchEmbedRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunks</code></td>
+<td><a href="#schema-BatchChunk"><code>list[BatchChunk]</code></a></td>
+<td><code>required</code></td>
+<td>Chunks</td>
+</tr>
+<tr>
+<td><code>batch_size</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Batch Size</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-Body_clean_batch_v1_clean_batch_post">
+<div class="card-title"><code>Body_clean_batch_v1_clean_batch_post</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>files</code></td>
+<td><code>list[str]</code></td>
+<td><code>required</code></td>
+<td>Files</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;{}&#x27;</code></td>
+<td>Config</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-Body_clean_file_v1_clean_post">
+<div class="card-title"><code>Body_clean_file_v1_clean_post</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>file</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>File</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;{}&#x27;</code></td>
+<td>Config</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-CNCStructureRequest">
+<div class="card-title"><code>CNCStructureRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Markdown</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><a href="#schema-StructureConfig"><code>StructureConfig</code></a></td>
+<td><code>—</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-ChunkInput">
+<div class="card-title"><code>ChunkInput</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Chunk Id</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Text</td>
+</tr>
+<tr>
+<td><code>score</code></td>
+<td><code>float</code></td>
+<td><code>required</code></td>
+<td>Score</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-CitationChunk">
+<div class="card-title"><code>CitationChunk</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Chunk Id</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Text</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-CitationsRequest">
+<div class="card-title"><code>CitationsRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>answer</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Answer</td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><a href="#schema-CitationChunk"><code>list[CitationChunk]</code></a></td>
+<td><code>required</code></td>
+<td>Chunks</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-ConfigUpdate">
+<div class="card-title"><code>ConfigUpdate</code></div>
+<div class="card-doc">Partial update. Only fields explicitly set are written.
+
+For API keys, send ``ollama_api_key`` / ``openai_api_key`` plaintext —
+the server encrypts before storing. Send empty string to clear; send
+``None`` (omit the field) to leave unchanged.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chat_provider</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Chat Provider</td>
+</tr>
+<tr>
+<td><code>embedding_provider</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Embedding Provider</td>
+</tr>
+<tr>
+<td><code>vision_provider</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Vision Provider</td>
+</tr>
+<tr>
+<td><code>ollama_base_url</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Ollama Base Url</td>
+</tr>
+<tr>
+<td><code>openai_base_url</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Openai Base Url</td>
+</tr>
+<tr>
+<td><code>ollama_api_key</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Ollama Api Key</td>
+</tr>
+<tr>
+<td><code>openai_api_key</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Openai Api Key</td>
+</tr>
+<tr>
+<td><code>llm_model</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Llm Model</td>
+</tr>
+<tr>
+<td><code>embedding_model</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Embedding Model</td>
+</tr>
+<tr>
+<td><code>vision_model</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Vision Model</td>
+</tr>
+<tr>
+<td><code>embedding_dimension</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Embedding Dimension</td>
+</tr>
+<tr>
+<td><code>temperature</code></td>
+<td><code>Optional[float]</code></td>
+<td><code>—</code></td>
+<td>Temperature</td>
+</tr>
+<tr>
+<td><code>max_tokens</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Max Tokens</td>
+</tr>
+<tr>
+<td><code>embed_batch_size</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Embed Batch Size</td>
+</tr>
+<tr>
+<td><code>agent_max_steps</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Agent Max Steps</td>
+</tr>
+<tr>
+<td><code>memory_max_chars</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Memory Max Chars</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-CreateUserRequest">
+<div class="card-title"><code>CreateUserRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>username</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Username</td>
+</tr>
+<tr>
+<td><code>password</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Password</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;user&#x27;</code></td>
+<td>Role</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-CrossSearchRequest">
+<div class="card-title"><code>CrossSearchRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>primary_collection</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Primary Collection</td>
+</tr>
+<tr>
+<td><code>linked_collections</code></td>
+<td><code>list[str]</code></td>
+<td><code>required</code></td>
+<td>Linked Collections</td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>required</code></td>
+<td>Vector</td>
+</tr>
+<tr>
+<td><code>link_key</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Link Key</td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td><code>int</code></td>
+<td><code>5</code></td>
+<td>Top K</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Filters</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-DeletePointsRequest">
+<div class="card-title"><code>DeletePointsRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Collection</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Filters</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-EmbedRequest">
+<div class="card-title"><code>EmbedRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;text&#x27;</code></td>
+<td>Type</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Content</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-EmbeddingPayload">
+<div class="card-title"><code>EmbeddingPayload</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Chunk Id</td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>required</code></td>
+<td>Vector</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-EvaluateRequest">
+<div class="card-title"><code>EvaluateRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Query</td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><a href="#schema-ChunkInput"><code>list[ChunkInput]</code></a></td>
+<td><code>required</code></td>
+<td>Chunks</td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Use Case</td>
+</tr>
+<tr>
+<td><code>min_chunks</code></td>
+<td><code>int</code></td>
+<td><code>2</code></td>
+<td>Min Chunks</td>
+</tr>
+<tr>
+<td><code>min_score</code></td>
+<td><code>float</code></td>
+<td><code>0.5</code></td>
+<td>Min Score</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-FeedbackRequest">
+<div class="card-title"><code>FeedbackRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query_id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Query Id</td>
+</tr>
+<tr>
+<td><code>feedback</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Feedback</td>
+</tr>
+<tr>
+<td><code>comment</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td>Comment</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-HTTPValidationError">
+<div class="card-title"><code>HTTPValidationError</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>detail</code></td>
+<td><a href="#schema-ValidationError"><code>list[ValidationError]</code></a></td>
+<td><code>—</code></td>
+<td>Detail</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-HealthResponse">
+<div class="card-title"><code>HealthResponse</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Status</td>
+</tr>
+<tr>
+<td><code>service</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Service</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Version</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-HistoryMessage">
+<div class="card-title"><code>HistoryMessage</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Role</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Content</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-LoginRequest">
+<div class="card-title"><code>LoginRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>username</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Username</td>
+</tr>
+<tr>
+<td><code>password</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Password</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-MemoryUpdate">
+<div class="card-title"><code>MemoryUpdate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>memory_text</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Memory Text</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-PromptKeyUpdate">
+<div class="card-title"><code>PromptKeyUpdate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>scope</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Scope</td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Key</td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Content</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-PromptUpdate">
+<div class="card-title"><code>PromptUpdate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;default&#x27;</code></td>
+<td>Role</td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Prompt</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-RerankConfig">
+<div class="card-title"><code>RerankConfig</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>threshold</code></td>
+<td><code>float</code></td>
+<td><code>0.3</code></td>
+<td>Threshold</td>
+</tr>
+<tr>
+<td><code>weights</code></td>
+<td><a href="#schema-RerankWeights"><code>RerankWeights</code></a></td>
+<td><code>—</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-RerankRequest">
+<div class="card-title"><code>RerankRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Query</td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><a href="#schema-ChunkInput"><code>list[ChunkInput]</code></a></td>
+<td><code>required</code></td>
+<td>Chunks</td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Use Case</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><a href="#schema-RerankConfig"><code>RerankConfig</code></a></td>
+<td><code>—</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-RerankWeights">
+<div class="card-title"><code>RerankWeights</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>material_similarity</code></td>
+<td><code>float</code></td>
+<td><code>0.4</code></td>
+<td>Material Similarity</td>
+</tr>
+<tr>
+<td><code>param_similarity</code></td>
+<td><code>float</code></td>
+<td><code>0.4</code></td>
+<td>Param Similarity</td>
+</tr>
+<tr>
+<td><code>usage_count</code></td>
+<td><code>float</code></td>
+<td><code>0.2</code></td>
+<td>Usage Count</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-SearchRequest">
+<div class="card-title"><code>SearchRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Collection</td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>required</code></td>
+<td>Vector</td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td><code>int</code></td>
+<td><code>5</code></td>
+<td>Top K</td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Filters</td>
+</tr>
+<tr>
+<td><code>embed_model</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Embed Model</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-SkillCreate">
+<div class="card-title"><code>SkillCreate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Name</td>
+</tr>
+<tr>
+<td><code>overview</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Overview</td>
+</tr>
+<tr>
+<td><code>detailed_task</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Detailed Task</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td><code>True</code></td>
+<td>Enabled</td>
+</tr>
+<tr>
+<td><code>position</code></td>
+<td><code>int</code></td>
+<td><code>0</code></td>
+<td>Position</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-SkillUpdate">
+<div class="card-title"><code>SkillUpdate</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Name</td>
+</tr>
+<tr>
+<td><code>overview</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Overview</td>
+</tr>
+<tr>
+<td><code>detailed_task</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Detailed Task</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>Optional[bool]</code></td>
+<td><code>—</code></td>
+<td>Enabled</td>
+</tr>
+<tr>
+<td><code>position</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Position</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-StructureConfig">
+<div class="card-title"><code>StructureConfig</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_size</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Chunk Size</td>
+</tr>
+<tr>
+<td><code>chunk_overlap</code></td>
+<td><code>Optional[int]</code></td>
+<td><code>—</code></td>
+<td>Chunk Overlap</td>
+</tr>
+<tr>
+<td><code>target_collection</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Target Collection</td>
+</tr>
+<tr>
+<td><code>extra</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Extra</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-StructureRequest">
+<div class="card-title"><code>StructureRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Markdown</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Metadata</td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Use Case</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><a href="#schema-StructureConfig"><code>StructureConfig</code></a></td>
+<td><code>—</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>images</code></td>
+<td><code>list[dict]</code></td>
+<td><code>—</code></td>
+<td>Images</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-UpdateUserRequest">
+<div class="card-title"><code>UpdateUserRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>password</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Password</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Role</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-UpsertRequest">
+<div class="card-title"><code>UpsertRequest</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Collection</td>
+</tr>
+<tr>
+<td><code>embeddings</code></td>
+<td><a href="#schema-EmbeddingPayload"><code>list[EmbeddingPayload]</code></a></td>
+<td><code>required</code></td>
+<td>Embeddings</td>
+</tr>
+<tr>
+<td><code>embed_model</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Embed Model</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-UseCaseInput">
+<div class="card-title"><code>UseCaseInput</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>slug</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Slug</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Label</td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td>Description</td>
+</tr>
+<tr>
+<td><code>color</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td>Color</td>
+</tr>
+<tr>
+<td><code>accent</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td>Accent</td>
+</tr>
+<tr>
+<td><code>roles</code></td>
+<td><code>list[str]</code></td>
+<td><code>[&#x27;default&#x27;]</code></td>
+<td>Roles</td>
+</tr>
+<tr>
+<td><code>agent_action_names</code></td>
+<td><code>list[str]</code></td>
+<td><code>[]</code></td>
+<td>Agent Action Names</td>
+</tr>
+<tr>
+<td><code>default_collection</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Default Collection</td>
+</tr>
+<tr>
+<td><code>collection_prefixes</code></td>
+<td><code>list[str]</code></td>
+<td><code>[]</code></td>
+<td>Collection Prefixes</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>bool</code></td>
+<td><code>True</code></td>
+<td>Enabled</td>
+</tr>
+<tr>
+<td><code>prompts</code></td>
+<td><code>dict[str, str]</code></td>
+<td><code>{}</code></td>
+<td>Prompts</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-UserOut">
+<div class="card-title"><code>UserOut</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>id</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Id</td>
+</tr>
+<tr>
+<td><code>username</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Username</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Role</td>
+</tr>
+<tr>
+<td><code>created_at</code></td>
+<td><code>Optional[str]</code></td>
+<td><code>—</code></td>
+<td>Created At</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="schema-ValidationError">
+<div class="card-title"><code>ValidationError</code></div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>loc</code></td>
+<td><code>list[str | int]</code></td>
+<td><code>required</code></td>
+<td>Location</td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Message</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td><code>str</code></td>
+<td><code>required</code></td>
+<td>Error Type</td>
+</tr>
+<tr>
+<td><code>input</code></td>
+<td><code>Any</code></td>
+<td><code>—</code></td>
+<td>Input</td>
+</tr>
+<tr>
+<td><code>ctx</code></td>
+<td><code>dict</code></td>
+<td><code>—</code></td>
+<td>Context</td>
+</tr>
+</tbody></table>
+</div>
+<h2 id="interface-models">Interface Models <small>(aus interface_agreement.py)</small></h2>
+<p class="section-desc">Zentrale Pydantic-Modelle, die den Vertrag zwischen den Services definieren – unabhängig davon ob die Services laufen.</p>
+<h3>Enums</h3>
+<div class="card">
+<div class="card-title"><code>AgentAction</code></div>
+<div class="card-doc">Verfügbare Aktionen im ReAct-Agent (Evaluation Service).</div>
+<div class="enum-values">
+<span class="enum-val">SEARCH</span>
+<span class="enum-val">SEARCH_CNC</span>
+<span class="enum-val">LOOKUP_SOURCES</span>
+<span class="enum-val">RECALL_MEMORY</span>
+<span class="enum-val">CLARIFY</span>
+<span class="enum-val">FINAL_ANSWER</span>
+</div></div>
+<div class="card">
+<div class="card-title"><code>DocType</code></div>
+<div class="card-doc">Unterstützte Dokumenttypen im Cleaning Service.</div>
+<div class="enum-values">
+<span class="enum-val">pdf</span>
+<span class="enum-val">docx</span>
+<span class="enum-val">csv</span>
+<span class="enum-val">txt</span>
+<span class="enum-val">image</span>
+</div></div>
+<div class="card">
+<div class="card-title"><code>FeedbackType</code></div>
+<div class="card-doc">Typen von Nutzerfeedback.</div>
+<div class="enum-values">
+<span class="enum-val">positive</span>
+<span class="enum-val">negative</span>
+</div></div>
+<div class="card">
+<div class="card-title"><code>UseCase</code></div>
+<div class="card-doc">Registrierte Use Cases mit zugehörigen Plugin-Konfigurationen.</div>
+<div class="enum-values">
+<span class="enum-val">neumann</span>
+<span class="enum-val">gw_stpoelten</span>
+<span class="enum-val">wiener_linien</span>
+<span class="enum-val">rhp</span>
+<span class="enum-val">fill</span>
+<span class="enum-val">eseco</span>
+</div></div>
+<h3>Modelle</h3>
+<div class="card" id="model-Chunk">
+<div class="card-title"><code>Chunk</code></div>
+<div class="card-doc">Ein Text-Chunk mit zugehörigen Metadaten.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>ChunkMetadata</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-ChunkMetadata">
+<div class="card-title"><code>ChunkMetadata</code></div>
+<div class="card-doc">Metadaten eines Chunks – gemeinsamer Vertrag zwischen allen Services.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>file_name</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>page</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total_pages</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>doc_type</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>extra</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Use-Case-spezifische Metadaten, angereichert via Plugin</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EmbeddedChunk">
+<div class="card-title"><code>EmbeddedChunk</code></div>
+<div class="card-doc">Ein Chunk mit seinem Embedding-Vektor.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk</code></td>
+<td><code>Chunk</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>dimension</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-SearchResult">
+<div class="card-title"><code>SearchResult</code></div>
+<div class="card-doc">Ein Suchergebnis aus der VectorDB.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk</code></td>
+<td><code>Chunk</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>score</code></td>
+<td><code>float</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-APIError">
+<div class="card-title"><code>APIError</code></div>
+<div class="card-doc">Einheitliches Fehlerformat für alle Services.
+
+HTTP-Status-Mapping:
+  ValueError       → 400
+  FileNotFoundError → 404
+  PermissionError  → 403
+  sonstige         → 500</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>error</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>detail</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>service</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-HealthResponse">
+<div class="card-title"><code>HealthResponse</code></div>
+<div class="card-doc">Standard-Health-Check-Antwort (GET /health).</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>service</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanConfig">
+<div class="card-title"><code>CleanConfig</code></div>
+<div class="card-doc">Optionale Konfiguration für den Cleaning Service.
+
+Use-Case-spezifisch:
+  FILL:    pii_removal=True (Anonymisierung von Kundendaten)
+  Neumann: extract_images=True (für LLM-Vision-Captions)</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>extract_images</code></td>
+<td><code>bool</code></td>
+<td><code>True</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>pii_removal</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanResponse">
+<div class="card-title"><code>CleanResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/clean – ein einzelnes Dokument.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;ok&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>images</code></td>
+<td><code>list[dict]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Extrahierte Bilder (Base64 + Metadaten)</td>
+</tr>
+<tr>
+<td><code>pages</code></td>
+<td><code>list[dict]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Seitenweise Aufteilung des Dokuments</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>ForwardRef(&#x27;CleanDocumentMetadata&#x27;)</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanDocumentMetadata">
+<div class="card-title"><code>CleanDocumentMetadata</code></div>
+<div class="card-doc">Metadaten, die der Cleaning Service zu einem Dokument liefert.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>file_name</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total_pages</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>doc_type</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>used_mineru</code></td>
+<td><code>bool</code></td>
+<td><code>False</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanBatchResultItem">
+<div class="card-title"><code>CleanBatchResultItem</code></div>
+<div class="card-doc">Ergebnis für ein einzelnes Dokument im Batch.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>file_name</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanBatchErrorItem">
+<div class="card-title"><code>CleanBatchErrorItem</code></div>
+<div class="card-doc">Fehler für ein einzelnes Dokument im Batch.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>file_name</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>error</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>detail</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CleanBatchResponse">
+<div class="card-title"><code>CleanBatchResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/clean/batch – mehrere Dokumente parallel.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;ok&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>success</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td><code>list[CleanBatchResultItem]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>errors</code></td>
+<td><code>list[CleanBatchErrorItem]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-StructureConfig">
+<div class="card-title"><code>StructureConfig</code></div>
+<div class="card-doc">Konfiguration für Chunking und Collection-Routing.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_size</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>chunk_overlap</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>target_collection</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>extra</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Use-Case-spezifische Parameter (z.B. product_id)</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-StructureRequest">
+<div class="card-title"><code>StructureRequest</code></div>
+<div class="card-doc">Request für POST /v1/structure.
+
+Eingabe: Markdown + Metadaten aus dem Cleaning Service.
+Ausgabe: Chunks mit angereicherter ChunkMetadata + Collection-Routing.
+
+Das Plugin-System reichert Metadaten Use-Case-spezifisch an:
+  Neumann:       machine_id, area (hydraulik/elektrik/mechanik), topic
+  GW St. Pölten: cnc_step_id, operation_type, material_class
+  Wiener Linien: fahrzeug_typ, kategorie</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>StructureConfig</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-StructureResponse">
+<div class="card-title"><code>StructureResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/structure.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;ok&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total_chunks</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>routing</code></td>
+<td><code>ForwardRef(&#x27;StructureRouting&#x27;)</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><code>list[Chunk]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-StructureRouting">
+<div class="card-title"><code>StructureRouting</code></div>
+<div class="card-doc">Routing-Information – in welche Qdrant-Collection die Chunks gehören.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CNCStructureRequest">
+<div class="card-title"><code>CNCStructureRequest</code></div>
+<div class="card-doc">Request für POST /v1/structure/cnc (nur GW St. Pölten).
+
+Spezialisiertes Chunking für CNC-Programme mit separaten
+Rüstungs- und Materialinfo-Chunks.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>markdown</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Enthält product_id, ruest_map_id</td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>StructureConfig</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CNCBlock">
+<div class="card-title"><code>CNCBlock</code></div>
+<div class="card-doc">Ein einzelner CNC-Bearbeitungsschritt.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>cnc_step_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>operation_type</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>cutting_speed</code></td>
+<td><code>float</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>tool_type</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>material_class</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CNCStructureResponse">
+<div class="card-title"><code>CNCStructureResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/structure/cnc.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;ok&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>cnc_blocks</code></td>
+<td><code>list[CNCBlock]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>ruest_chunks</code></td>
+<td><code>list[Chunk]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>material_chunks</code></td>
+<td><code>list[Chunk]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-UseCaseInfo">
+<div class="card-title"><code>UseCaseInfo</code></div>
+<div class="card-doc">Info zu einem registrierten Use Case (GET /v1/use-cases).</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>default_collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>collections</code></td>
+<td><code>list[str]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>description</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>agent_actions</code></td>
+<td><code>list[str]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EmbedRequest">
+<div class="card-title"><code>EmbedRequest</code></div>
+<div class="card-doc">Request für POST /v1/embed – einzelner Text.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;text&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EmbedResponse">
+<div class="card-title"><code>EmbedResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/embed.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>dimension</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-BatchChunk">
+<div class="card-title"><code>BatchChunk</code></div>
+<div class="card-doc">Ein einzelner Chunk im Batch-Embedding-Request.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;text&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-BatchEmbedRequest">
+<div class="card-title"><code>BatchEmbedRequest</code></div>
+<div class="card-doc">Request für POST /v1/embed/batch.
+
+Chunks werden intern in Batches à batch_size (Default: 50) aufgeteilt.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunks</code></td>
+<td><code>list[BatchChunk]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>batch_size</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EmbeddingResult">
+<div class="card-title"><code>EmbeddingResult</code></div>
+<div class="card-doc">Ergebnis eines einzelnen Embeddings im Batch.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>dimension</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-BatchEmbedResponse">
+<div class="card-title"><code>BatchEmbedResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/embed/batch.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>embeddings</code></td>
+<td><code>list[EmbeddingResult]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>failed</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>errors</code></td>
+<td><code>list[str]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EmbeddingPayload">
+<div class="card-title"><code>EmbeddingPayload</code></div>
+<div class="card-doc">Ein Embedding-Punkt für den Upsert in Qdrant.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-UpsertRequest">
+<div class="card-title"><code>UpsertRequest</code></div>
+<div class="card-doc">Request für POST /v1/upsert.
+
+Collections werden automatisch erstellt, falls nicht vorhanden.
+chunk_id wird intern via uuid5 zu einer Qdrant-kompatiblen UUID gehasht.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>embeddings</code></td>
+<td><code>list[EmbeddingPayload]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-UpsertResponse">
+<div class="card-title"><code>UpsertResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/upsert.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>status</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;ok&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>upserted</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-AgentConfig">
+<div class="card-title"><code>AgentConfig</code></div>
+<div class="card-doc">Konfiguration des ReAct-Agenten.
+
+Use-Case-spezifisch:
+  Wiener Linien:  role=&quot;trainee&quot; für vereinfachte Sprache
+  GW St. Pölten:  Agent nutzt SEARCH_CNC für Cross-Collection-Suche
+  FILL:           filters mit Kunde/Anlagentyp</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>max_steps</code></td>
+<td><code>int</code></td>
+<td><code>3</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-HistoryMessage">
+<div class="card-title"><code>HistoryMessage</code></div>
+<div class="card-doc">Eine Nachricht im Chatverlauf.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>role</code></td>
+<td><code>Literal</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>content</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-AgentQueryRequest">
+<div class="card-title"><code>AgentQueryRequest</code></div>
+<div class="card-doc">Request für POST /v1/agent/query.
+
+Zentraler Einstiegspunkt für alle Benutzeranfragen.
+Der Agent orchestriert intern Embedding, VectorDB-Suche,
+Reranking und LLM-Generierung.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>session_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>UUID für Sitzungskontext</td>
+</tr>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;default&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>AgentConfig</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>history</code></td>
+<td><code>list[HistoryMessage]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-AgentStep">
+<div class="card-title"><code>AgentStep</code></div>
+<div class="card-doc">Ein einzelner Schritt des ReAct-Agenten.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>step</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>action</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>thought</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>observation</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td><code>Optional</code></td>
+<td><code>required</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-AgentQueryResponse">
+<div class="card-title"><code>AgentQueryResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/agent/query.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>answer</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>sufficient</code></td>
+<td><code>bool</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Ob genügend Kontext für eine fundierte Antwort vorhanden war</td>
+</tr>
+<tr>
+<td><code>agent_steps</code></td>
+<td><code>list[AgentStep]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-SearchRequest">
+<div class="card-title"><code>SearchRequest</code></div>
+<div class="card-doc">Request für POST /v1/search – Semantische Suche in einer Collection.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td><code>int</code></td>
+<td><code>5</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Feld:Wert-Paare für Qdrant FieldCondition</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-SearchResultItem">
+<div class="card-title"><code>SearchResultItem</code></div>
+<div class="card-doc">Ein einzelnes Suchergebnis.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>score</code></td>
+<td><code>float</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-SearchResponse">
+<div class="card-title"><code>SearchResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/search.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>results</code></td>
+<td><code>list[SearchResultItem]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CrossSearchRequest">
+<div class="card-title"><code>CrossSearchRequest</code></div>
+<div class="card-doc">Request für POST /v1/search/cross – Cross-Collection-Suche.
+
+Sucht zuerst in der primary_collection, dann für jeden Treffer
+in den linked_collections über den link_key (z.B. cnc_step_id).
+
+Verwendung: GW St. Pölten
+  primary: gw_cnc_steps
+  linked:  [gw_ruest_data, gw_material_info]
+  link_key: cnc_step_id</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>primary_collection</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>linked_collections</code></td>
+<td><code>list[str]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>vector</code></td>
+<td><code>list[float]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>link_key</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td><code>int</code></td>
+<td><code>5</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>filters</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CrossSearchResultItem">
+<div class="card-title"><code>CrossSearchResultItem</code></div>
+<div class="card-doc">Ein Ergebnis der Cross-Collection-Suche.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>primary</code></td>
+<td><code>SearchResultItem</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>linked</code></td>
+<td><code>dict[str, Optional]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Collection-Name → verknüpftes Suchergebnis (oder None)</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CrossSearchResponse">
+<div class="card-title"><code>CrossSearchResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/search/cross.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>results</code></td>
+<td><code>list[CrossSearchResultItem]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-ChunkInput">
+<div class="card-title"><code>ChunkInput</code></div>
+<div class="card-doc">Ein Chunk als Eingabe für Reranking/Evaluation.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>score</code></td>
+<td><code>float</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-RerankWeights">
+<div class="card-title"><code>RerankWeights</code></div>
+<div class="card-doc">Gewichtung der Reranking-Kriterien.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>material_similarity</code></td>
+<td><code>float</code></td>
+<td><code>0.4</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>param_similarity</code></td>
+<td><code>float</code></td>
+<td><code>0.4</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>usage_count</code></td>
+<td><code>float</code></td>
+<td><code>0.2</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-RerankConfig">
+<div class="card-title"><code>RerankConfig</code></div>
+<div class="card-doc">Konfiguration für das Reranking.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>threshold</code></td>
+<td><code>float</code></td>
+<td><code>0.3</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>weights</code></td>
+<td><code>RerankWeights</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-RerankRequest">
+<div class="card-title"><code>RerankRequest</code></div>
+<div class="card-doc">Request für POST /v1/rerank.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><code>list[ChunkInput]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>config</code></td>
+<td><code>RerankConfig</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-RerankResponse">
+<div class="card-title"><code>RerankResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/rerank.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>reranked</code></td>
+<td><code>list[ChunkInput]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Chunks über Threshold, sortiert</td>
+</tr>
+<tr>
+<td><code>threshold_passed</code></td>
+<td><code>bool</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>below_threshold</code></td>
+<td><code>list[ChunkInput]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td><code>int</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EvaluateRequest">
+<div class="card-title"><code>EvaluateRequest</code></div>
+<div class="card-doc">Request für POST /v1/evaluate.
+
+Prüft, ob die gefundenen Chunks ausreichen für eine Antwort.
+Falls nein, startet der Agent einen neuen Suchschritt (bis max_steps).</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><code>list[ChunkInput]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>use_case</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>min_chunks</code></td>
+<td><code>int</code></td>
+<td><code>2</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>min_score</code></td>
+<td><code>float</code></td>
+<td><code>0.5</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-EvaluateResponse">
+<div class="card-title"><code>EvaluateResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/evaluate.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>result</code></td>
+<td><code>bool</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>True wenn Qualität ausreichend</td>
+</tr>
+<tr>
+<td><code>reasoning</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Begründung der Entscheidung</td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CitationChunk">
+<div class="card-title"><code>CitationChunk</code></div>
+<div class="card-doc">Ein Quell-Chunk für die Quellenzuordnung.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>chunk_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td><code>dict</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CitationsRequest">
+<div class="card-title"><code>CitationsRequest</code></div>
+<div class="card-doc">Request für POST /v1/citations.
+
+Ordnet Sätze der generierten Antwort den Quell-Chunks zu.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>answer</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>chunks</code></td>
+<td><code>list[CitationChunk]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CitationMapping">
+<div class="card-title"><code>CitationMapping</code></div>
+<div class="card-doc">Zuordnung eines Satzes zu seinen Quellen.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>sentence</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>sources</code></td>
+<td><code>list[str]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td>Liste von chunk_ids</td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-CitationsResponse">
+<div class="card-title"><code>CitationsResponse</code></div>
+<div class="card-doc">Antwort von POST /v1/citations.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>citations</code></td>
+<td><code>list[CitationMapping]</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>request_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-FeedbackRequest">
+<div class="card-title"><code>FeedbackRequest</code></div>
+<div class="card-doc">Request für POST /v1/log – Nutzerfeedback zu einer Antwort.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>query_id</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>feedback</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>comment</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;&#x27;</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-MemoryUpdate">
+<div class="card-title"><code>MemoryUpdate</code></div>
+<div class="card-doc">Request für PUT /v1/admin/memory/{use_case}.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>memory_text</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<div class="card" id="model-PromptUpdate">
+<div class="card-title"><code>PromptUpdate</code></div>
+<div class="card-doc">Request für PUT /v1/admin/prompts/{use_case}.</div>
+<table><thead><tr>
+<th>Feld</th><th>Typ</th><th>Default</th><th>Beschreibung</th>
+</tr></thead><tbody>
+<tr>
+<td><code>role</code></td>
+<td><code>str</code></td>
+<td><code>&#x27;default&#x27;</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>prompt</code></td>
+<td><code>str</code></td>
+<td><code>PydanticUndefined</code></td>
+<td></td>
+</tr>
+</tbody></table>
+</div>
+<h2 id="dependencies">Service-Abhängigkeitsmatrix</h2>
+<table class="dep-matrix"><thead><tr>
+<th>Aufrufer / Ziel</th>
+<th>Cleaning</th>
+<th>Data Structure</th>
+<th>Embedding</th>
+<th>VectorDB</th>
+<th>Evaluation</th>
+<th>Ollama</th>
+<th>Qdrant</th>
+<th>PostgreSQL</th>
+</tr></thead><tbody>
+<tr>
+<td>Frontend</td>
+<td class="check">&#10003;</td>
+<td class="check">&#10003;</td>
+<td class="check">&#10003;</td>
+<td class="check">&#10003;</td>
+<td class="check">&#10003;</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>Evaluation</td>
+<td></td>
+<td></td>
+<td class="check">&#10003;</td>
+<td class="check">&#10003;</td>
+<td></td>
+<td class="check">&#10003;</td>
+<td></td>
+<td class="check">&#10003;</td>
+</tr>
+<tr>
+<td>Embedding</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td class="check">&#10003;</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>VectorDB</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td class="check">&#10003;</td>
+<td></td>
+</tr>
+<tr>
+<td>Cleaning</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>Data Structure</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody></table>
+<h2 id="dataflow">Datenfluss-Diagramm</h2>
+<h3>Ingestion-Pipeline (Phase 1)</h3>
+<div class="diagram">
+<span class="hl">User Upload</span>
+<span class="arrow">      │</span>
+<span class="arrow">      ▼</span>
+<span class="svc">  Cleaning Service</span>  <span class="ep">POST /v1/clean</span>
+<span class="arrow">      │</span>  file  ──▶  markdown + metadata
+<span class="arrow">      ▼</span>
+<span class="svc">  Data Structure</span>     <span class="ep">POST /v1/structure</span>
+<span class="arrow">      │</span>  markdown  ──▶  chunks[] + routing.collection
+<span class="arrow">      ▼</span>
+<span class="svc">  Embedding Service</span>  <span class="ep">POST /v1/embed/batch</span>
+<span class="arrow">      │</span>  chunk.text[]  ──▶  vector[]
+<span class="arrow">      ▼</span>
+<span class="svc">  VectorDB Service</span>   <span class="ep">POST /v1/upsert</span>
+<span class="arrow">      │</span>  { chunk_id, vector, metadata }  ──▶  stored in Qdrant
+<span class="arrow">      ▼</span>
+<span class="hl">  ✓ Ingestion complete</span>
+</div>
+<h3>Query-Pipeline (Phase 2–4)</h3>
+<div class="diagram">
+<span class="hl">User Query</span>
+<span class="arrow">      │</span>
+<span class="arrow">      ▼</span>
+<span class="svc">  Evaluation Service</span>  <span class="ep">POST /v1/agent/query</span>
+<span class="arrow">      │</span>
+<span class="arrow">      ├──▶</span> <span class="hl">Agent Step 1..N</span>
+<span class="arrow">      │     │</span>
+<span class="arrow">      │     ├──</span> ACTION: <span class="ep">SEARCH</span>
+<span class="arrow">      │     │     ├──▶</span> <span class="svc">Embedding</span>  <span class="ep">/v1/embed</span>  (query → vector)
+<span class="arrow">      │     │     ├──▶</span> <span class="svc">VectorDB</span>   <span class="ep">/v1/search</span> (vector → results)
+<span class="arrow">      │     │     └──▶</span> Rerank + Evaluate (lokal)
+<span class="arrow">      │     │</span>
+<span class="arrow">      │     ├──</span> ACTION: <span class="ep">SEARCH_CNC</span> (nur GW St. Pölten)
+<span class="arrow">      │     │     ├──▶</span> <span class="svc">Embedding</span>  <span class="ep">/v1/embed</span>
+<span class="arrow">      │     │     └──▶</span> <span class="svc">VectorDB</span>   <span class="ep">/v1/search/cross</span>
+<span class="arrow">      │     │</span>
+<span class="arrow">      │     ├──</span> ACTION: <span class="ep">LOOKUP_SOURCES</span>  →  <span class="svc">VectorDB</span> <span class="ep">/v1/collections</span>
+<span class="arrow">      │     ├──</span> ACTION: <span class="ep">RECALL_MEMORY</span>   →  lokal (File/DB)
+<span class="arrow">      │     ├──</span> ACTION: <span class="ep">CLARIFY</span>         →  Rückfrage an User
+<span class="arrow">      │     └──</span> ACTION: <span class="ep">FINAL_ANSWER</span>    →  LLM generiert Antwort
+<span class="arrow">      │</span>
+<span class="arrow">      ├──▶</span> <span class="svc">Evaluation</span>  <span class="ep">/v1/citations</span>  (Quellenzuordnung)
+<span class="arrow">      │</span>
+<span class="arrow">      ▼</span>
+<span class="hl">  Frontend</span>  ──▶  Antwort + Referenzen + Agent-Schritte
+<span class="arrow">      │</span>
+<span class="arrow">      └──▶</span> <span class="svc">Evaluation</span>  <span class="ep">/v1/log</span>  (Feedback → PostgreSQL)
+</div>
+<h2 id="env">Konfiguration (Umgebungsvariablen)</h2>
+<table><thead><tr>
+<th>Variable</th><th>Service(s)</th><th>Default</th>
+</tr></thead><tbody>
+<tr><td><code>CLEANING_SERVICE_URL</code></td><td>Frontend</td>
+<td><code>http://cleaning:8001</code></td></tr>
+<tr><td><code>DATA_STRUCTURE_SERVICE_URL</code></td><td>Frontend</td>
+<td><code>http://data_structure:8002</code></td></tr>
+<tr><td><code>EMBEDDING_SERVICE_URL</code></td><td>Frontend, Evaluation</td>
+<td><code>http://embedding:8003</code></td></tr>
+<tr><td><code>VECTORDB_SERVICE_URL</code></td><td>Frontend, Evaluation</td>
+<td><code>http://vectordb:8004</code></td></tr>
+<tr><td><code>EVALUATION_SERVICE_URL</code></td><td>Frontend</td>
+<td><code>http://evaluation:8005</code></td></tr>
+<tr><td><code>OLLAMA_BASE_URL</code></td><td>Embedding, Evaluation</td>
+<td><code>http://ollama:11434</code></td></tr>
+<tr><td><code>EMBEDDING_MODEL</code></td><td>Embedding</td>
+<td><code>qwen3-embedding:0.6b</code></td></tr>
+<tr><td><code>LLM_MODEL</code></td><td>Evaluation</td>
+<td><code>qwen2.5:14b</code></td></tr>
+<tr><td><code>QDRANT_HOST</code></td><td>VectorDB</td>
+<td><code>qdrant</code></td></tr>
+<tr><td><code>QDRANT_PORT</code></td><td>VectorDB</td>
+<td><code>6333</code></td></tr>
+<tr><td><code>DATABASE_URL</code></td><td>Evaluation</td>
+<td><code>(PostgreSQL Connection String)</code></td></tr>
+<tr><td><code>AGENT_MAX_STEPS</code></td><td>Evaluation</td>
+<td><code>5</code></td></tr>
+</tbody></table>
+<footer>Generiert am 2026-07-01 09:27 UTC via <code>make docu</code> · Quelle: OpenAPI-Specs + <code>shared/shared/interface_agreement.py</code></footer>
+</body></html>
