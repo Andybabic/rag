@@ -4,7 +4,7 @@ COMPOSE_BUILD = docker compose -f docker-compose.build.yml --env-file .env
 COMPOSE = $(COMPOSE_DEV)
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test pull-models doc reset help
+.PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -57,6 +57,15 @@ _ensure-auth-secret:
 		fi; \
 	fi
 
+# Erstellt Host-Verzeichnisse fuer docker-compose.build.yml (Bind-Mounts).
+_ensure-data-dirs:
+	@DIR="$${KERMIT_DATA_DIR:-/home/kermit}"; \
+	mkdir -p "$$DIR/postgres" "$$DIR/qdrant" "$$DIR/documents" "$$DIR/hf-cache"; \
+	if [ ! -w "$$DIR/postgres" ] 2>/dev/null; then \
+		echo "Hinweis: $$DIR/postgres braucht Schreibrechte fuer Postgres (uid 999):"; \
+		echo "  sudo chown -R 999:999 $$DIR/postgres"; \
+	fi
+
 # Prueft ob der konfigurierte Host-Port fuer Postgres frei ist.
 _check-postgres-port:
 	@PORT=$$(grep -E '^POSTGRES_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r'); \
@@ -75,7 +84,7 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama, :3000)
+up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama, :3000)
 	@echo "Starte alle Services (docker-compose.build.yml, Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
 	$(COMPOSE_BUILD) up --build -d
 	@echo ""
@@ -84,8 +93,9 @@ up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ## A
 	@echo "  Logs:     make logs"
 	@echo "  Stop:     make down"
 
-up-dev-full: _ensure-compose-v2 ## Alle Services inkl. lokalem Ollama (Docker-Build)
+up-dev-full: _ensure-compose-v2 _ensure-data-dirs ## Alle Services inkl. lokalem Ollama (Docker-Build)
 	@test -f .env || cp .env.example .env
+	@DIR="$${KERMIT_DATA_DIR:-/home/kermit}"; mkdir -p "$$DIR/ollama"
 	$(COMPOSE_BUILD) --profile local-ollama up --build -d
 	@echo ""
 	@echo "Alle Services gestartet (inkl. lokalem Ollama)."
@@ -179,9 +189,14 @@ reset: _ensure-compose-v2 ## Alle Daten loeschen und Originalzustand herstellen
 	@read -p "Fortfahren? [y/N] " confirm && [ "$$confirm" = "y" ] || (echo "Abgebrochen."; exit 1)
 	@echo ""
 	@echo "Stoppe alle Services und loesche Volumes ..."
-	$(COMPOSE_BUILD) --profile local-ollama down --volumes --remove-orphans 2>/dev/null || true
-	$(COMPOSE_DEV) --profile local-ollama --profile test down --volumes --remove-orphans 2>/dev/null || true
-	@echo "Entferne verbleibende Container und Volumes ..."
+	$(COMPOSE_BUILD) --profile local-ollama down --remove-orphans 2>/dev/null || true
+	$(COMPOSE_DEV) --profile local-ollama --profile test down --remove-orphans 2>/dev/null || true
+	@DIR="$${KERMIT_DATA_DIR:-/home/kermit}"; \
+	if [ -d "$$DIR" ]; then \
+		echo "Loesche persistente Daten unter $$DIR ..."; \
+		rm -rf "$$DIR/postgres" "$$DIR/qdrant" "$$DIR/documents" "$$DIR/hf-cache" "$$DIR/ollama"; \
+	fi
+	@echo "Entferne verbleibende Container ..."
 	@docker ps -aq --filter name=kermit | xargs -r docker rm -f 2>/dev/null || true
 	@docker volume ls -q --filter name=kermit | xargs -r docker volume rm -f 2>/dev/null || true
 	@echo "Loesche generierte Dateien ..."
@@ -232,6 +247,7 @@ help: ## Show this help
 	@echo "  make reset            Alle Daten loeschen (DB, Vektoren, Dokumente)"
 	@echo ""
 	@echo "Konfiguration (.env):"
+	@echo "  KERMIT_DATA_DIR=/home/kermit   persistente Daten auf dem Host"
 	@echo "  OLLAMA_BASE_URL=http://<externer-server>:11434"
 	@echo "  POSTGRES_PORT=5433          falls Host-Port 5432 schon belegt ist"
 	@echo "  USE_MINERU=true"
