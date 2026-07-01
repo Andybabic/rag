@@ -2,6 +2,8 @@
 # Single-Server Hosting – alles per Docker-Build (ohne npm auf dem Host)
 # Frontend wird in Dockerfile.frontend gebaut; kein Hot-Reload.
 # Ollama extern via OLLAMA_BASE_URL in .env (Profil local-ollama optional).
+# Keine Host-Port-Mappings – Services sprechen intern im Docker-Netzwerk;
+# externer Zugriff erfolgt über Coolify/Reverse-Proxy.
 #
 # Persistente Daten liegen auf dem Host unter KERMIT_DATA_DIR (Default:
 # /home/kermit). Vor dem ersten Start:
@@ -20,8 +22,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ragplatform}
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ${KERMIT_DATA_DIR:-/home/kermit}/postgres:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -37,8 +37,13 @@ services:
     restart: unless-stopped
     ports:
       - "${QDRANT_PORT:-6333}:6333"
+    # Storage bewusst AUSSERHALB von /qdrant mounten – sonst kann ein Bind-Mount
+    # (oder Coolify Persistent Storage auf /qdrant) entrypoint.sh verdecken.
+    entrypoint: ["/qdrant/entrypoint.sh"]
+    environment:
+      QDRANT__STORAGE__STORAGE_PATH: /var/lib/qdrant
     volumes:
-      - ${KERMIT_DATA_DIR:-/home/kermit}/qdrant:/qdrant/storage
+      - ${KERMIT_DATA_DIR:-/home/kermit}/qdrant:/var/lib/qdrant
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
@@ -69,7 +74,6 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8001
     volumes:
       - ${KERMIT_DATA_DIR:-/home/kermit}/documents:/data/documents
-
     env_file: .env
     depends_on:
       postgres:
@@ -90,7 +94,6 @@ services:
         SERVICE_PORT: "8002"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8002
-
     env_file: .env
     depends_on:
       postgres:
@@ -111,7 +114,6 @@ services:
         SERVICE_PORT: "8003"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8003
-
     env_file: .env
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
@@ -156,7 +158,6 @@ services:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
-
     env_file: .env
     depends_on:
       postgres:
@@ -176,7 +177,6 @@ services:
       dockerfile: Dockerfile.frontend
     restart: unless-stopped
     command: node build/index.js
-
     environment:
       PORT: "3000"
       ORIGIN: "${ORIGIN:-http://localhost:3000}"
