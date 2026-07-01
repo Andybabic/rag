@@ -69,8 +69,7 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8001
     volumes:
       - ${KERMIT_DATA_DIR:-/home/kermit}/documents:/data/documents
-    ports:
-      - "8001:8001"
+
     env_file: .env
     depends_on:
       postgres:
@@ -91,8 +90,7 @@ services:
         SERVICE_PORT: "8002"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8002
-    ports:
-      - "8002:8002"
+
     env_file: .env
     depends_on:
       postgres:
@@ -113,8 +111,7 @@ services:
         SERVICE_PORT: "8003"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8003
-    ports:
-      - "8003:8003"
+
     env_file: .env
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
@@ -132,8 +129,7 @@ services:
         SERVICE_PORT: "8004"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8004
-    ports:
-      - "8004:8004"
+
     env_file: .env
     depends_on:
       qdrant:
@@ -160,8 +156,7 @@ services:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
-    ports:
-      - "8005:8005"
+
     env_file: .env
     depends_on:
       postgres:
@@ -181,8 +176,7 @@ services:
       dockerfile: Dockerfile.frontend
     restart: unless-stopped
     command: node build/index.js
-    ports:
-      - "3000:3000"
+
     environment:
       PORT: "3000"
       ORIGIN: "${ORIGIN:-http://localhost:3000}"
