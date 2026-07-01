@@ -1,0 +1,9 @@
+# Postgres-Wrapper fuer Hosting (Coolify-kompatibel).
+#
+# Bind-Mounts einzelner Dateien (./db/init.sql -> .../init.sql) erzeugen
+# auf dem Deploy-Host oft ein Verzeichnis statt einer Datei, wenn der
+# Quellpfad fehlt – psql meldet dann "Is a directory".
+# Schema-Init liegt deshalb im Image unter /docker-entrypoint-initdb.d/.
+FROM postgres:16-alpine
+
+COPY db/init.sql /docker-entrypoint-initdb.d/01-init.sql
