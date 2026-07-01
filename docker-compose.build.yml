@@ -35,8 +35,6 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.9.7
     restart: unless-stopped
-    ports:
-      - "${QDRANT_PORT:-6333}:6333"
     # Storage bewusst AUSSERHALB von /qdrant mounten – sonst kann ein Bind-Mount
     # (oder Coolify Persistent Storage auf /qdrant) entrypoint.sh verdecken.
     entrypoint: ["/qdrant/entrypoint.sh"]
@@ -131,7 +129,6 @@ services:
         SERVICE_PORT: "8004"
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8004
-
     env_file: .env
     depends_on:
       qdrant:
