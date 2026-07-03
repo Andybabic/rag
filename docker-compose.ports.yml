@@ -191,7 +191,10 @@ services:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
       PORT: "3000"
-      ORIGIN: "${ORIGIN:-http://localhost:${FRONTEND_PORT:-3000}}"
+      # ORIGIN explizit in .env setzen (keine verschachtelten ${…} – Docker Compose
+      # erzeugt sonst z.B. "http://localhost:3003}"). Bei FRONTEND_PORT != 3000:
+      # ORIGIN=http://localhost:<FRONTEND_PORT>
+      ORIGIN: "${ORIGIN:-http://localhost:3000}"
       BODY_SIZE_LIMIT: "52428800"
       AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET muss gesetzt sein (Cookie-Signatur; python -c \"import secrets; print(secrets.token_urlsafe(48))\")}"
       EVALUATION_SERVICE_URL: "${EVALUATION_SERVICE_URL:-http://evaluation:8005}"
