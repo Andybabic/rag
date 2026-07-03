@@ -1,6 +1,8 @@
 # Docker Compose V2 (Plugin) ist Pflicht – docker-compose 1.29 ist mit Docker Engine 29 inkompatibel.
 COMPOSE_DEV = docker compose -f docker-compose.dev.yml --env-file .env
-COMPOSE_BUILD = docker compose -f docker-compose.build.yml --env-file .env
+COMPOSE_BUILD_BASE = docker compose -f docker-compose.build.yml --env-file .env
+COMPOSE_BUILD_BIND = $(shell grep -qE '^BIND_PORTS=(true|True|TRUE|1|yes|Yes|YES)' .env 2>/dev/null && echo '-f docker-compose.ports.bind.yml')
+COMPOSE_BUILD = $(COMPOSE_BUILD_BASE) $(COMPOSE_BUILD_BIND)
 COMPOSE = $(COMPOSE_DEV)
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
@@ -66,9 +68,10 @@ _ensure-data-dirs:
 		echo "  sudo chown -R 999:999 $$DIR/postgres"; \
 	fi
 
-# Prueft ob der konfigurierte Host-Port fuer Postgres frei ist.
+# Prueft ob der konfigurierte Host-Port fuer Postgres frei ist (nur bei BIND_PORTS).
 _check-postgres-port:
-	@PORT=$$(grep -E '^POSTGRES_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r'); \
+	@grep -qE '^BIND_PORTS=(true|True|TRUE|1|yes|Yes|YES)' .env 2>/dev/null || exit 0; \
+	PORT=$$(grep -E '^POSTGRES_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r'); \
 	PORT=$${PORT:-5432}; \
 	if bash -c "echo >/dev/tcp/127.0.0.1/$$PORT" 2>/dev/null; then \
 		echo ""; \
@@ -84,12 +87,17 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama, :3000)
-	@echo "Starte alle Services (docker-compose.build.yml, Ollama extern: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
+up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama)
+	@echo "Starte alle Services (BIND_PORTS=$$(grep '^BIND_PORTS=' .env 2>/dev/null | cut -d= -f2- | tr -d ' \r' || echo false), Ollama: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
 	$(COMPOSE_BUILD) up --build -d
 	@echo ""
 	@echo "Plattform laeuft:"
-	@echo "  Frontend  → http://localhost:3000"
+	@if grep -qE '^BIND_PORTS=(true|True|TRUE|1|yes|Yes|YES)' .env 2>/dev/null; then \
+		FE=$$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \r'); \
+		echo "  Frontend  → http://localhost:$${FE:-3000}"; \
+	else \
+		echo "  Frontend  → intern (kein Host-Port; Reverse-Proxy/Coolify)"; \
+	fi
 	@echo "  Logs:     make logs"
 	@echo "  Stop:     make down"
 
@@ -130,7 +138,8 @@ clean-stack: ## Haengende kermit-Container entfernen (nach ContainerConfig-Fehle
 	@echo "Entferne kermit-Container ..."
 	@docker ps -aq --filter name=kermit | xargs -r docker rm -f 2>/dev/null || true
 	@if docker compose version >/dev/null 2>&1; then \
-		docker compose -f docker-compose.build.yml --env-file .env down --remove-orphans 2>/dev/null || true; \
+		BIND=$$(grep -qE '^BIND_PORTS=(true|True|TRUE|1|yes|Yes|YES)' .env 2>/dev/null && echo '-f docker-compose.ports.bind.yml' || true); \
+		docker compose -f docker-compose.build.yml $$BIND --env-file .env down --remove-orphans 2>/dev/null || true; \
 		docker compose -f docker-compose.dev.yml --env-file .env down --remove-orphans 2>/dev/null || true; \
 	fi
 	@echo "Bereinigt. Neu starten mit: make up"
@@ -223,7 +232,7 @@ help: ## Show this help
 	@echo "RAG Platform – Makefile Targets"
 	@echo ""
 	@echo "Start:"
-	@echo "  make up                Hosting via docker-compose.build.yml (Docker-Build, :3000)"
+	@echo "  make up                Hosting (BIND_PORTS in .env steuert Host-Ports)"
 	@echo "  make up-dev-full       Wie up, inkl. lokalem Ollama-Container"
 	@echo ""
 	@echo "Entwicklung:"
@@ -249,6 +258,8 @@ help: ## Show this help
 	@echo "Konfiguration (.env):"
 	@echo "  KERMIT_DATA_DIR=/home/kermit   persistente Daten auf dem Host"
 	@echo "  OLLAMA_BASE_URL=http://<externer-server>:11434"
+	@echo "  BIND_PORTS=true|false       Host-Ports an/aus (make up)"
+	@echo "  FRONTEND_PORT=3000          bei BIND_PORTS=true"
 	@echo "  POSTGRES_PORT=5433          falls Host-Port 5432 schon belegt ist"
 	@echo "  USE_MINERU=true"
 	@echo "  MINERU_API_URL=http://<externer-server>:8000"
