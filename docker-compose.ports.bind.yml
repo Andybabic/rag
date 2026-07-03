@@ -1,0 +1,36 @@
+# Host-Port-Mappings (Overlay zu docker-compose.build.yml).
+# Wird nur geladen wenn BIND_PORTS=true in .env (siehe Makefile / docker-compose.ports.yml).
+
+services:
+
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  qdrant:
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+
+  cleaning:
+    ports:
+      - "${CLEANING_PORT:-8001}:8001"
+
+  data_structure:
+    ports:
+      - "${DATA_STRUCTURE_PORT:-8002}:8002"
+
+  embedding:
+    ports:
+      - "${EMBEDDING_PORT:-8003}:8003"
+
+  vectordb:
+    ports:
+      - "${VECTORDB_PORT:-8004}:8004"
+
+  evaluation:
+    ports:
+      - "${EVALUATION_PORT:-8005}:8005"
+
+  frontend:
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
