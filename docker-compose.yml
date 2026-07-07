@@ -5,14 +5,10 @@
 # Keine Host-Port-Mappings – Services sprechen intern im Docker-Netzwerk;
 # externer Zugriff erfolgt über Coolify/Reverse-Proxy.
 #
-# Persistente Daten liegen auf dem Host unter KERMIT_DATA_DIR (Default:
-# /home/kermit). Vor dem ersten Start:
-#   sudo mkdir -p /home/kermit/{postgres,qdrant,documents,hf-cache}
-#   sudo chown -R 999:999 /home/kermit/postgres   # postgres:16-alpine
-#
-# Coolify: Kein zusaetzliches Persistent Storage fuer den qdrant-Service noetig
-# (Daten liegen unter ${KERMIT_DATA_DIR}/qdrant). Falls vorhanden: entfernen
-# oder Destination hoechstens /var/lib/qdrant – niemals /qdrant mounten.
+# Persistente Daten: Named Volumes (Coolify-kompatibel – Env-Vars in Bind-Mounts
+# werden von Coolify nicht zuverlaessig aufgeloest).
+# Kein zusaetzliches Persistent Storage in der Coolify-UI noetig.
+# Beim Loeschen der Resource in Coolify: „Keep Volumes“ waehlen, sonst Daten weg.
 # Postgres-Schema (db/init.sql) ist in Dockerfile.postgres eingebaut – kein
 # Bind-Mount fuer init.sql auf Coolify verwenden.
 # ══════════════════════════════════════════════════════════════
@@ -31,7 +27,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
-      - ${KERMIT_DATA_DIR:-/home/kermit}/postgres:/var/lib/postgresql/data
+      - kermit_postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform}"]
       interval: 10s
@@ -45,7 +41,7 @@ services:
       dockerfile: Dockerfile.qdrant
     restart: unless-stopped
     volumes:
-      - ${KERMIT_DATA_DIR:-/home/kermit}/qdrant:/var/lib/qdrant
+      - kermit_qdrant:/var/lib/qdrant
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
@@ -59,7 +55,7 @@ services:
   #   ports:
   #     - "11434:11434"
   #   volumes:
-  #     - ${KERMIT_DATA_DIR:-/home/kermit}/ollama:/root/.ollama
+  #     - kermit_ollama:/root/.ollama
   #   profiles:
   #     - local-ollama
 
@@ -75,7 +71,7 @@ services:
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8001
     volumes:
-      - ${KERMIT_DATA_DIR:-/home/kermit}/documents:/data/documents
+      - kermit_documents:/data/documents
     env_file: .env
     depends_on:
       postgres:
@@ -154,7 +150,7 @@ services:
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8005
     volumes:
-      - ${KERMIT_DATA_DIR:-/home/kermit}/hf-cache:/home/appuser/.cache
+      - kermit_hf_cache:/home/appuser/.cache
     environment:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
@@ -209,3 +205,9 @@ services:
       retries: 3
       start_period: 20s
 
+volumes:
+  kermit_postgres:
+  kermit_qdrant:
+  kermit_documents:
+  kermit_hf_cache:
+  kermit_ollama:
