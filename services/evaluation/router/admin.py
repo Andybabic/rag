@@ -91,6 +91,104 @@ async def list_queries(use_case: str = "", limit: int = 50, offset: int = 0):
     }
 
 
+# ── Feedback ──────────────────────────────────────────────────
+
+
+@router.get("/feedback")
+async def list_feedback(use_case: str = "", rating: str = "", limit: int = 100, offset: int = 0):
+    """List user feedback, newest first, joined with the rated query.
+
+    Optional filters: ``use_case`` and ``rating`` ('positive'/'negative').
+    """
+    pool = await get_pool()
+    conditions = []
+    params: list = []
+    if use_case:
+        params.append(use_case)
+        conditions.append(f"q.use_case = ${len(params)}")
+    if rating in ("positive", "negative"):
+        params.append(rating)
+        conditions.append(f"f.rating = ${len(params)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    params.append(limit)
+    limit_ph = f"${len(params)}"
+    params.append(offset)
+    offset_ph = f"${len(params)}"
+
+    rows = await pool.fetch(
+        f"""SELECT f.id, f.query_id, f.rating, f.comment, f.created_at,
+                   q.use_case, q.session_id, q.role, q.query_text, q.answer_text
+            FROM feedback f
+            LEFT JOIN queries q ON q.id = f.query_id
+            {where}
+            ORDER BY f.created_at DESC
+            LIMIT {limit_ph} OFFSET {offset_ph}""",
+        *params,
+    )
+    return {
+        "feedback": [
+            {
+                "id": str(r["id"]),
+                "query_id": str(r["query_id"]) if r["query_id"] else None,
+                "rating": r["rating"],
+                "comment": r["comment"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "use_case": r["use_case"],
+                "session_id": str(r["session_id"]) if r["session_id"] else None,
+                "role": r["role"],
+                "query_text": r["query_text"],
+                "answer_text": r["answer_text"],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/chat/{session_id}")
+async def get_chat(session_id: str):
+    """Return a full conversation (all queries of a session, oldest first)
+    together with any feedback, so the dashboard can export it for traceability.
+    """
+    pool = await get_pool()
+    try:
+        rows = await pool.fetch(
+            """SELECT q.id, q.use_case, q.session_id, q.role, q.query_text,
+                      q.answer_text, q.agent_steps, q.citations, q.images,
+                      q.sufficient, q.created_at,
+                      f.rating, f.comment, f.created_at AS feedback_at
+               FROM queries q
+               LEFT JOIN feedback f ON f.query_id = q.id
+               WHERE q.session_id = $1::uuid
+               ORDER BY q.created_at ASC""",
+            session_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid session_id: {exc}")
+
+    return {
+        "session_id": session_id,
+        "messages": [
+            {
+                "id": str(r["id"]),
+                "use_case": r["use_case"],
+                "role": r["role"],
+                "query_text": r["query_text"],
+                "answer_text": r["answer_text"],
+                "agent_steps": json.loads(r["agent_steps"]) if r["agent_steps"] else [],
+                "citations": json.loads(r["citations"]) if r["citations"] else [],
+                "images": json.loads(r["images"]) if r["images"] else [],
+                "sufficient": r["sufficient"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "rating": r["rating"],
+                "comment": r["comment"],
+                "feedback_at": r["feedback_at"].isoformat() if r["feedback_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
 # ── Memory ────────────────────────────────────────────────────
 
 

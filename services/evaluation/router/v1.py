@@ -5,6 +5,7 @@ import logging
 
 import asyncio
 
+import asyncpg
 from core.citations import map_citations
 from core.database import get_pool
 from core.evaluator import evaluate_chunks
@@ -131,10 +132,14 @@ async def agent_query(body: AgentQueryRequest, request: Request):
     # Persist query to database (non-blocking)
     try:
         pool = await get_pool()
+        # Use the request_id as the query's primary key so user feedback
+        # (which only knows the request_id) can be linked back to this row.
         await pool.execute(
             """INSERT INTO queries (id, use_case, session_id, role, query_text, answer_text,
                                     agent_steps, citations, images, sufficient)
-               VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9)""",
+               VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
+               ON CONFLICT (id) DO NOTHING""",
+            request_id,
             body.use_case,
             body.session_id,
             body.role,
@@ -196,10 +201,13 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
             # Persist query (best-effort, same as non-streaming endpoint)
             try:
                 pool = await get_pool()
+                # request_id as PK — links this row to later user feedback.
                 await pool.execute(
                     """INSERT INTO queries (id, use_case, session_id, role, query_text,
                                             answer_text, agent_steps, citations, images, sufficient)
-                       VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9)""",
+                       VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
+                       ON CONFLICT (id) DO NOTHING""",
+                    request_id,
                     body.use_case, body.session_id, body.role, body.query,
                     result.get("answer", ""),
                     json.dumps(result.get("agent_steps", [])),
@@ -316,7 +324,41 @@ async def log_feedback(body: FeedbackRequest, request: Request):
                 "service": "evaluation-service",
             },
         )
-    # TODO: persist to PostgreSQL feedback table
+    comment = (body.comment or "").strip() or None
+
+    # The frontend sends the request_id as query_id. We stored it as queries.id,
+    # so it usually links directly. If the query row is missing (best-effort
+    # logging can fail) or the id isn't a UUID, keep the feedback anyway with a
+    # NULL reference rather than losing it.
+    try:
+        pool = await get_pool()
+        try:
+            await pool.execute(
+                """INSERT INTO feedback (id, query_id, rating, comment)
+                   VALUES (gen_random_uuid(), $1::uuid, $2, $3)""",
+                body.query_id,
+                body.feedback,
+                comment,
+            )
+        except (asyncpg.ForeignKeyViolationError, asyncpg.DataError):
+            await pool.execute(
+                """INSERT INTO feedback (id, query_id, rating, comment)
+                   VALUES (gen_random_uuid(), NULL, $1, $2)""",
+                body.feedback,
+                comment,
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"Failed to persist feedback: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "db_error",
+                "detail": str(exc),
+                "request_id": request_id,
+                "service": "evaluation-service",
+            },
+        )
+
     return {
         "status": "ok",
         "query_id": body.query_id,

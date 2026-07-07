@@ -3,7 +3,10 @@
 	import type { Message } from '$lib/state.svelte';
 	import { marked } from 'marked';
 
-	let { message }: { message: Message } = $props();
+	// `readonly` renders the message exactly like the live chat but without the
+	// feedback buttons — used by the admin transcript view where feedback was
+	// already given.
+	let { message, readonly = false }: { message: Message; readonly?: boolean } = $props();
 
 	let showSteps = $state(false);
 	let showManager = $state(false);
@@ -53,6 +56,10 @@
 	let showSystemPrompt = $state(false);
 	let showLlmResponse = $state<Set<number>>(new Set());
 	let feedbackSent: string | null = $state(null);
+	// Which rating the user is currently drafting a comment for (null = none open).
+	let feedbackDraft: string | null = $state(null);
+	let feedbackComment = $state('');
+	let feedbackSubmitting = $state(false);
 
 	// PDF Preview
 	let previewUrl = $state('');
@@ -80,13 +87,25 @@
 	// Configure marked for inline rendering (no wrapping <p> for short texts)
 	marked.setOptions({ breaks: true, gfm: true });
 
-	async function onFeedback(rating: string) {
+	// First click on a thumb opens the (optional) comment box for that rating.
+	// Clicking the same thumb again closes it without sending.
+	function onFeedback(rating: string) {
 		if (feedbackSent) return;
+		feedbackDraft = feedbackDraft === rating ? null : rating;
+	}
+
+	async function submitFeedback() {
+		if (feedbackSent || !feedbackDraft) return;
+		feedbackSubmitting = true;
 		try {
-			await sendFeedback(message.requestId ?? '', rating);
-			feedbackSent = rating;
+			await sendFeedback(message.requestId ?? '', feedbackDraft, feedbackComment.trim());
+			feedbackSent = feedbackDraft;
+			feedbackDraft = null;
+			feedbackComment = '';
 		} catch {
-			feedbackSent = null;
+			// Keep the draft open so the user can retry.
+		} finally {
+			feedbackSubmitting = false;
 		}
 	}
 
@@ -800,26 +819,67 @@
 			{/if}
 
 			<!-- Feedback Buttons -->
-			{#if !message.error && !message.streaming}
-				<div class="mt-3 flex gap-2 border-t border-gray-100 pt-2">
-					<button
-						class="text-lg transition-transform hover:scale-110
-						{feedbackSent === 'positive' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
-						onclick={() => onFeedback('positive')}
-						title="Hilfreich"
-						disabled={feedbackSent !== null}
-					>
-						&#128077;
-					</button>
-					<button
-						class="text-lg transition-transform hover:scale-110
-						{feedbackSent === 'negative' ? 'opacity-100' : 'opacity-40 hover:opacity-70'}"
-						onclick={() => onFeedback('negative')}
-						title="Nicht hilfreich"
-						disabled={feedbackSent !== null}
-					>
-						&#128078;
-					</button>
+			{#if !readonly && !message.error && !message.streaming}
+				<div class="mt-3 border-t border-gray-100 pt-2">
+					<div class="flex items-center gap-2">
+						<button
+							class="text-lg transition-transform hover:scale-110
+							{feedbackSent === 'positive' || feedbackDraft === 'positive'
+								? 'opacity-100'
+								: 'opacity-40 hover:opacity-70'}"
+							onclick={() => onFeedback('positive')}
+							title="Hilfreich"
+							disabled={feedbackSent !== null}
+						>
+							&#128077;
+						</button>
+						<button
+							class="text-lg transition-transform hover:scale-110
+							{feedbackSent === 'negative' || feedbackDraft === 'negative'
+								? 'opacity-100'
+								: 'opacity-40 hover:opacity-70'}"
+							onclick={() => onFeedback('negative')}
+							title="Nicht hilfreich"
+							disabled={feedbackSent !== null}
+						>
+							&#128078;
+						</button>
+						{#if feedbackSent}
+							<span class="text-xs text-gray-400">Danke für dein Feedback!</span>
+						{/if}
+					</div>
+
+					{#if feedbackDraft && !feedbackSent}
+						<div class="mt-2 space-y-2">
+							<textarea
+								bind:value={feedbackComment}
+								rows="2"
+								placeholder="Optionaler Kommentar (was war {feedbackDraft === 'positive'
+									? 'hilfreich'
+									: 'nicht hilfreich'}?)"
+								class="w-full resize-y rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+							></textarea>
+							<div class="flex gap-2">
+								<button
+									onclick={submitFeedback}
+									disabled={feedbackSubmitting}
+									class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+								>
+									{feedbackSubmitting ? 'Senden…' : 'Feedback senden'}
+								</button>
+								<button
+									onclick={() => {
+										feedbackDraft = null;
+										feedbackComment = '';
+									}}
+									disabled={feedbackSubmitting}
+									class="rounded-lg px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100"
+								>
+									Abbrechen
+								</button>
+							</div>
+						</div>
+					{/if}
 				</div>
 			{/if}
 		</div>

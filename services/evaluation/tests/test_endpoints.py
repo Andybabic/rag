@@ -299,22 +299,28 @@ async def test_agent_wiener_linien(mock_llm, client):
 
 @pytest.mark.anyio
 async def test_log_positive_feedback(client):
-    resp = await client.post("/v1/log", json={
-        "query_id": "test-query-id",
-        "feedback": "positive",
-    })
+    pool = AsyncMock()
+    with patch("router.v1.get_pool", new=AsyncMock(return_value=pool)):
+        resp = await client.post("/v1/log", json={
+            "query_id": "11111111-1111-1111-1111-111111111111",
+            "feedback": "positive",
+            "comment": "Sehr hilfreich",
+        })
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert body["feedback"] == "positive"
+    pool.execute.assert_awaited()
 
 
 @pytest.mark.anyio
 async def test_log_negative_feedback(client):
-    resp = await client.post("/v1/log", json={
-        "query_id": "test-query-id",
-        "feedback": "negative",
-    })
+    pool = AsyncMock()
+    with patch("router.v1.get_pool", new=AsyncMock(return_value=pool)):
+        resp = await client.post("/v1/log", json={
+            "query_id": "11111111-1111-1111-1111-111111111111",
+            "feedback": "negative",
+        })
     assert resp.status_code == 200
     assert resp.json()["feedback"] == "negative"
 

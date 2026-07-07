@@ -79,12 +79,13 @@ export async function streamQuery(
 	return final;
 }
 
-export async function sendFeedback(queryId: string, rating: string) {
+export async function sendFeedback(queryId: string, rating: string, comment = '') {
 	const resp = await fetch(`${BASE}/feedback`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ query_id: queryId, feedback: rating })
+		body: JSON.stringify({ query_id: queryId, feedback: rating, comment })
 	});
+	if (!resp.ok) throw new Error(await resp.text());
 	return resp.json();
 }
 

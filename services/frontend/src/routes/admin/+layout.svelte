@@ -6,7 +6,8 @@
 
 	const links = [
 		{ href: '/admin/use-cases', label: 'Use Cases' },
-		{ href: '/admin/users', label: 'Benutzer' }
+		{ href: '/admin/users', label: 'Benutzer' },
+		{ href: '/admin/feedback', label: 'Feedback' }
 	];
 
 	function isActive(href: string): boolean {
