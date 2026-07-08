@@ -165,6 +165,12 @@
 		});
 		app.isLoading = true;
 		const startedAt = performance.now();
+		// Pin this conversation to the current session. If the user switches use
+		// case mid-stream, resetChat() mints a new session id; any late-arriving
+		// stream events must then be ignored so they don't resurrect a message
+		// in the now-cleared (different use case) chat.
+		const convSession = app.sessionId;
+		const isStale = () => app.sessionId !== convSession;
 
 		// Push an empty assistant message immediately and fill it in as events
 		// arrive. This keeps every step visible permanently instead of flashing
@@ -182,7 +188,9 @@
 		scrollToBottom();
 
 		const updateMsg = (patch: Partial<Message>) => {
+			if (isStale()) return;
 			const current = app.messages[assistantIdx];
+			if (!current) return;
 			app.messages[assistantIdx] = { ...current, ...patch };
 		};
 
@@ -195,8 +203,10 @@
 				{},
 				history,
 				(event) => {
+					if (isStale()) return;
 					const type = event.type as string;
 					const msg = app.messages[assistantIdx];
+					if (!msg) return;
 
 					if (type === 'started') {
 						updateMsg({ currentPhase: 'Manager startet …' });
@@ -337,8 +347,12 @@
 			const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
 			updateMsg({ text: `Fehler: ${message}`, error: true, streaming: false, currentPhase: undefined });
 		} finally {
-			app.isLoading = false;
-			scrollToBottom();
+			// Don't clobber loading state if the user already moved on to a fresh
+			// conversation (use-case switch) while this stream was finishing.
+			if (!isStale()) {
+				app.isLoading = false;
+				scrollToBottom();
+			}
 		}
 	}
 

@@ -223,6 +223,35 @@ class User(Base):
     )
 
 
+class UserUseCase(Base):
+    """Assignment of a user to a use case (many-to-many access control).
+
+    A row means the user may interact with that use case. No rows = no access.
+    Admins bypass this and see everything (enforced in the frontend layer).
+    """
+
+    __tablename__ = "user_use_cases"
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    use_case = Column(
+        String(50),
+        ForeignKey("use_cases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "use_case", name="pk_user_use_cases"),
+        Index("idx_user_use_cases_user", "user_id"),
+    )
+
+
 class UseCaseSkill(Base):
     """Per-usecase Skill / Regel — two-text module appended to the agent prompt.
 

@@ -151,6 +151,54 @@ async def delete_user(username: str) -> bool:
     return row is not None
 
 
+async def list_user_use_cases(username: str) -> list[str]:
+    """Return the use-case ids a user is assigned to (empty list if none)."""
+    pool = await get_pool()
+    if pool is None:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT uuc.use_case
+               FROM user_use_cases uuc
+               JOIN users u ON u.id = uuc.user_id
+               WHERE u.username = $1
+               ORDER BY uuc.use_case ASC""",
+            username,
+        )
+    return [r["use_case"] for r in rows]
+
+
+async def set_user_use_cases(username: str, use_cases: list[str]) -> bool:
+    """Replace a user's use-case assignments with ``use_cases`` (deduped).
+
+    Returns True if the user existed, False otherwise. Raises ValueError if any
+    use-case id does not exist (FK violation).
+    """
+    pool = await _require_pool()
+    unique = sorted(set(use_cases))
+    async with pool.acquire() as conn:
+        user_id = await conn.fetchval(
+            "SELECT id FROM users WHERE username = $1", username
+        )
+        if user_id is None:
+            return False
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM user_use_cases WHERE user_id = $1", user_id
+            )
+            if unique:
+                try:
+                    await conn.executemany(
+                        "INSERT INTO user_use_cases (user_id, use_case) VALUES ($1, $2)",
+                        [(user_id, uc) for uc in unique],
+                    )
+                except Exception as exc:  # noqa: BLE001 — clean error for unknown ids
+                    if "user_use_cases_use_case_fkey" in str(exc):
+                        raise ValueError("unknown use_case in assignment") from exc
+                    raise
+    return True
+
+
 async def verify_user(username: str, password: str) -> User | None:
     """Return the User if credentials are valid, else None.
 

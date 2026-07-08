@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { initSession, app } from '$lib/state.svelte';
+	import { initSession, resetChat, app } from '$lib/state.svelte';
 	import { getUseCaseCollections } from '$lib/api';
 	import { type UseCaseDef } from '$lib/use-cases';
 	import FileUpload from '$lib/components/FileUpload.svelte';
@@ -22,9 +22,20 @@
 		initSession();
 	});
 
-	// Sync route param → app state (hard-locked)
+	// Sync route param → app state (hard-locked). On a real use-case switch the
+	// chat is reset so messages never carry over from another use case. We
+	// compare against the persisted app.useCase (module state) rather than a
+	// component-local flag, so it also triggers when the user left the use-case
+	// section entirely (e.g. via /datenbank) and returns to a different one.
+	// Same-use-case navigation (tab switch, restoring a history conversation)
+	// keeps app.useCase equal to uc.apiId, so the transcript is preserved.
+	// untrack() reads app.useCase non-reactively so writing it can't loop.
 	$effect(() => {
-		app.useCase = uc.apiId;
+		const next = uc.apiId;
+		if (untrack(() => app.useCase) !== next) {
+			resetChat();
+			app.useCase = next;
+		}
 	});
 
 	// Load collections for this use case
