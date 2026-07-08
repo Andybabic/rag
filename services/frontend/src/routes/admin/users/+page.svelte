@@ -8,7 +8,14 @@
 		created_at: string | null;
 	}
 
+	interface UseCaseOption {
+		id: string;
+		label: string;
+		enabled?: boolean;
+	}
+
 	let users: UserRow[] = $state([]);
+	let useCases: UseCaseOption[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 
@@ -18,13 +25,31 @@
 	let newRole: 'admin' | 'user' = $state('user');
 	let creating = $state(false);
 
+	// per-user use-case assignment panel
+	let expandedUser: string | null = $state(null);
+	let selected: Set<string> = $state(new Set());
+	let assignmentLoading = $state(false);
+	let assignmentSaving = $state(false);
+	let assignmentMsg = $state('');
+
 	async function load() {
 		loading = true;
 		error = '';
 		try {
-			const resp = await fetch('/api/admin/users');
-			if (!resp.ok) throw new Error('Laden fehlgeschlagen');
-			users = await resp.json();
+			const [uResp, ucResp] = await Promise.all([
+				fetch('/api/admin/users'),
+				fetch('/api/admin/use-cases')
+			]);
+			if (!uResp.ok) throw new Error('Laden fehlgeschlagen');
+			users = await uResp.json();
+			if (ucResp.ok) {
+				const body = await ucResp.json();
+				useCases = (body.use_cases ?? []).map((u: UseCaseOption) => ({
+					id: u.id,
+					label: u.label,
+					enabled: u.enabled
+				}));
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Fehler';
 		}
@@ -97,7 +122,57 @@
 			const body = await resp.json().catch(() => ({}));
 			error = body.detail || 'Löschen fehlgeschlagen';
 		}
+		if (expandedUser === u.username) expandedUser = null;
 		await load();
+	}
+
+	// ── Use-case assignment ──────────────────────────────────────
+	async function togglePanel(u: UserRow) {
+		if (expandedUser === u.username) {
+			expandedUser = null;
+			return;
+		}
+		expandedUser = u.username;
+		assignmentMsg = '';
+		selected = new Set();
+		if (u.role === 'admin') return; // admins have access to everything
+		assignmentLoading = true;
+		try {
+			const resp = await fetch(`/api/admin/users/${encodeURIComponent(u.username)}/use-cases`);
+			if (resp.ok) {
+				const body = await resp.json();
+				selected = new Set<string>(body.use_cases ?? []);
+			}
+		} catch {
+			assignmentMsg = 'Zuordnung konnte nicht geladen werden.';
+		}
+		assignmentLoading = false;
+	}
+
+	function toggleUseCase(id: string) {
+		if (selected.has(id)) selected.delete(id);
+		else selected.add(id);
+		selected = new Set(selected);
+	}
+
+	async function saveAssignment(username: string) {
+		assignmentSaving = true;
+		assignmentMsg = '';
+		try {
+			const resp = await fetch(`/api/admin/users/${encodeURIComponent(username)}/use-cases`, {
+				method: 'PUT',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ use_cases: [...selected] })
+			});
+			if (!resp.ok) {
+				const body = await resp.json().catch(() => ({}));
+				throw new Error(body.detail || 'Speichern fehlgeschlagen');
+			}
+			assignmentMsg = 'Gespeichert ✓';
+		} catch (e) {
+			assignmentMsg = e instanceof Error ? e.message : 'Fehler';
+		}
+		assignmentSaving = false;
 	}
 
 	onMount(load);
@@ -108,7 +183,9 @@
 <div class="mx-auto max-w-3xl space-y-8 p-6">
 	<div>
 		<h2 class="text-xl font-bold text-gray-800">Benutzer</h2>
-		<p class="mt-1 text-sm text-gray-500">Konten für Login und Dashboard-Zugriff.</p>
+		<p class="mt-1 text-sm text-gray-500">
+			Konten für Login und Dashboard-Zugriff. Klicke einen Benutzer an, um seine Use Cases festzulegen.
+		</p>
 	</div>
 
 	{#if error}
@@ -158,12 +235,16 @@
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
-					{#each users as u}
-						<tr>
-							<td class="px-4 py-3 font-medium text-gray-800">{u.username}</td>
+					{#each users as u (u.username)}
+						<tr class="cursor-pointer hover:bg-gray-50" onclick={() => togglePanel(u)}>
+							<td class="px-4 py-3 font-medium text-gray-800">
+								<span class="mr-1 inline-block text-gray-400 transition-transform {expandedUser === u.username ? 'rotate-90' : ''}">▸</span>
+								{u.username}
+							</td>
 							<td class="px-4 py-3">
 								<select
 									value={u.role}
+									onclick={(e) => e.stopPropagation()}
 									onchange={(e) => changeRole(u, e.currentTarget.value as 'admin' | 'user')}
 									class="rounded border border-gray-300 px-2 py-1 text-xs"
 								>
@@ -172,14 +253,63 @@
 								</select>
 							</td>
 							<td class="px-4 py-3 text-right">
-								<button onclick={() => resetPassword(u)} class="mr-2 text-xs text-blue-600 hover:underline">
+								<button onclick={(e) => { e.stopPropagation(); resetPassword(u); }} class="mr-2 text-xs text-blue-600 hover:underline">
 									Passwort
 								</button>
-								<button onclick={() => deleteUser(u)} class="text-xs text-red-600 hover:underline">
+								<button onclick={(e) => { e.stopPropagation(); deleteUser(u); }} class="text-xs text-red-600 hover:underline">
 									Löschen
 								</button>
 							</td>
 						</tr>
+						{#if expandedUser === u.username}
+							<tr class="bg-gray-50/70">
+								<td colspan="3" class="px-4 py-4">
+									<p class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
+										Use Cases – wo darf {u.username} interagieren?
+									</p>
+									{#if u.role === 'admin'}
+										<p class="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">
+											Administratoren haben Zugriff auf alle Use Cases.
+										</p>
+									{:else if assignmentLoading}
+										<p class="animate-pulse text-sm text-gray-400">Lade Zuordnung…</p>
+									{:else if useCases.length === 0}
+										<p class="text-sm text-gray-400">Keine Use Cases vorhanden.</p>
+									{:else}
+										<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+											{#each useCases as uc}
+												<label class="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm hover:bg-gray-50">
+													<input
+														type="checkbox"
+														checked={selected.has(uc.id)}
+														onchange={() => toggleUseCase(uc.id)}
+														class="h-4 w-4 rounded border-gray-300"
+													/>
+													<span class="font-medium text-gray-700">{uc.label}</span>
+													<span class="ml-auto font-mono text-[10px] text-gray-400">{uc.id}</span>
+													{#if uc.enabled === false}
+														<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">deaktiviert</span>
+													{/if}
+												</label>
+											{/each}
+										</div>
+										<div class="mt-3 flex items-center gap-3">
+											<button
+												onclick={() => saveAssignment(u.username)}
+												disabled={assignmentSaving}
+												class="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+											>
+												{assignmentSaving ? 'Speichern…' : 'Zuordnung speichern'}
+											</button>
+											<span class="text-xs text-gray-500">{selected.size} ausgewählt</span>
+											{#if assignmentMsg}
+												<span class="text-xs {assignmentMsg.includes('✓') ? 'text-green-600' : 'text-red-600'}">{assignmentMsg}</span>
+											{/if}
+										</div>
+									{/if}
+								</td>
+							</tr>
+						{/if}
 					{/each}
 					{#if users.length === 0}
 						<tr><td colspan="3" class="px-4 py-6 text-center text-gray-400">Keine Benutzer</td></tr>

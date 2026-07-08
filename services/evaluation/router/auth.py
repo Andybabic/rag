@@ -13,9 +13,11 @@ from shared.auth import (
     User,
     create_user,
     delete_user,
+    list_user_use_cases,
     list_users,
     set_password,
     set_role,
+    set_user_use_cases,
     verify_user,
 )
 
@@ -55,6 +57,10 @@ class CreateUserRequest(BaseModel):
 class UpdateUserRequest(BaseModel):
     password: str | None = None
     role: str | None = None
+
+
+class UseCaseAssignment(BaseModel):
+    use_cases: list[str] = Field(default_factory=list)
 
 
 # ── login ─────────────────────────────────────────────────────
@@ -110,6 +116,28 @@ async def patch_user(username: str, req: UpdateUserRequest):
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return UserOut.from_user(user)
+
+
+@router.get("/users/{username}/use-cases")
+async def get_user_use_cases(username: str):
+    """List the use-case ids a user is assigned to."""
+    from shared.auth import get_user
+
+    if await get_user(username) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"use_cases": await list_user_use_cases(username)}
+
+
+@router.put("/users/{username}/use-cases")
+async def put_user_use_cases(username: str, req: UseCaseAssignment):
+    """Replace a user's use-case assignments."""
+    try:
+        ok = await set_user_use_cases(username, req.use_cases)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"use_cases": await list_user_use_cases(username)}
 
 
 @router.delete("/users/{username}", status_code=204)

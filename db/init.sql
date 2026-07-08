@@ -137,6 +137,17 @@ CREATE TABLE users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Zuordnung Benutzer ↔ Use Cases (Zugriffssteuerung).
+-- Leere Zuordnung = kein Zugriff. Admins haben immer Zugriff auf alles
+-- (in der Frontend-Schicht durchgesetzt, nicht im Schema).
+CREATE TABLE user_use_cases (
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    use_case VARCHAR(50) NOT NULL REFERENCES use_cases(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (user_id, use_case)
+);
+CREATE INDEX idx_user_use_cases_user ON user_use_cases(user_id);
+
 -- Indizes
 CREATE INDEX idx_queries_use_case ON queries(use_case);
 CREATE INDEX idx_queries_created_at ON queries(created_at);

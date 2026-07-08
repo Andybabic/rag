@@ -242,3 +242,22 @@ export function initSession() {
 		app.sessionId = getOrCreateSessionId();
 	}
 }
+
+/** Mint a brand-new session id (also persisted for the browser tab). */
+function freshSessionId(): string {
+	if (!browser) return '';
+	const id = crypto.randomUUID();
+	sessionStorage.setItem('rag_session_id', id);
+	return id;
+}
+
+/**
+ * Start a fresh conversation: clear the transcript and begin a new session so
+ * the next messages are logged under their own session id. Called when the
+ * user switches use case — the chat must not carry over from another use case.
+ */
+export function resetChat() {
+	app.messages = [];
+	app.isLoading = false;
+	app.sessionId = freshSessionId();
+}

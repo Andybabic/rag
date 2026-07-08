@@ -15,9 +15,11 @@ from shared.auth.users import (
     delete_user,
     ensure_bootstrap_admin,
     get_user,
+    list_user_use_cases,
     list_users,
     set_password,
     set_role,
+    set_user_use_cases,
     verify_user,
 )
 
@@ -29,9 +31,11 @@ __all__ = [
     "ensure_bootstrap_admin",
     "get_user",
     "hash_password",
+    "list_user_use_cases",
     "list_users",
     "set_password",
     "set_role",
+    "set_user_use_cases",
     "verify_password",
     "verify_user",
 ]
