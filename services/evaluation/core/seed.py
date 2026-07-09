@@ -18,6 +18,7 @@ from pathlib import Path
 
 from shared.usecase_config import (
     get_use_case,
+    list_deleted_use_cases,
     list_prompts,
     upsert_prompt,
     upsert_use_case,
@@ -55,11 +56,18 @@ async def seed_use_cases(path: str | Path | None = None) -> int:
         return 0
 
     cases = doc.get("use_cases", [])
+    # Use cases the admin deleted via the dashboard must NOT be resurrected on
+    # the next startup. Fetch the tombstones once and skip those ids entirely.
+    deleted = await list_deleted_use_cases()
     created = 0
     for uc in cases:
         uc_id = uc.get("id")
         if not uc_id:
             logger.warning("Skipping use-case entry without 'id': %r", uc)
+            continue
+
+        if uc_id in deleted:
+            logger.info("Skipping seed of deleted use case %r (tombstoned)", uc_id)
             continue
 
         if await get_use_case(uc_id) is None:

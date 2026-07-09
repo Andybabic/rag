@@ -77,7 +77,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	const embedResp = await fetch(`${SERVICES.embedding}/v1/embed/batch`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ chunks: embedItems })
+		body: JSON.stringify({ chunks: embedItems, use_case: useCase })
 	});
 	if (!embedResp.ok) {
 		return json(

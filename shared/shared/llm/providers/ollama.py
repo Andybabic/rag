@@ -56,9 +56,9 @@ class OllamaProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json()["message"]["content"]
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
+                f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -75,9 +75,9 @@ class OllamaProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json()["embedding"]
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
+                f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -93,9 +93,9 @@ class OllamaProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json().get("models", [])
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
+                f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -114,7 +114,7 @@ class OllamaProvider(LLMProvider):
         # mit images im Top-Level wurde von einigen VL-Modellen ignoriert,
         # sodass nur der Text-Prompt verarbeitet wurde.
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.vision_timeout) as client:
                 resp = await client.post(
                     self._url("/api/chat"),
                     headers=self._headers(),
@@ -138,9 +138,9 @@ class OllamaProvider(LLMProvider):
                 return (
                     resp.json().get("message", {}).get("content", "").strip()
                 )
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
+                f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(

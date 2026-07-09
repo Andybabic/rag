@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     # Synchronous /file_parse on a scanned multi-page PDF (OCR + tables) can
     # take minutes – generous per-request timeout, not the 120s default.
     MINERU_TIMEOUT: float = 900.0
+    # Large PDFs can exhaust MinerU (timeout / OOM) in a single call. When a PDF
+    # has more pages than this, it is split into parts of this many pages each,
+    # parsed separately, and merged back into one document (page numbers,
+    # anchors and images are re-based so the result is identical to a single
+    # pass). Set to 0 to disable splitting.
+    MINERU_MAX_PAGES_PER_CHUNK: int = 50
 
     BATCH_PARSE_WORKERS: int = 2
     BATCH_CHUNK_WORKERS: int = 4

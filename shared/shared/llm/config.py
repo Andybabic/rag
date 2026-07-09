@@ -10,7 +10,7 @@ Per-usecase overrides are applied on top of this snapshot by
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -64,6 +64,12 @@ class LLMConfig:
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str | None = None
 
+    # Optional dedicated OpenAI-compatible endpoint + key for embeddings, so
+    # embeddings can run on a different server than chat/vision. Falls back to
+    # ``openai_base_url`` / ``openai_api_key`` when unset.
+    embedding_openai_base_url: str | None = None
+    embedding_openai_api_key: str | None = None
+
     llm_model: str | None = None
     embedding_model: str | None = None
     vision_model: str | None = None
@@ -74,6 +80,11 @@ class LLMConfig:
     embed_batch_size: int | None = None
     agent_max_steps: int | None = None
     memory_max_chars: int | None = None
+
+    # Read timeout (seconds) for vision calls. Vision models on slow OpenAI-
+    # compatible endpoints can take well over a minute per image; too short a
+    # timeout aborts a whole document ingest on one image.
+    vision_timeout: float = 180.0
 
     @classmethod
     def from_env(cls) -> LLMConfig:
@@ -86,6 +97,8 @@ class LLMConfig:
             ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 32768) or 32768,
             openai_base_url=_env("OPENAI_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1",
             openai_api_key=_env("OPENAI_API_KEY"),
+            embedding_openai_base_url=_env("EMBEDDING_OPENAI_BASE_URL"),
+            embedding_openai_api_key=_env("EMBEDDING_OPENAI_API_KEY"),
             llm_model=_env("LLM_MODEL"),
             embedding_model=_env("EMBEDDING_MODEL"),
             vision_model=_env("VISION_MODEL"),
@@ -95,6 +108,7 @@ class LLMConfig:
             embed_batch_size=_env_int("EMBED_BATCH_SIZE"),
             agent_max_steps=_env_int("AGENT_MAX_STEPS"),
             memory_max_chars=_env_int("MEMORY_MAX_CHARS"),
+            vision_timeout=_env_float("VISION_TIMEOUT", 180.0) or 180.0,
         )
 
     def provider_for(self, role: str) -> str:
@@ -105,3 +119,19 @@ class LLMConfig:
         if role == "vision":
             return self.vision_provider
         raise ValueError(f"Unknown LLM role: {role!r}")
+
+    def for_role(self, role: str) -> "LLMConfig":
+        """Return a config whose OpenAI base URL / API key are the role-specific
+        overrides when set. Currently only embeddings support a dedicated
+        endpoint (``EMBEDDING_OPENAI_BASE_URL`` / ``EMBEDDING_OPENAI_API_KEY``);
+        other roles keep the shared credentials.
+        """
+        if role == "embedding" and (
+            self.embedding_openai_base_url or self.embedding_openai_api_key
+        ):
+            return replace(
+                self,
+                openai_base_url=self.embedding_openai_base_url or self.openai_base_url,
+                openai_api_key=self.embedding_openai_api_key or self.openai_api_key,
+            )
+        return self

@@ -312,9 +312,106 @@ class PDFHandler(BaseHandler):
         itself, so we make a single call (no page-by-page loop) and
         rebuild page-anchored text + images from the structured
         ``content_list`` so downstream chunking keeps page metadata.
+
+        Large PDFs are first split into ``MINERU_MAX_PAGES_PER_CHUNK``-page
+        parts (see :meth:`_parse_large_pdf_in_parts`) because a single
+        /file_parse over hundreds of scanned pages tends to time out / OOM.
         """
+        max_pages = settings.MINERU_MAX_PAGES_PER_CHUNK
+        total_pages = 0
+        if max_pages and max_pages > 0:
+            try:
+                total_pages = self._count_pdf_pages(file_bytes)
+            except Exception as exc:  # noqa: BLE001 — not a PDF fitz can open; try single call
+                logger.warning("Could not count pages of %r (%s); parsing in one call", filename, exc)
+        if max_pages and max_pages > 0 and total_pages > max_pages:
+            return await self._parse_large_pdf_in_parts(
+                file_bytes, filename, total_pages, max_pages
+            )
+
         result = await self._call_mineru(file_bytes, filename)
         return self._mineru_response_to_parsed(result, file_bytes)
+
+    # ── Large-PDF splitting ──────────────────────────────────
+    # Matches both our injected ``<!-- page:N -->`` anchors and MinerU's own
+    # ``<!-- Page N -->`` markers; used to re-base page numbers per part.
+    _ANY_PAGE_MARK_RE = re.compile(r"(<!--\s*page[:\s]+)(\d+)(\s*-->)", re.IGNORECASE)
+
+    async def _parse_large_pdf_in_parts(
+        self, file_bytes: bytes, filename: str, total_pages: int, max_pages: int
+    ) -> ParsedDocument:
+        """Split a big PDF into ``max_pages``-page parts, parse each via
+        MinerU, and merge the results into one document.
+
+        Page numbers in ``pages``, image entries and in-text page anchors are
+        offset by each part's start page, so the merged document is
+        indistinguishable from a hypothetical single-pass parse.
+        """
+        stem, _, ext = filename.rpartition(".")
+        ext = ext or "pdf"
+        n_parts = (total_pages + max_pages - 1) // max_pages
+        logger.info(
+            "PDF %r has %d pages > %d – splitting into %d part(s) of %d pages",
+            filename, total_pages, max_pages, n_parts, max_pages,
+        )
+
+        merged_text: list[str] = []
+        merged_pages: list[dict] = []
+        merged_images: list[dict] = []
+
+        for start in range(0, total_pages, max_pages):
+            end = min(start + max_pages, total_pages) - 1  # inclusive, 0-based
+            part_bytes = self._extract_page_range(file_bytes, start, end)
+            part_name = f"{stem or filename}_p{start + 1}-{end + 1}.{ext}"
+            logger.info("MinerU part %s (pages %d–%d)", part_name, start + 1, end + 1)
+            result = await self._call_mineru(part_bytes, part_name)
+            parsed = self._mineru_response_to_parsed(result, part_bytes)
+
+            offset = start  # local page 1 → global page start+1
+            if parsed.text:
+                merged_text.append(self._offset_page_anchors(parsed.text, offset))
+            for pg in parsed.pages or []:
+                merged_pages.append({**pg, "page": int(pg.get("page", 1)) + offset})
+            for img in parsed.images or []:
+                merged_images.append({**img, "page": int(img.get("page", 1)) + offset})
+
+        return ParsedDocument(
+            text="\n\n".join(t for t in merged_text if t),
+            pages=merged_pages,
+            images=merged_images,
+            metadata={
+                "format": "pdf",
+                "total_pages": total_pages,
+                "parser": "mineru",
+                "backend": settings.MINERU_BACKEND,
+                "split_parts": n_parts,
+            },
+        )
+
+    @staticmethod
+    def _extract_page_range(file_bytes: bytes, start: int, end: int) -> bytes:
+        """Return a standalone PDF containing pages ``start``..``end`` (0-based,
+        inclusive) of ``file_bytes``."""
+        src = fitz.open(stream=file_bytes, filetype="pdf")
+        try:
+            dst = fitz.open()
+            try:
+                dst.insert_pdf(src, from_page=start, to_page=end)
+                return dst.tobytes()
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+    @classmethod
+    def _offset_page_anchors(cls, text: str, offset: int) -> str:
+        """Add ``offset`` to every ``<!-- page:N -->`` / ``<!-- Page N -->``
+        marker in ``text``, preserving the original marker style."""
+        if not text or not offset:
+            return text
+        return cls._ANY_PAGE_MARK_RE.sub(
+            lambda m: f"{m.group(1)}{int(m.group(2)) + offset}{m.group(3)}", text
+        )
 
     async def _call_mineru(
         self, file_bytes: bytes, filename: str

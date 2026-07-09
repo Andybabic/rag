@@ -81,7 +81,7 @@ async def test_embed_ollama_unavailable(mock_embed, client):
     resp = await client.post("/v1/embed", json=_embed_request())
     assert resp.status_code == 503
     body = resp.json()
-    assert body["error"] == "ollama_unavailable"
+    assert body["error"] == "embedding_unavailable"
 
 
 # ── POST /v1/embed/batch ───────────────────────────────────
@@ -122,7 +122,7 @@ async def test_batch_ollama_unavailable(mock_batch, client):
     resp = await client.post("/v1/embed/batch", json=_batch_request())
     assert resp.status_code == 503
     body = resp.json()
-    assert body["error"] == "ollama_unavailable"
+    assert body["error"] == "embedding_unavailable"
 
 
 # ── GET /v1/models ─────────────────────────────────────────

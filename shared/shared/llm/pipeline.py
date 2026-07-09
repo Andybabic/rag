@@ -18,7 +18,9 @@ from shared.llm.registry import get_provider
 
 def _resolve(role: str, config: LLMConfig | None = None) -> LLMProvider:
     cfg = config or LLMConfig.from_env()
-    return get_provider(cfg.provider_for(role), cfg)
+    # for_role swaps in role-specific credentials (e.g. a dedicated embedding
+    # endpoint) so a single provider class can talk to different servers.
+    return get_provider(cfg.provider_for(role), cfg.for_role(role))
 
 
 async def chat(
