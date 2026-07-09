@@ -29,11 +29,13 @@ services:
     volumes:
       - kermit_postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform}"]
+      # SELECT 1 in addition to pg_isready so the container is healthy only when
+      # it truly serves queries (avoids the 57P03 "starting up" startup race).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -q && psql -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -tAc 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 15
+      start_period: 40s
 
   qdrant:
     build:
@@ -46,8 +48,8 @@ services:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 8
+      start_period: 40s
 
   # ollama:
   #   image: ollama/ollama:latest
@@ -78,10 +80,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 40s
 
   data_structure:
     build:
@@ -98,10 +100,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 40s
 
   embedding:
     build:
@@ -115,10 +117,10 @@ services:
     env_file: .env
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 25s
+      retries: 5
+      start_period: 40s
 
   vectordb:
     build:
@@ -135,10 +137,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 25s
+      retries: 5
+      start_period: 40s
 
   evaluation:
     build:
@@ -163,10 +165,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 40s
 
   frontend:
     build:
@@ -200,10 +202,10 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 40s
 
 volumes:
   kermit_postgres:
