@@ -210,6 +210,11 @@
 
 					if (type === 'started') {
 						updateMsg({ currentPhase: 'Manager startet …' });
+					} else if (type === 'image_analysis') {
+						const n = (event.count as number) ?? 1;
+						updateMsg({ currentPhase: n > 1 ? `${n} Bilder werden analysiert …` : 'Bild wird analysiert …' });
+					} else if (type === 'memory_recall') {
+						updateMsg({ currentPhase: 'Frühere Antworten werden herangezogen …' });
 					} else if (type === 'manager_plan') {
 						const plan: ManagerPlan = {
 							rationale: event.rationale as string,

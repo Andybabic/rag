@@ -271,6 +271,8 @@ async def run_agent(
     max_steps: int = 5,
     history: list[dict] | None = None,
     images: list[str] | None = None,
+    image_context: str = "",
+    persist_memory: bool = True,
     on_event: StepCallback = None,
 ) -> dict:
     """Run the ReAct agent loop.
@@ -301,13 +303,31 @@ async def run_agent(
         for msg in history[-6:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # Attach user-supplied images to the first user turn so the (vision-capable)
-    # chat model processes them in the same prompt. They stay in the message
-    # list across ReAct iterations, so the model keeps seeing them.
-    user_msg: dict = {"role": "user", "content": enriched_query}
+    # When an image was uploaded, prepend its (vision-generated) description as
+    # context so the answer can be grounded in the image even if the chat model
+    # itself isn't multimodal. ``enriched_query`` stays clean so it can still
+    # seed document searches without the description leaking into them.
+    user_content = enriched_query
+    if image_context:
+        user_content = (
+            "Der Nutzer hat ein Bild hochgeladen. Automatisch erkannter "
+            f"Bildinhalt:\n{image_context}\n\n"
+            "Beantworte die Frage in erster Linie anhand des Bildes. Suche nur "
+            "dann in den Dokumenten, wenn das für die Frage zusätzlich relevant "
+            f"ist.\n\nFrage: {enriched_query}"
+        )
+
+    # Attach the raw image(s) to the first user turn too, so a vision-capable
+    # chat model can also look at them directly. They stay in the message list
+    # across ReAct iterations, so the model keeps seeing them.
+    user_msg: dict = {"role": "user", "content": user_content}
     if images:
         user_msg["images"] = images
     messages.append(user_msg)
+
+    # An uploaded image means the user may just want to ask about the image;
+    # in that case RAG is optional, so we must not force a document search.
+    has_image = bool(images) or bool(image_context)
 
     steps: list[dict] = []
     answer = ""
@@ -331,7 +351,9 @@ async def run_agent(
         # Hard guard: small models (e.g. qwen3:8b) sometimes skip SEARCH on
         # short follow-up questions and go straight to FINAL_ANSWER from the
         # conversation history. Force a SEARCH first so RAG actually runs.
-        if not has_searched and action_name in ("FINAL_ANSWER", "CLARIFY"):
+        # Skipped when an image was uploaded — there RAG is optional and the
+        # user may just be asking about the image itself.
+        if not has_searched and not has_image and action_name in ("FINAL_ANSWER", "CLARIFY"):
             action_name = "SEARCH"
             action_args = {"query": enriched_query}
             thought = (
@@ -345,6 +367,7 @@ async def run_agent(
         elif (
             action_name == "FINAL_ANSWER"
             and not broadened_retry_done
+            and not has_image
             and _is_no_info_answer(action_args.get("answer", ""))
         ):
             broadened_retry_done = True
@@ -490,8 +513,12 @@ async def run_agent(
     citations = map_citations(answer, chunks_for_citations)
     answer = strip_unresolved_refs(answer, citations)
 
-    # Memory update (non-blocking)
-    asyncio.create_task(_update_memory(use_case, query, answer))
+    # Memory update (non-blocking). Sub-agents run with persist_memory=False:
+    # the manager owns a single LLM-moderated memory update per user query, so
+    # the shared use-case memory doesn't get spammed by every sub-agent (and
+    # concurrent sub-agents don't race on the same row).
+    if persist_memory:
+        asyncio.create_task(_update_memory(use_case, query, answer))
 
     result = {
         "answer": answer,

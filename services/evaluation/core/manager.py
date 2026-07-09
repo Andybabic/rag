@@ -24,9 +24,12 @@ import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
+from config import settings
 from core.agent import run_agent
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
+from core.memory_rag import format_memory, recall, remember
+from shared.llm import vision_describe
 from shared.usecase_config import resolve_config
 from core.roles import (
     DEFAULT_ROLE,
@@ -179,13 +182,95 @@ def _normalise_plan(raw: dict, fallback_query: str) -> dict:
     }
 
 
-async def plan_subtasks(query: str, *, use_case: str, history: list[dict] | None) -> dict:
+async def describe_uploaded_images(
+    images: list[str] | None, *, use_case: str
+) -> str:
+    """Describe user-uploaded chat images via the vision model.
+
+    Returns a combined text description (one line per image) so the answer can
+    be grounded in the image even when the chat model isn't multimodal, and so
+    the RAG search can optionally use the image content. Best-effort: a failed
+    or empty description for one image is skipped, never raised.
+    """
+    if not images:
+        return ""
+    cfg = await resolve_config(use_case)
+    model = cfg.vision_model
+    if not model:
+        logger.warning("No vision model configured — skipping image description")
+        return ""
+
+    prompt = (
+        "Beschreibe den Inhalt dieses Bildes sachlich, präzise und auf Deutsch. "
+        "Gib Text, Zahlen, Tabellen, Diagramme und erkennbare Objekte wieder, "
+        "damit die Beschreibung eine spätere Frage dazu beantworten kann."
+    )
+    descriptions: list[str] = []
+    for i, img in enumerate(images, 1):
+        # Frontend sends data URIs ("data:image/png;base64,AAAA…"); the provider
+        # wants raw base64 without whitespace.
+        b64 = img.split(",", 1)[1] if "," in img else img
+        b64 = "".join(b64.split())
+        if not b64:
+            continue
+        try:
+            desc = await vision_describe(prompt, b64, model=model, config=cfg)
+        except Exception as exc:  # noqa: BLE001 — best-effort, never break the query
+            logger.warning("Vision description failed for uploaded image %d: %s", i, exc)
+            continue
+        desc = (desc or "").strip()
+        if desc:
+            label = f"Bild {i}: " if len(images) > 1 else ""
+            descriptions.append(f"{label}{desc}")
+    return "\n".join(descriptions)
+
+
+def _is_vague_query(query: str, history: list[dict] | None) -> bool:
+    """Heuristic: is the query too short/underspecified to plan well on its own?
+
+    Cheap gate (no LLM) so memory is only pulled in when it actually helps —
+    short queries, or short follow-ups that lean on prior context. Detailed
+    queries plan fine without the extra context.
+    """
+    words = len(query.split())
+    if words <= settings.VAGUE_QUERY_MAX_WORDS:
+        return True
+    # A short-ish follow-up in an ongoing conversation is also often vague.
+    if history and words <= settings.VAGUE_QUERY_MAX_WORDS + 3:
+        return True
+    return False
+
+
+async def plan_subtasks(
+    query: str,
+    *,
+    use_case: str,
+    history: list[dict] | None,
+    image_context: str = "",
+    memory: str = "",
+) -> dict:
     """Ask the manager LLM to decompose the query.
 
     Returns a normalised plan; falls back to a single ``facts`` sub-task on
-    LLM/parse failure. Never raises.
+    LLM/parse failure. Never raises. When ``memory`` is provided (typically for
+    a vague/incomplete query) it is offered to the decomposer so it can turn an
+    underspecified request into concrete, well-scoped sub-queries.
     """
     user_msg_parts = [f"Nutzer-Anfrage: {query}"]
+    if memory:
+        user_msg_parts.append(
+            "Bekannter Kontext aus dem Gedächtnis dieses Use Cases (nutze ihn, "
+            "um eine schwammige oder unvollständige Anfrage zu präzisieren; "
+            "erfinde nichts hinzu, was weder Anfrage noch Gedächtnis hergeben):\n"
+            f"{memory}"
+        )
+    if image_context:
+        user_msg_parts.append(
+            "Hinweis: Der Nutzer hat ein Bild hochgeladen. Erkannter Bildinhalt:\n"
+            f"{image_context}\n"
+            "Wenn sich die Frage auf das Bild bezieht, plane keine (oder nur "
+            "ergänzende) Dokumenten-Suche."
+        )
     if history:
         # Last user message before the current one helps disambiguate
         # short follow-ups like "und beim Modell 2699?".
@@ -266,6 +351,7 @@ async def _run_one_subagent(
     collection: str,
     filters: dict | None,
     images: list[str] | None,
+    image_context: str,
     on_event: StepCallback,
 ) -> dict:
     """Run a single sub-agent. Wraps ``run_agent`` with the role config."""
@@ -294,6 +380,8 @@ async def _run_one_subagent(
             max_steps=role.max_steps,
             history=None,  # sub-agents work on the focused sub-query directly
             images=images,
+            image_context=image_context,
+            persist_memory=False,  # the manager owns the moderated memory update
             on_event=_wrap_event(on_event, sub_id=sub_id, role=role.name),
         )
     except Exception as exc:
@@ -707,7 +795,30 @@ async def run_manager(
     if on_event:
         await on_event({"type": "started", "stage": "manager"})
 
-    plan = await plan_subtasks(query, use_case=use_case, history=history)
+    # If the user attached image(s), describe them with the vision model first
+    # so the content is available as text to the planner and every sub-agent
+    # (works regardless of whether the chat model is multimodal).
+    image_context = ""
+    if images:
+        if on_event:
+            await on_event({"type": "image_analysis", "count": len(images)})
+        image_context = await describe_uploaded_images(images, use_case=use_case)
+
+    # Vague/incomplete query → recall the most relevant past Q&A from the
+    # memory RAG so the manager can plan concrete sub-tasks instead of guessing.
+    # Gated on vagueness so clear queries pay no extra embed+search cost.
+    memory = ""
+    if _is_vague_query(query, history):
+        mems = await recall(use_case, query)
+        if mems:
+            if on_event:
+                await on_event({"type": "memory_recall", "count": len(mems)})
+            memory = format_memory(mems)
+
+    plan = await plan_subtasks(
+        query, use_case=use_case, history=history,
+        image_context=image_context, memory=memory,
+    )
     if on_event:
         await on_event({"type": "manager_plan", **plan})
 
@@ -730,6 +841,7 @@ async def run_manager(
                 collection=collection,
                 filters=filters,
                 images=images,
+                image_context=image_context,
                 on_event=on_event,
             )
         )
@@ -859,6 +971,11 @@ async def run_manager(
         _audit = {}
     _audit["generated_at"] = datetime.now(timezone.utc).isoformat()
     _audit["processing_ms"] = round((time.perf_counter() - _t0) * 1000)
+
+    # Store this Q&A as one chunk in the memory RAG (background, non-blocking).
+    # Skip refusals/empty answers so the memory isn't polluted with non-answers.
+    if compliance["verdict"] != "REFUSE" and final_answer.strip():
+        asyncio.create_task(remember(use_case, query, final_answer))
 
     result = {
         "answer": final_answer,

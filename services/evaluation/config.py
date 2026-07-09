@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     AGENT_MAX_STEPS: int = 5
     MEMORY_MAX_CHARS: int = 4000
+    # A query with at most this many words is treated as vague/incomplete, so
+    # the manager recalls relevant past Q&A from the memory RAG to plan more
+    # specific sub-tasks.
+    VAGUE_QUERY_MAX_WORDS: int = 6
     LOG_LEVEL: str = "INFO"
 
     # ── Auth bootstrap ───────────────────────────────────────
