@@ -211,13 +211,26 @@ async def enrich_images_with_alt_text(
                     context = p.get("text", "")[:300]
                     break
 
-        alt_text = await generate_alt_text(
-            base64_data,
-            context,
-            use_case=use_case,
-            text_before=text_before,
-            text_after=text_after,
-        )
+        # A single slow/failed vision call must never abort the whole document
+        # ingest. generate_alt_text already swallows LLMUnavailableError; this
+        # guards against anything else (unexpected transport/parse errors) so
+        # the image is simply kept without alt-text and ingestion continues.
+        try:
+            alt_text = await generate_alt_text(
+                base64_data,
+                context,
+                use_case=use_case,
+                text_before=text_before,
+                text_after=text_after,
+            )
+        except Exception as exc:  # noqa: BLE001 — resilience over completeness
+            logger.warning(
+                "Alt-text generation failed for image on page %s (%s); "
+                "keeping image without description",
+                img.get("page"),
+                exc,
+            )
+            alt_text = ""
         enriched.append({**img, "alt_text": alt_text})
 
     return enriched

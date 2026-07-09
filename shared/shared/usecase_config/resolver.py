@@ -575,6 +575,11 @@ async def upsert_use_case(
             json.dumps(collection_prefixes or []),
             enabled,
         )
+        # Re-creating a use case clears any tombstone so it's treated as live
+        # again (and the boot seed won't skip it).
+        await conn.execute(
+            "DELETE FROM deleted_use_cases WHERE use_case = $1", use_case_id
+        )
     invalidate(use_case_id)
     invalidate_use_cases()
     return _row_to_use_case(row)
@@ -583,17 +588,42 @@ async def upsert_use_case(
 async def delete_use_case(use_case_id: str) -> bool:
     """Delete a use case by id. Returns True if a row was removed.
 
-    Does not cascade to prompts/config/skills — those are keyed by the same
-    ``use_case`` string and can be cleaned up separately if desired.
+    Records a tombstone so the boot-time seed does not resurrect the use case
+    on the next restart. Does not cascade to prompts/config/skills — those are
+    keyed by the same ``use_case`` string and can be cleaned up separately.
     """
     pool = await _get_pool()
     if pool is None:
         raise RuntimeError("No DB pool available — cannot persist use_cases")
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "DELETE FROM use_cases WHERE id = $1 RETURNING id",
-            use_case_id,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "DELETE FROM use_cases WHERE id = $1 RETURNING id",
+                use_case_id,
+            )
+            await conn.execute(
+                "INSERT INTO deleted_use_cases (use_case) VALUES ($1) "
+                "ON CONFLICT (use_case) DO NOTHING",
+                use_case_id,
+            )
     invalidate(use_case_id)
     invalidate_use_cases()
     return row is not None
+
+
+async def list_deleted_use_cases() -> set[str]:
+    """Return the set of use-case ids that were deleted (tombstoned).
+
+    Degrades to an empty set if the DB is unavailable or the tombstone table
+    doesn't exist yet (un-migrated DB), so the boot seed never fails on it.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return set()
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT use_case FROM deleted_use_cases")
+    except Exception as exc:  # noqa: BLE001 — missing table / DB hiccup → no tombstones
+        logger.warning("Could not read deleted_use_cases (%s); assuming none", exc)
+        return set()
+    return {r["use_case"] for r in rows}

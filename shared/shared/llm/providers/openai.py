@@ -75,9 +75,9 @@ class OpenAIProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"OpenAI not reachable at {self.config.openai_base_url}: {exc}"
+                f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -94,9 +94,9 @@ class OpenAIProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json()["data"][0]["embedding"]
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"OpenAI not reachable at {self.config.openai_base_url}: {exc}"
+                f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -115,9 +115,9 @@ class OpenAIProvider(LLMProvider):
                 # callers don't need to branch on provider.
                 data = resp.json().get("data", [])
                 return [{"name": item.get("id"), **item} for item in data]
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"OpenAI not reachable at {self.config.openai_base_url}: {exc}"
+                f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(
@@ -144,7 +144,7 @@ class OpenAIProvider(LLMProvider):
             }
         ]
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.vision_timeout) as client:
                 resp = await client.post(
                     self._url("/chat/completions"),
                     headers=self._headers(),
@@ -156,9 +156,9 @@ class OpenAIProvider(LLMProvider):
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"].strip()
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
-                f"OpenAI not reachable at {self.config.openai_base_url}: {exc}"
+                f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LLMUnavailableError(

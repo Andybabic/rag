@@ -137,6 +137,15 @@ CREATE TABLE users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Tombstones für gelöschte Use Cases. Der Boot-Seed spielt Standard-Use-Cases
+-- aus config/use_cases.json ein (create-if-missing); ohne diesen Merker kämen
+-- gelöschte Standard-Use-Cases nach jedem Neustart zurück. Der Seed überspringt
+-- getombstonete IDs; ein Neuanlegen derselben ID entfernt den Tombstone.
+CREATE TABLE deleted_use_cases (
+    use_case VARCHAR(50) PRIMARY KEY,
+    deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- Zuordnung Benutzer ↔ Use Cases (Zugriffssteuerung).
 -- Leere Zuordnung = kein Zugriff. Admins haben immer Zugriff auf alles
 -- (in der Frontend-Schicht durchgesetzt, nicht im Schema).

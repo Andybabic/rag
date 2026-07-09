@@ -223,6 +223,21 @@ class User(Base):
     )
 
 
+class DeletedUseCase(Base):
+    """Tombstone for a use case deleted via the dashboard.
+
+    Prevents the boot-time seed from resurrecting deleted default use cases.
+    Re-creating a use case with the same id removes its tombstone.
+    """
+
+    __tablename__ = "deleted_use_cases"
+
+    use_case = Column(String(50), primary_key=True)
+    deleted_at = Column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class UserUseCase(Base):
     """Assignment of a user to a use case (many-to-many access control).
 

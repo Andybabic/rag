@@ -2,6 +2,11 @@ fastapi>=0.100
 uvicorn[standard]>=0.23
 pydantic-settings>=2.0
 httpx>=0.24
+# Per-usecase embedding config (provider/model/endpoint) is read from the DB
+# via shared.usecase_config → needs asyncpg (DB pool) + cryptography (decrypt
+# stored API keys). Without them the service degrades to env-based config.
+asyncpg>=0.29
+cryptography>=42.0
 ruff>=0.4
 pytest>=7.0
 pytest-asyncio>=0.21

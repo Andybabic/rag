@@ -33,7 +33,8 @@ async def action_search(args: dict, *, use_case: str) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:
             embed_resp = await client.post(
                 f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
-                json={"type": "text", "content": query, "metadata": {}},
+                json={"type": "text", "content": query, "metadata": {},
+                      "use_case": use_case},
             )
             embed_resp.raise_for_status()
             embed_json = embed_resp.json()
@@ -305,7 +306,8 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:
             embed_resp = await client.post(
                 f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
-                json={"type": "text", "content": query, "metadata": {}},
+                json={"type": "text", "content": query, "metadata": {},
+                      "use_case": use_case},
             )
             embed_resp.raise_for_status()
             embed_json = embed_resp.json()
