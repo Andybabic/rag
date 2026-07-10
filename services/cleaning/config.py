@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_API_KEY: str | None = None
     VISION_MODEL: str = "qwen2.5:14b"
+    # How many image alt-text (vision) calls run concurrently during ingestion.
+    # Higher = faster for image-heavy PDFs, but more load on the vision backend.
+    VISION_CONCURRENCY: int = 4
 
     # ── Per-usecase config DB (optional; falls back to env if unset) ──
     DATABASE_URL: str | None = None

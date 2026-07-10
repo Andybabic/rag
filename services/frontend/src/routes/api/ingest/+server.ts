@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
+import { fetchError, responseError } from '$lib/server/ingest-errors';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async ({ request }) => {
@@ -16,16 +17,20 @@ export const POST: RequestHandler = async ({ request }) => {
 	cleanForm.append('file', file, file.name);
 	cleanForm.append('config', JSON.stringify({ use_case: useCase }));
 
-	const cleanResp = await fetch(`${SERVICES.cleaning}/v1/clean`, {
-		method: 'POST',
-		body: cleanForm
-	});
+	let cleanResp: Response;
+	try {
+		cleanResp = await fetch(`${SERVICES.cleaning}/v1/clean`, {
+			method: 'POST',
+			body: cleanForm
+		});
+	} catch (err) {
+		const e = fetchError('Bereinigung/PDF-Extraktion', 'cleaning-service', err);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
+	}
 
 	if (!cleanResp.ok) {
-		return json(
-			{ error: 'clean_failed', detail: await cleanResp.text() },
-			{ status: 502 }
-		);
+		const e = await responseError('Bereinigung/PDF-Extraktion', 'cleaning-service', cleanResp);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
 	}
 
 	const cleanData = await cleanResp.json();
@@ -47,22 +52,26 @@ export const POST: RequestHandler = async ({ request }) => {
 		}));
 
 	// 2. Structure
-	const structureResp = await fetch(`${SERVICES.dataStructure}/v1/structure`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			markdown: cleanData.markdown,
-			metadata: cleanData.metadata ?? {},
-			use_case: useCase,
-			images
-		})
-	});
+	let structureResp: Response;
+	try {
+		structureResp = await fetch(`${SERVICES.dataStructure}/v1/structure`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				markdown: cleanData.markdown,
+				metadata: cleanData.metadata ?? {},
+				use_case: useCase,
+				images
+			})
+		});
+	} catch (err) {
+		const e = fetchError('Strukturierung/Chunking', 'data-structure-service', err);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
+	}
 
 	if (!structureResp.ok) {
-		return json(
-			{ error: 'structure_failed', detail: await structureResp.text() },
-			{ status: 502 }
-		);
+		const e = await responseError('Strukturierung/Chunking', 'data-structure-service', structureResp);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
 	}
 
 	const structureData = await structureResp.json();
@@ -100,17 +109,21 @@ export const POST: RequestHandler = async ({ request }) => {
 			metadata: {}
 		}));
 
-		const embedResp = await fetch(`${SERVICES.embedding}/v1/embed/batch`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ chunks: embedItems, use_case: useCase })
-		});
+		let embedResp: Response;
+		try {
+			embedResp = await fetch(`${SERVICES.embedding}/v1/embed/batch`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ chunks: embedItems, use_case: useCase })
+			});
+		} catch (err) {
+			const e = fetchError('Embedding', 'embedding-service', err);
+			return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
+		}
 
 		if (!embedResp.ok) {
-			return json(
-				{ error: 'embed_failed', detail: await embedResp.text() },
-				{ status: 502 }
-			);
+			const e = await responseError('Embedding', 'embedding-service', embedResp);
+			return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
 		}
 
 		const embedData = await embedResp.json();

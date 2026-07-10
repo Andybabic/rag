@@ -359,12 +359,21 @@ class PDFHandler(BaseHandler):
         merged_pages: list[dict] = []
         merged_images: list[dict] = []
 
-        for start in range(0, total_pages, max_pages):
+        for idx, start in enumerate(range(0, total_pages, max_pages), 1):
             end = min(start + max_pages, total_pages) - 1  # inclusive, 0-based
             part_bytes = self._extract_page_range(file_bytes, start, end)
             part_name = f"{stem or filename}_p{start + 1}-{end + 1}.{ext}"
-            logger.info("MinerU part %s (pages %d–%d)", part_name, start + 1, end + 1)
-            result = await self._call_mineru(part_bytes, part_name)
+            logger.info(
+                "MinerU part %d/%d: %s (pages %d–%d)",
+                idx, n_parts, part_name, start + 1, end + 1,
+            )
+            try:
+                result = await self._call_mineru(part_bytes, part_name)
+            except Exception as exc:
+                raise MaxRetriesExceeded(
+                    f"Teil {idx}/{n_parts} (Seiten {start + 1}–{end + 1}) von "
+                    f"{filename!r} fehlgeschlagen: {exc}"
+                ) from exc
             parsed = self._mineru_response_to_parsed(result, part_bytes)
 
             offset = start  # local page 1 → global page start+1
@@ -433,8 +442,24 @@ class PDFHandler(BaseHandler):
                         wait,
                     )
                     await asyncio.sleep(wait)
+        # ReadTimeout/etc. stringify to "" — spell out the cause so the surfaced
+        # error actually tells the user whether MinerU timed out or errored.
+        if isinstance(last_exc, httpx.TimeoutException):
+            cause = (
+                f"Zeitüberschreitung nach {settings.MINERU_TIMEOUT:.0f}s pro Versuch "
+                f"(MINERU_TIMEOUT). Das PDF/der Teil ist zu groß oder MinerU ist "
+                f"überlastet."
+            )
+        elif isinstance(last_exc, httpx.HTTPStatusError):
+            cause = (
+                f"HTTP {last_exc.response.status_code}: "
+                f"{last_exc.response.text[:300]}"
+            )
+        else:
+            cause = f"{type(last_exc).__name__}: {last_exc}"
         raise MaxRetriesExceeded(
-            f"MineU failed after {settings.MAX_RETRIES} attempts: {last_exc}"
+            f"MinerU ({settings.MINERU_API_URL}) nach {settings.MAX_RETRIES} "
+            f"Versuchen fehlgeschlagen für {filename!r} – {cause}"
         )
 
     async def _do_mineru_request(

@@ -62,9 +62,17 @@ async def clean_file(
 
     file_bytes = await file.read()
 
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "clean start: %r (%d bytes), use_case=%r", filename, len(file_bytes),
+        cfg.get("use_case", ""),
+    )
     try:
         doc = await clean(file_bytes, filename)
     except Exception as exc:
+        logger.error("clean failed for %r: %s", filename, exc)
         return JSONResponse(
             status_code=500,
             content={
@@ -74,6 +82,13 @@ async def clean_file(
                 "service": "cleaning-service",
             },
         )
+    logger.info(
+        "clean parsed %r: %s page(s), %d image(s), parser=%s",
+        filename,
+        (doc.metadata or {}).get("total_pages", len(doc.pages or [])),
+        len(doc.images or []),
+        (doc.metadata or {}).get("parser", "?"),
+    )
 
     markdown = doc.text
     pages = doc.pages

@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
+import { fetchError, responseError } from '$lib/server/ingest-errors';
 import type { RequestHandler } from './$types';
 
 interface InboundChunk {
@@ -54,15 +55,19 @@ export const POST: RequestHandler = async ({ request }) => {
 	cleanForm.append('file', file, file.name);
 	cleanForm.append('config', JSON.stringify({ use_case: useCase }));
 
-	const cleanResp = await fetch(`${SERVICES.cleaning}/v1/clean`, {
-		method: 'POST',
-		body: cleanForm
-	});
+	let cleanResp: Response;
+	try {
+		cleanResp = await fetch(`${SERVICES.cleaning}/v1/clean`, {
+			method: 'POST',
+			body: cleanForm
+		});
+	} catch (err) {
+		const e = fetchError('Bereinigung', 'cleaning-service', err);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
+	}
 	if (!cleanResp.ok) {
-		return json(
-			{ error: 'clean_failed', detail: await cleanResp.text() },
-			{ status: 502 }
-		);
+		const e = await responseError('Bereinigung', 'cleaning-service', cleanResp);
+		return json({ error: e.error, detail: e.detail, stage: e.stage }, { status: e.status });
 	}
 	const cleanData = await cleanResp.json();
 	const fileHash = cleanData.metadata?.file_hash ?? '';
