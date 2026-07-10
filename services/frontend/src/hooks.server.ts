@@ -9,7 +9,25 @@
  *   non-admins get redirected to "/" (pages) or 403 (API).
  */
 import { redirect, type Handle } from '@sveltejs/kit';
+import { env } from '$env/dynamic/private';
+import { Agent, setGlobalDispatcher } from 'undici';
 import { SESSION_COOKIE, verifySession } from '$lib/server/auth';
+
+// Node's global fetch (undici) aborts after ~300s waiting for response headers.
+// Ingesting a large/scanned PDF (MinerU OCR + image analysis) legitimately
+// takes longer, so the proxy fetch to the cleaning service failed with an
+// opaque "TypeError: fetch failed". Raise the header/body timeouts so long
+// ingestion calls complete instead of being killed mid-flight. Configurable
+// via FETCH_TIMEOUT_MS (default 30 min); connect timeout stays short so an
+// unreachable service still fails fast.
+const FETCH_TIMEOUT_MS = Number(env.FETCH_TIMEOUT_MS ?? '') || 30 * 60 * 1000;
+setGlobalDispatcher(
+	new Agent({
+		headersTimeout: FETCH_TIMEOUT_MS,
+		bodyTimeout: FETCH_TIMEOUT_MS,
+		connectTimeout: 10_000
+	})
+);
 
 // Login is a form action on the public /login page; logout requires a session.
 const PUBLIC_PATHS = new Set(['/login', '/health', '/api/health']);

@@ -6,6 +6,7 @@ fall back to env / hardcoded defaults when nothing is configured.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -186,51 +187,59 @@ async def enrich_images_with_alt_text(
 ) -> list[dict]:
     """Generate alt-text for each image and add it to the image dict.
 
-    Also returns the images enriched with an ``alt_text`` field.
+    Vision calls run concurrently (bounded by ``VISION_CONCURRENCY``) instead of
+    one-after-another, so a document with many images doesn't serialize into a
+    multi-minute wall that trips the ingest timeout. Order is preserved.
     """
     if not images:
         return images
 
-    enriched = []
-    for img in images:
+    page_text: dict[int, str] = {}
+    for p in pages:
+        page_text.setdefault(int(p.get("page", 1)), p.get("text", ""))
+
+    sem = asyncio.Semaphore(max(1, settings.VISION_CONCURRENCY))
+
+    async def _one(img: dict) -> dict:
         base64_data = img.get("base64", "")
         if not base64_data:
-            enriched.append(img)
-            continue
-
+            return img
         text_before = img.get("text_before", "")
         text_after = img.get("text_after", "")
-
         # Fallback to current-page text only when MinerU didn't give us
         # adjacent items (e.g. a page with just one image and no prose).
         context = ""
         if not (text_before or text_after):
-            page_num = img.get("page", 1)
-            for p in pages:
-                if p.get("page") == page_num:
-                    context = p.get("text", "")[:300]
-                    break
+            context = page_text.get(int(img.get("page", 1)), "")[:300]
 
         # A single slow/failed vision call must never abort the whole document
         # ingest. generate_alt_text already swallows LLMUnavailableError; this
         # guards against anything else (unexpected transport/parse errors) so
         # the image is simply kept without alt-text and ingestion continues.
-        try:
-            alt_text = await generate_alt_text(
-                base64_data,
-                context,
-                use_case=use_case,
-                text_before=text_before,
-                text_after=text_after,
-            )
-        except Exception as exc:  # noqa: BLE001 — resilience over completeness
-            logger.warning(
-                "Alt-text generation failed for image on page %s (%s); "
-                "keeping image without description",
-                img.get("page"),
-                exc,
-            )
-            alt_text = ""
-        enriched.append({**img, "alt_text": alt_text})
+        async with sem:
+            try:
+                alt_text = await generate_alt_text(
+                    base64_data,
+                    context,
+                    use_case=use_case,
+                    text_before=text_before,
+                    text_after=text_after,
+                )
+            except Exception as exc:  # noqa: BLE001 — resilience over completeness
+                logger.warning(
+                    "Alt-text generation failed for image on page %s (%s); "
+                    "keeping image without description",
+                    img.get("page"),
+                    exc,
+                )
+                alt_text = ""
+        return {**img, "alt_text": alt_text}
+
+    logger.info(
+        "Generating alt-text for %d image(s), concurrency=%d",
+        len(images),
+        settings.VISION_CONCURRENCY,
+    )
+    enriched = list(await asyncio.gather(*(_one(img) for img in images)))
 
     return enriched
