@@ -199,10 +199,18 @@ async def enrich_images_with_alt_text(
         page_text.setdefault(int(p.get("page", 1)), p.get("text", ""))
 
     sem = asyncio.Semaphore(max(1, settings.VISION_CONCURRENCY))
+    total = len(images)
+    done = 0
+    failed = 0
+    # Log progress roughly every 10 % (at least every image for small docs) so a
+    # large, image-heavy PDF shows movement instead of looking frozen.
+    step = max(1, total // 10)
 
     async def _one(img: dict) -> dict:
+        nonlocal done, failed
         base64_data = img.get("base64", "")
         if not base64_data:
+            done += 1
             return img
         text_before = img.get("text_before", "")
         text_after = img.get("text_after", "")
@@ -233,13 +241,18 @@ async def enrich_images_with_alt_text(
                     exc,
                 )
                 alt_text = ""
+                failed += 1
+        done += 1
+        if done % step == 0 or done == total:
+            logger.info("alt-text progress: %d/%d done (%d failed)", done, total, failed)
         return {**img, "alt_text": alt_text}
 
     logger.info(
         "Generating alt-text for %d image(s), concurrency=%d",
-        len(images),
+        total,
         settings.VISION_CONCURRENCY,
     )
     enriched = list(await asyncio.gather(*(_one(img) for img in images)))
+    logger.info("alt-text done: %d/%d (%d failed)", done, total, failed)
 
     return enriched

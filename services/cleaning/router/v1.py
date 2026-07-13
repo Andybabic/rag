@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -9,8 +10,8 @@ import unicodedata
 from core.batch import process_batch
 from core.cleaner import clean
 from core.handlers import supported_formats
+from core.image_jobs import get_progress, run_alt_text_job
 from core.pii import remove_pii
-from config import settings
 from core.storage import (
     delete_document_files,
     get_absolute_path,
@@ -18,10 +19,8 @@ from core.storage import (
     list_document_images,
     store_image,
     store_original,
-    write_image_debug_txt,
     write_image_metadata,
 )
-from core.vision import enrich_images_with_alt_text
 from fastapi import APIRouter, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -107,14 +106,20 @@ async def clean_file(
     # available as the prefix for image storage below.
     file_hash, stored_path = store_original(file_bytes, use_case_dir, filename)
 
-    # Generate alt-text + persist each image to disk so the answer-side
-    # can render it inline. The image_id is woven into the markdown anchor
-    # so the chunker can pick it up later.
+    # Persist each image to disk and weave its anchor into the markdown NOW
+    # (fast), so the clean response returns quickly. The slow vision alt-text
+    # generation is handed off to a background job (see core.image_jobs); the
+    # frontend polls /v1/images/progress/{file_hash} to show "X/Y Bilder
+    # interpretiert" while it runs.
+    image_count = 0
     if images:
-        images = await enrich_images_with_alt_text(images, pages, use_case=use_case)
+        page_text: dict[int, str] = {}
+        for p in pages:
+            page_text.setdefault(int(p.get("page", 1)), p.get("text", ""))
+
         per_page_idx: dict[int, int] = {}
         enriched: list[dict] = []
-        alt_blocks: list[str] = []
+        job_items: list[dict] = []
         for img in images:
             page_num = int(img.get("page") or 1)
             idx = per_page_idx.get(page_num, 0)
@@ -140,59 +145,38 @@ async def clean_file(
                 "stored_path": rel_path,
                 "url": url,
             })
-            alt = img.get("alt_text", "")
-            # JSON sidecar is the gallery index — always write it so the
-            # /documents/{hash}/images endpoint can recover the alt-text
-            # without re-running vision on retrieval.
+            text_before = img.get("text_before", "")
+            text_after = img.get("text_after", "")
+            # Placeholder sidecar (alt-text filled in by the background job) so
+            # the gallery already lists the image during processing.
             write_image_metadata(
                 use_case=use_case_dir,
                 image_id=image_id,
                 page=page_num,
-                alt_text=alt,
-                text_before=img.get("text_before", ""),
-                text_after=img.get("text_after", ""),
+                alt_text="",
+                text_before=text_before,
+                text_after=text_after,
             )
-            if settings.DEBUG_IMAGE_CAPTIONS:
-                write_image_debug_txt(
-                    use_case=use_case_dir,
-                    image_id=image_id,
-                    page=page_num,
-                    alt_text=alt,
-                    text_before=img.get("text_before", ""),
-                    text_after=img.get("text_after", ""),
-                )
-            anchor_block = (
-                f"<!-- image id:{image_id} page:{page_num} -->\n"
-                f"[Bild S.{page_num} | {image_id}]: {alt}"
-                if alt else
-                f"<!-- image id:{image_id} page:{page_num} -->"
-            )
-            # MinerU emittiert das Bild im md_content als ![…](images/<name>).
-            # Wir ersetzen den ![]()-Tag inline durch unseren Anchor, damit
-            # der Chunker das Bild dem Chunk zuordnet, in dem es im Dokument
-            # tatsächlich steht — sonst landen alle Bild-Anchors in einem
-            # Anhang-Chunk und werden nie zusammen mit dem relevanten Inhalt
-            # zitiert.
+            # Anchor carries only the id/page (no description yet). The chunker
+            # associates the image with its location; the answer-side reads the
+            # description from the sidecar once the background job filled it in.
+            anchor_block = f"<!-- image id:{image_id} page:{page_num} -->"
+            # Replace MinerU's ![…](images/<name>) tag inline so the image lands
+            # in the chunk where it actually appears. Function replacement — a
+            # plain string would misread backslashes as group escapes.
             mineru_name = img.get("caption", "")
             placed_inline = False
             if mineru_name:
                 pattern = re.compile(
-                    r"!\[[^\]]*\]\([^)]*?"
-                    + re.escape(mineru_name)
-                    + r"[^)]*\)"
+                    r"!\[[^\]]*\]\([^)]*?" + re.escape(mineru_name) + r"[^)]*\)"
                 )
-                # Nur die erste Stelle ersetzen; weitere Vorkommen werden
-                # vom Chunker als Wiederholungen behandelt (harmlos).
-                new_markdown, n = pattern.subn(anchor_block, markdown, count=1)
+                new_markdown, n = pattern.subn(lambda _m: anchor_block, markdown, count=1)
                 if n > 0:
                     markdown = new_markdown
                     placed_inline = True
             if not placed_inline:
-                # Fallback 1: kein ![]()-Tag im Markdown (typisch für
-                # MinerU-Tabellen-Screenshots, die im md_content als
-                # Pipe-Table-Text erscheinen). Anchor hinter den Page-
-                # Marker der zugehörigen Seite klemmen — dann landet er
-                # zumindest in einem Chunk derselben Seite.
+                # Fallback: no ![]() tag (e.g. MinerU table screenshots) — clamp
+                # the anchor behind the matching page marker.
                 page_marker_re = re.compile(
                     r"(<!--\s*page[:\s]+" + str(page_num) + r"\s*-->)",
                     re.IGNORECASE,
@@ -200,20 +184,27 @@ async def clean_file(
                 m = page_marker_re.search(markdown)
                 if m:
                     insert_at = m.end()
-                    markdown = (
-                        markdown[:insert_at]
-                        + "\n\n" + anchor_block
-                        + markdown[insert_at:]
-                    )
-                    placed_inline = True
-            if not placed_inline and alt:
-                # Fallback 2: weder ![]()-Tag noch passender Page-Marker
-                # gefunden — am Dokumentende anhängen, damit zumindest
-                # die Bild-Beschreibung im Embedding-Pool landet.
-                alt_blocks.append(anchor_block)
+                    markdown = markdown[:insert_at] + "\n\n" + anchor_block + markdown[insert_at:]
+
+            context = ""
+            if not (text_before or text_after):
+                context = page_text.get(page_num, "")[:300]
+            job_items.append({
+                "image_id": image_id,
+                "page": page_num,
+                "text_before": text_before,
+                "text_after": text_after,
+                "context": context,
+            })
         images = enriched
-        if alt_blocks:
-            markdown = markdown + "\n\n" + "\n\n".join(alt_blocks)
+        image_count = len(job_items)
+
+        # Kick off alt-text generation in the background (non-blocking). The
+        # clean response returns immediately; progress is polled separately.
+        if job_items:
+            asyncio.create_task(
+                run_alt_text_job(file_hash, use_case_dir, use_case, job_items)
+            )
 
     return {
         "status": "ok",
@@ -221,6 +212,9 @@ async def clean_file(
         "markdown": markdown,
         "images": images,
         "pages": pages,
+        # How many images are being described in the background — the frontend
+        # polls /v1/images/progress/{file_hash} to show live progress.
+        "image_count": image_count,
         "metadata": {
             "file_name": filename,
             "total_pages": doc.metadata.get("total_pages", len(pages)),
@@ -230,6 +224,55 @@ async def clean_file(
             "stored_path": stored_path,
         },
     }
+
+
+@router.get("/images/progress/{file_hash}")
+async def image_progress(file_hash: str):
+    """Background alt-text progress for a document (for the upload UI)."""
+    return get_progress(file_hash)
+
+
+@router.get("/images/status/{use_case}/{file_hash}")
+async def image_status(use_case: str, file_hash: str):
+    """Durable image-description status for a document, derived from the stored
+    sidecars (survives reloads/restarts). Used by the documents overview.
+    """
+    imgs = list_document_images(use_case, file_hash)
+    total = len(imgs)
+    described = sum(1 for i in imgs if (i.get("alt_text") or "").strip())
+    job = get_progress(file_hash)
+    return {
+        "file_hash": file_hash,
+        "total": total,
+        "described": described,
+        "pending": total - described,
+        "job_status": job.get("status", "unknown"),  # running | done | unknown
+    }
+
+
+@router.post("/images/regenerate/{use_case}/{file_hash}")
+async def regenerate_images(use_case: str, file_hash: str):
+    """(Re-)generate alt-text for images of a document that have none yet.
+
+    Lets the user recover missing descriptions (e.g. after fixing a vision
+    config) WITHOUT re-uploading and re-parsing the whole PDF.
+    """
+    imgs = list_document_images(use_case, file_hash)
+    pending = [i for i in imgs if not (i.get("alt_text") or "").strip()]
+    if not pending:
+        return {"status": "nothing_to_do", "total": len(imgs), "pending": 0}
+    items = [
+        {
+            "image_id": i["image_id"],
+            "page": i["page"],
+            "text_before": i.get("text_before", ""),
+            "text_after": i.get("text_after", ""),
+            "context": "",
+        }
+        for i in pending
+    ]
+    asyncio.create_task(run_alt_text_job(file_hash, use_case, use_case, items))
+    return {"status": "started", "pending": len(items), "total": len(imgs)}
 
 
 _INLINE_MIME_TYPES = {

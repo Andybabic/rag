@@ -188,6 +188,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		file_name: file.name,
 		use_case: useCase,
 		chunks: totalUpserted,
-		stored_path: storedPath
+		stored_path: storedPath,
+		// For the upload UI to poll background alt-text progress.
+		file_hash: fileHash,
+		image_count: (cleanData.image_count as number) ?? 0
 	});
 };

@@ -62,6 +62,7 @@ def get_client() -> QdrantClient:
         _client = QdrantClient(
             host=settings.QDRANT_HOST,
             port=settings.QDRANT_PORT,
+            timeout=settings.QDRANT_TIMEOUT,
         )
     return _client
 
@@ -119,9 +120,27 @@ def upsert_vectors(
         for emb in embeddings
     ]
 
+    # Upsert in bounded batches — a single huge upsert (hundreds of 4096-dim
+    # vectors from a large PDF) overruns the client timeout. ``wait=True`` keeps
+    # each batch durable before moving on.
+    batch_size = max(1, settings.UPSERT_BATCH_SIZE)
     try:
-        client.upsert(collection_name=collection, points=points)
+        for start in range(0, len(points), batch_size):
+            client.upsert(
+                collection_name=collection,
+                points=points[start : start + batch_size],
+                wait=True,
+            )
     except Exception as exc:
+        msg = str(exc)
+        if "dimension error" in msg.lower():
+            raise QdrantUnavailableError(
+                f"Embedding-Dimension passt nicht zur Collection '{collection}' "
+                f"(neuer Vektor hat {dimension} Dimensionen). Die Collection wurde "
+                f"mit einem anderen Embedding-Modell angelegt. Entweder dasselbe "
+                f"Modell verwenden oder die Collection löschen und neu ingesten. "
+                f"Original-Fehler: {msg}"
+            ) from exc
         raise QdrantUnavailableError(f"Qdrant upsert failed: {exc}") from exc
 
     return len(points)
