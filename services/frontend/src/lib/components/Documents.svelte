@@ -3,9 +3,12 @@
 	import {
 		deleteDocument,
 		getDocuments,
+		getImageStatus,
+		regenerateImages,
 		uploadFile,
 		uploadFolder,
-		type FolderUploadResult
+		type FolderUploadResult,
+		type ImageStatus
 	} from '$lib/api';
 	import TablePreviewModal from './TablePreviewModal.svelte';
 	import ImageGalleryModal from './ImageGalleryModal.svelte';
@@ -97,6 +100,10 @@
 		target.value = '';
 	}
 
+	// Durable per-document image-description status (from disk), keyed by file_hash.
+	let imageStatus = $state<Record<string, ImageStatus>>({});
+	let regenerating = $state<Set<string>>(new Set());
+
 	async function load() {
 		loading = true;
 		try {
@@ -108,6 +115,48 @@
 			collections = [];
 		}
 		loading = false;
+		void loadImageStatuses();
+	}
+
+	async function loadImageStatuses() {
+		for (const doc of documents) {
+			if (!doc.file_hash || !hasGallery(doc.file_name)) continue;
+			try {
+				imageStatus[doc.file_hash] = await getImageStatus(doc.use_case, doc.file_hash);
+			} catch {
+				/* ignore — status is best-effort */
+			}
+		}
+	}
+
+	async function pollImageStatus(useCase: string, fileHash: string) {
+		const deadline = Date.now() + 30 * 60 * 1000;
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 2500));
+			let s: ImageStatus;
+			try {
+				s = await getImageStatus(useCase, fileHash);
+			} catch {
+				continue;
+			}
+			imageStatus[fileHash] = s;
+			if (s.job_status !== 'running' && s.pending === 0) return;
+			if (s.job_status === 'done' && !regenerating.has(fileHash)) return;
+		}
+	}
+
+	async function regenerate(doc: { use_case: string; file_hash?: string }) {
+		if (!doc.file_hash) return;
+		const fh = doc.file_hash;
+		regenerating.add(fh);
+		regenerating = new Set(regenerating);
+		try {
+			await regenerateImages(doc.use_case, fh);
+			await pollImageStatus(doc.use_case, fh);
+		} finally {
+			regenerating.delete(fh);
+			regenerating = new Set(regenerating);
+		}
 	}
 
 	function getExtension(name: string): string {
@@ -332,6 +381,18 @@
 											{doc.collection} &middot; {doc.chunk_count} Chunks &middot;
 											{new Date(doc.created_at).toLocaleString('de-AT')}
 										</p>
+										{#if doc.file_hash && imageStatus[doc.file_hash] && imageStatus[doc.file_hash].total > 0}
+											{@const s = imageStatus[doc.file_hash]}
+											<p class="mt-0.5 text-xs {s.described < s.total ? 'text-amber-600' : 'text-emerald-600'}">
+												{#if s.job_status === 'running' || regenerating.has(doc.file_hash)}
+													🖼 {s.described}/{s.total} Bilder interpretiert …
+												{:else if s.pending > 0}
+													🖼 {s.described}/{s.total} Bilder beschrieben · {s.pending} offen
+												{:else}
+													🖼 {s.total} Bilder beschrieben
+												{/if}
+											</p>
+										{/if}
 									</div>
 									{#if doc.stored_path && isTable(doc.file_name)}
 										<button
@@ -351,6 +412,17 @@
 											title="Extrahierte Bilder + Beschreibung anzeigen"
 										>
 											Bilder
+										</button>
+									{/if}
+									{#if doc.file_hash && imageStatus[doc.file_hash] && imageStatus[doc.file_hash].pending > 0}
+										<button
+											type="button"
+											onclick={() => regenerate(doc)}
+											disabled={regenerating.has(doc.file_hash) || imageStatus[doc.file_hash].job_status === 'running'}
+											class="rounded-md border border-amber-200 bg-white px-2 py-1 text-[11px] font-medium text-amber-700 hover:border-amber-400 hover:bg-amber-50 disabled:opacity-50"
+											title="Fehlende Bildbeschreibungen im Hintergrund erzeugen"
+										>
+											{regenerating.has(doc.file_hash) ? 'Läuft…' : 'Beschreibungen erzeugen'}
 										</button>
 									{/if}
 									<span class="rounded-full px-2 py-0.5 text-[10px] font-semibold

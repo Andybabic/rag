@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     VISION_MODEL: str = "qwen2.5:14b"
     # How many image alt-text (vision) calls run concurrently during ingestion.
     # Higher = faster for image-heavy PDFs, but more load on the vision backend.
-    VISION_CONCURRENCY: int = 4
+    # (A 150-page scanned PDF can carry a few hundred images.)
+    VISION_CONCURRENCY: int = 8
 
     # ── Per-usecase config DB (optional; falls back to env if unset) ──
     DATABASE_URL: str | None = None

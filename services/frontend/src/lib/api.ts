@@ -89,7 +89,15 @@ export async function sendFeedback(queryId: string, rating: string, comment = ''
 	return resp.json();
 }
 
-export async function uploadFile(file: File, useCase: string) {
+export interface UploadResult {
+	status: string;
+	chunks?: number;
+	file_hash?: string;
+	image_count?: number;
+	[k: string]: unknown;
+}
+
+export async function uploadFile(file: File, useCase: string): Promise<UploadResult> {
 	const form = new FormData();
 	form.append('file', file);
 	form.append('use_case', useCase);
@@ -98,6 +106,48 @@ export async function uploadFile(file: File, useCase: string) {
 		body: form
 	});
 	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export interface ImageProgress {
+	file_hash: string;
+	total: number;
+	done: number;
+	failed: number;
+	status: 'running' | 'done' | 'unknown';
+}
+
+/** Poll background alt-text (image interpretation) progress for a document. */
+export async function getImageProgress(fileHash: string): Promise<ImageProgress> {
+	const resp = await fetch(`${BASE}/cleaning/image-progress/${encodeURIComponent(fileHash)}`);
+	return resp.json();
+}
+
+export interface ImageStatus {
+	file_hash: string;
+	total: number;
+	described: number;
+	pending: number;
+	job_status: 'running' | 'done' | 'unknown';
+}
+
+/** Durable image-description status (from disk) for the documents overview. */
+export async function getImageStatus(useCase: string, fileHash: string): Promise<ImageStatus> {
+	const resp = await fetch(
+		`${BASE}/cleaning/image-status/${encodeURIComponent(useCase)}/${encodeURIComponent(fileHash)}`
+	);
+	return resp.json();
+}
+
+/** (Re-)generate alt-text for a document's images that have none yet. */
+export async function regenerateImages(
+	useCase: string,
+	fileHash: string
+): Promise<{ status: string; pending?: number; total?: number }> {
+	const resp = await fetch(
+		`${BASE}/cleaning/image-regenerate/${encodeURIComponent(useCase)}/${encodeURIComponent(fileHash)}`,
+		{ method: 'POST' }
+	);
 	return resp.json();
 }
 

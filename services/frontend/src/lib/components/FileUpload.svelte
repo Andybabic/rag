@@ -1,11 +1,48 @@
 <script lang="ts">
 	import { app } from '$lib/state.svelte';
-	import { uploadFile } from '$lib/api';
+	import { uploadFile, getImageProgress } from '$lib/api';
 
 	let dragover = $state(false);
 	let uploading = $state(false);
 	let totalCount = $state(0);
 	let doneCount = $state(0);
+
+	// Poll background alt-text ("Bild-Interpretation") progress and reflect it
+	// in the file's status line, e.g. "12 Chunks · 14/44 Bilder interpretiert".
+	async function pollImageProgress(
+		index: number,
+		fileName: string,
+		fileHash: string,
+		chunkMsg: string,
+		total: number
+	) {
+		const deadline = Date.now() + 30 * 60 * 1000;
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 2000));
+			// Bail if the list was reset or a different file now sits at this slot.
+			if (app.uploadResults[index]?.name !== fileName) return;
+			let p;
+			try {
+				p = await getImageProgress(fileHash);
+			} catch {
+				continue;
+			}
+			const t = p.total || total;
+			if (p.status === 'done' || (t > 0 && p.done >= t)) {
+				app.uploadResults[index] = {
+					...app.uploadResults[index],
+					msg: `${chunkMsg} · ${t} Bilder interpretiert`
+				};
+				return;
+			}
+			// Job may not be registered yet (brief race) — keep the initial count.
+			const done = p.status === 'unknown' ? 0 : p.done;
+			app.uploadResults[index] = {
+				...app.uploadResults[index],
+				msg: `${chunkMsg} · ${done}/${t} Bilder interpretiert`
+			};
+		}
+	}
 
 	async function handleFiles(files: FileList | null) {
 		if (!files || files.length === 0) return;
@@ -22,11 +59,18 @@
 			const file = list[i];
 			try {
 				const result = await uploadFile(file, app.useCase);
+				const chunkMsg = `${result.chunks ?? 0} Chunks`;
+				const imageCount = result.image_count ?? 0;
 				app.uploadResults[i] = {
 					name: file.name,
 					ok: true,
-					msg: `${result.chunks ?? 0} Chunks`
+					msg: imageCount > 0 ? `${chunkMsg} · 0/${imageCount} Bilder interpretiert` : chunkMsg
 				};
+				// Alt-text runs in the background — poll and show live progress
+				// without blocking the next file's upload.
+				if (imageCount > 0 && result.file_hash) {
+					pollImageProgress(i, file.name, result.file_hash, chunkMsg, imageCount);
+				}
 			} catch (err) {
 				const message = err instanceof Error ? err.message : 'Upload fehlgeschlagen';
 				app.uploadResults[i] = { name: file.name, ok: false, msg: message };
