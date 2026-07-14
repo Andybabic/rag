@@ -1,9 +1,13 @@
+# syntax=docker/dockerfile:1.7
 FROM node:20-slim AS build
 WORKDIR /app
 
+# Deps first so a source-only change doesn't re-run npm install. The npm cache
+# lives on a BuildKit cache mount → repeated builds reuse downloaded packages.
 COPY services/frontend/package.json services/frontend/package-lock.json* ./
-RUN npm install
+RUN --mount=type=cache,target=/root/.npm npm install
 
+# Source (node_modules/build are excluded via .dockerignore, so this stays small)
 COPY services/frontend/ .
 RUN npm run build
 
@@ -13,11 +17,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/build ./build
-COPY --from=build /app/package.json .
-COPY --from=build /app/node_modules ./node_modules
+# Copy already owned by node so we skip a recursive chown pass over node_modules.
+COPY --chown=node:node --from=build /app/build ./build
+COPY --chown=node:node --from=build /app/package.json .
+COPY --chown=node:node --from=build /app/node_modules ./node_modules
 
-RUN chown -R node:node /app
 USER node
 
 EXPOSE 3000

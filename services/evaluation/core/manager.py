@@ -568,7 +568,10 @@ def _format_available_images(images: list[dict]) -> str:
     return "\n".join(lines)
 
 
-_BILD_MARKER_RE = re.compile(r"\[BILD:\s*(img_[A-Za-z0-9_]+)\s*\]")
+# Tolerant of markdown the LLM sometimes adds inside the marker, e.g.
+# ``[BILD: **img_...**]`` or ``[BILD: `img_...`]`` — otherwise the image is
+# never collected into images_used and thus never shown.
+_BILD_MARKER_RE = re.compile(r"\[BILD:[^\]]*?(img_[A-Za-z0-9_]+)[^\]]*?\]")
 
 
 def select_used_images(answer: str, catalog: list[dict]) -> list[dict]:
