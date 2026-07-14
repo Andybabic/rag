@@ -174,7 +174,10 @@
 		const imgs = (message.imagesUsed ?? []).filter((i) => i.id && i.url);
 		if (imgs.length > 0 || /\[BILD:/i.test(html)) {
 			const lookup = new Map(imgs.map((i) => [i.id, i]));
-			html = html.replace(/\[BILD:\s*(img_[A-Za-z0-9_]+)\s*\]/g, (_m, id: string) => {
+			// Tolerant of markdown the LLM sometimes puts inside the marker, e.g.
+			// [BILD: **img_...**] → after marked() this is
+			// [BILD: <strong>img_...</strong>]; grab the id regardless.
+			html = html.replace(/\[BILD:[^\]]*?(img_[A-Za-z0-9_]+)[^\]]*?\]/g, (_m, id: string) => {
 				const img = lookup.get(id);
 				if (!img) return '';
 				const url = escapeAttr(img.url ?? '');

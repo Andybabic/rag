@@ -1,0 +1,47 @@
+# Keep the Docker build context tiny. Compose builds every service with
+# `context: .`, so anything here is sent to the daemon once PER service build.
+# Without this file the context was ~726 MB (mostly frontend/node_modules);
+# with it, only source + requirements + db/init.sql are sent.
+
+# ── Node (installed fresh inside the frontend build stage) ──
+**/node_modules
+services/frontend/build
+services/frontend/.svelte-kit
+npm-debug.log*
+
+# ── Python caches / artifacts ──
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+.venv
+venv
+
+# ── VCS ──
+.git
+.gitignore
+.gitattributes
+
+# ── Uploaded data / runtime volumes (never belong in an image) ──
+data/
+logs/
+
+# ── Large non-code assets ──
+Kermit/
+docs/
+*.pptx
+
+# ── Env / secrets (provided at runtime via env_file, must not be baked in) ──
+.env
+.env.*
+.env copy
+
+# ── Editor / OS cruft ──
+.DS_Store
+**/.DS_Store
+.vscode
+.idea
+scratchpad/
+gitpush.txt
