@@ -1,9 +1,12 @@
 """Admin API – query history, memory, prompts, per-usecase config."""
 
-from __future__ import annotations
 
+from __future__ import annotations
+import asyncio
 import json
+import logging
 import re
+import uuid
 
 from core.database import get_pool
 from core.memory import read_memory, write_memory
@@ -22,6 +25,7 @@ from core.use_cases import (
 )
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from shared.llm.config import LLMConfig
 from shared.security.crypto import CryptoError, encrypt, is_configured
 from shared.usecase_config import (
     Skill,
@@ -38,6 +42,10 @@ from shared.usecase_config import (
     upsert_prompt,
     upsert_use_case,
 )
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -84,7 +92,7 @@ async def list_queries(use_case: str = "", limit: int = 50, offset: int = 0):
                 "citations": json.loads(r["citations"]) if r["citations"] else [],
                 "images": json.loads(r["images"]) if r["images"] else [],
                 "sufficient": r["sufficient"],
-                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows
         ]
@@ -303,6 +311,24 @@ async def update_config(use_case: str, body: ConfigUpdate):
     return {"status": "ok", "use_case": use_case}
 
 
+# ── Available Ollama models ──────────────────────────────────
+
+
+@router.get("/models")
+async def list_ollama_models():
+    """Return model names currently available on the llama.cpp server."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get("http://172.19.0.1:8081/v1/models")
+            data = r.json()
+            models = [m["id"] for m in data.get("data", [])]
+            models.sort()
+            return {"models": models}
+    except Exception as exc:
+        return {"models": ["qwen3.5:9b", "gemma4:12b"], "error": f"llama.cpp nicht erreichbar: {exc}"}
+
+
 # ── Skills / Regeln ──────────────────────────────────────────
 
 
@@ -471,7 +497,7 @@ async def list_documents(use_case: str = ""):
                 "use_case": r["use_case"],
                 "chunk_count": r["chunk_count"],
                 "status": r["status"],
-                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             for r in rows
         ]
@@ -598,3 +624,310 @@ async def admin_delete_use_case(use_case_id: str):
         raise HTTPException(status_code=404, detail="Use case not found")
     await refresh_use_cases()
     return {"status": "ok", "deleted": use_case_id}
+
+
+# ── Chunk Utilization Analysis ─────────────────────────────────
+
+
+class ChunkAnalysisRequest(BaseModel):
+    """Request body: mode = "sentence" or "claim"."""
+    threshold: float = 0.70
+    mode: str = "sentence"
+    max_concurrent: int = 8
+    models: list[str] = ["qwen3.5:9b"]
+
+
+
+@router.get("/analyze-chunks/{query_id}/progress")
+async def get_analysis_progress(query_id: str):
+    from core.chunk_analyzer import _analysis_progress
+    progress = _analysis_progress.get(query_id, {"done": 0, "total": 0})
+    return progress
+
+@router.get("/analyze-chunks/{query_id}/result")
+async def get_analysis_result(query_id: str):
+    from core.chunk_analyzer import _analysis_results
+    result = _analysis_results.get(query_id)
+    if result is None:
+        return {"status": "not_found"}
+    if result["status"] == "done":
+        _analysis_results.pop(query_id, None)
+    return result
+
+@router.post("/analyze-chunks/{query_id}")
+async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalysisRequest()):
+    """Run chunk utilization analysis for a completed query.
+
+    Two modes:
+    - "sentence" (default): regex split .!? → embed → cosine. Fast, deterministic.
+    - "claim": LLM extracts atomic claims via local Ollama → embed → cosine. Precise.
+
+    Does NOT modify the stored query — purely read + compute.
+    """
+    from core.chunk_analyzer import analyze_chunk_utilization_claim, review_analysis_with_judge
+
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT id, use_case, query_text, answer_text, agent_steps
+           FROM queries WHERE id = $1""",
+        uuid.UUID(query_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Query not found")
+
+    use_case = row["use_case"]
+    agent_steps = json.loads(row["agent_steps"]) if row["agent_steps"] else []
+    answer_text = row["answer_text"] or ""
+
+    from core.chunk_analyzer import _analysis_progress
+
+    # Guard against double-clicks
+    if query_id in _analysis_progress:
+        return {"status": "already_running"}
+
+    # Initialize progress before spawning background task
+    _analysis_progress[query_id] = {"done": 0, "total": 0}
+
+    async def _run_analysis():
+        from core.chunk_analyzer import _analysis_results
+        try:
+            results = []
+            for step_i, step in enumerate(agent_steps):
+                chunks = step.get("chunks") or []
+                if not chunks:
+                    continue
+                action = step.get("action", "")
+
+                step_analyses: dict[str, dict] = {}
+                # Model 1: Generator — full claim extraction + matching
+                gen_model = body.models[0]
+                gen_analysis = await analyze_chunk_utilization_claim(
+                    chunks=chunks,
+                    answer_text=answer_text,
+                    threshold=body.threshold,
+                    model=gen_model,
+                    max_concurrent=body.max_concurrent,
+                    query_id=query_id,
+                    entailment_model=body.models[1] if len(body.models) > 1 else None,
+                )
+                step_analyses[gen_model] = gen_analysis
+
+                # Model 2: Judge — reviews the generator's analysis (if provided)
+                if len(body.models) > 1:
+                    judge_model = body.models[1]
+                    if query_id:
+                        prog = _analysis_progress.get(query_id, {"done": 0, "total": 0})
+                        _analysis_progress[query_id] = {"done": prog["done"], "total": prog["total"] + 1}
+
+                    judge_result = await review_analysis_with_judge(
+                        answer_text=answer_text,
+                        chunks=chunks,
+                        generator_results=gen_analysis,
+                        model=judge_model,
+                        query_id=query_id,
+                    )
+
+                    if query_id:
+                        _analysis_progress[query_id]["done"] += 1
+
+                    step_analyses["_judge"] = {
+                        "model": judge_model,
+                        "review_text": judge_result["review_text"],
+                        "confidence": judge_result["confidence"],
+                    }
+
+                results.append({
+                    "step_index": step_i,
+                    "step_label": f"Schritt {step_i + 1}" + (f": {action}" if action else ""),
+                    "action": action,
+                    "chunk_count": len(chunks),
+                    "analyses": step_analyses,
+                })
+            _analysis_results[query_id] = {
+                "status": "done",
+                "data": {
+                    "query_id": query_id,
+                    "query_text": row["query_text"],
+                    "answer_preview": answer_text[:200],
+                    "threshold": body.threshold,
+                    "mode": "claim",
+                    "models": body.models,
+                    "steps": results,
+                },
+            }
+        except Exception as exc:
+            logger.exception(f"Analysis failed for query {query_id}")
+            error_msg = str(exc) or type(exc).__name__
+            _analysis_results[query_id] = {"status": "error", "error": error_msg}
+        finally:
+            _analysis_progress.pop(query_id, None)
+
+    asyncio.create_task(_run_analysis())
+    return {"status": "started"}
+
+
+# ── Metrics Dashboard ────────────────────────────────────────
+
+@router.get("/metrics")
+async def get_metrics(use_case: str = "", limit: int = 50):
+    """Return queries with computed metrics for the evaluation dashboard."""
+    pool = await get_pool()
+    if use_case:
+        rows = await pool.fetch(
+            """SELECT id, use_case, session_id, role, query_text, answer_text,
+                      agent_steps, citations, images, sufficient, scores, created_at
+               FROM queries
+               WHERE use_case = $1
+               ORDER BY created_at DESC
+               LIMIT $2""",
+            use_case, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """SELECT id, use_case, session_id, role, query_text, answer_text,
+                      agent_steps, citations, images, sufficient, scores, created_at
+               FROM queries
+               ORDER BY created_at DESC
+               LIMIT $1""",
+            limit,
+        )
+
+    items = []
+    for r in rows:
+        agent_steps = json.loads(r["agent_steps"]) if r["agent_steps"] else []
+        citations = json.loads(r["citations"]) if r["citations"] else []
+        scores = json.loads(r["scores"]) if r["scores"] else {}
+
+        # Count total chunks across all steps
+        total_chunks = sum(len(s.get("chunks", [])) for s in agent_steps)
+
+        # Count sub-tasks from subagent_ids in steps
+        subagent_ids = set()
+
+        # New: total tokens and best retrieval quality
+        total_tokens = 0
+        has_tokens = False
+        max_rq = -1.0
+        has_rq = False
+
+        for s in agent_steps:
+            sid = s.get("subagent_id")
+            if sid:
+                subagent_ids.add(sid)
+
+            # Tokens
+            llm = s.get("llm_timing") or {}
+            pt = llm.get("prompt_tokens")
+            ct = llm.get("completion_tokens")
+            if pt is not None or ct is not None:
+                has_tokens = True
+                total_tokens += int(pt or 0) + int(ct or 0)
+
+            # Retrieval quality: best rerank_score across all chunks
+            for c in s.get("chunks", []):
+                sq = c.get("rerank_score") or c.get("score")
+                if sq is not None:
+                    has_rq = True
+                    if sq > max_rq:
+                        max_rq = sq
+
+        # Extract compliance data from agent steps
+        compliance_verdict = None
+        compliance_issues_count = 0
+        compliance_category_counts: dict[str, int] = {
+            "citation_coverage": 0, "source_authenticity": 0,
+            "hallucination": 0, "use_case_policy": 0, "unknown": 0,
+        }
+        for s in agent_steps:
+            if s.get("action") == "COMPLIANCE_CHECK":
+                args = s.get("args", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+                if isinstance(args, dict):
+                    compliance_verdict = args.get("verdict")
+                    compliance_issues_count = len(args.get("issues", []))
+                    classified = args.get("classified_issues", [])
+                    for ci in classified:
+                        if isinstance(ci, dict):
+                            cat = ci.get("category", "unknown")
+                            compliance_category_counts[cat] = compliance_category_counts.get(cat, 0) + 1
+                    if not classified and compliance_issues_count > 0:
+                        compliance_category_counts["unknown"] += compliance_issues_count
+                break
+        # Fallback: check scores for older queries
+        if not compliance_verdict:
+            compliance_verdict = scores.get("compliance_verdict")
+
+        items.append({
+            "id": str(r["id"]),
+            "use_case": r["use_case"],
+            "session_id": str(r["session_id"]) if r["session_id"] else None,
+            "role": r["role"],
+            "query_text": r["query_text"],
+            "answer_text": (r["answer_text"] or "")[:200],  # truncated for table
+            "answer_length": len(r["answer_text"] or ""),
+            "step_count": len(agent_steps),
+            "subtask_count": len(subagent_ids) or 1,
+            "chunk_count": total_chunks,
+            "citation_count": len(citations),
+            "sufficient": r["sufficient"],
+            "processing_ms": scores.get("processing_ms"),
+            "compliance_verdict": compliance_verdict,
+            "compliance_issues_count": compliance_issues_count,
+            "compliance_category_counts": compliance_category_counts,
+            "merge_strategy": scores.get("merge_strategy"),
+            "model": scores.get("model"),
+            "llm_provider": scores.get("llm_provider"),
+            "total_tokens": total_tokens if has_tokens else None,
+            "retrieval_quality": max_rq if has_rq else None,
+            "agent_steps": agent_steps,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+
+    # Compliance totals
+    compliance_total = sum(1 for it in items if it.get("compliance_verdict"))
+    compliance_ok = sum(1 for it in items if it.get("compliance_verdict") == "OK")
+    compliance_rewrite = sum(1 for it in items if it.get("compliance_verdict") == "REWRITE")
+    compliance_refuse = sum(1 for it in items if it.get("compliance_verdict") == "REFUSE")
+    compliance_total_issues = sum(it.get("compliance_issues_count", 0) for it in items)
+    compliance_category_totals: dict[str, int] = {}
+    for it in items:
+        for cat, count in it.get("compliance_category_counts", {}).items():
+            compliance_category_totals[cat] = compliance_category_totals.get(cat, 0) + count
+
+    # Summary stats
+    if items:
+        avg_steps = sum(it["step_count"] for it in items) / len(items)
+        avg_chunks = sum(it["chunk_count"] for it in items) / len(items)
+        avg_answer_len = sum(it["answer_length"] for it in items) / len(items)
+        sufficient_count = sum(1 for it in items if it["sufficient"])
+        avg_processing = sum(it["processing_ms"] or 0 for it in items) / max(1, sum(1 for it in items if it["processing_ms"]))
+        token_items = [it["total_tokens"] for it in items if it["total_tokens"] is not None]
+        avg_tokens = sum(token_items) / len(token_items) if token_items else None
+        rq_items = [it["retrieval_quality"] for it in items if it["retrieval_quality"] is not None]
+        avg_rq = sum(rq_items) / len(rq_items) if rq_items else None
+    else:
+        avg_steps = avg_chunks = avg_answer_len = avg_processing = 0
+        sufficient_count = 0
+        avg_tokens = avg_rq = None
+
+    return {
+        "queries": items,
+        "summary": {
+            "total": len(items),
+            "avg_steps": round(avg_steps, 1),
+            "avg_chunks": round(avg_chunks, 1),
+            "avg_answer_length": round(avg_answer_len, 0),
+            "sufficient_count": sufficient_count,
+            "sufficient_pct": round(sufficient_count / max(1, len(items)) * 100, 1),
+            "avg_processing_ms": round(avg_processing, 0) if avg_processing else None,
+            "avg_total_tokens": round(avg_tokens, 0) if avg_tokens else None,
+            "avg_retrieval_quality": round(avg_rq, 3) if avg_rq else None,
+            "compliance_total": compliance_total,
+            "compliance_ok": compliance_ok,
+            "compliance_rewrite": compliance_rewrite,
+            "compliance_refuse": compliance_refuse,
+            "compliance_total_issues": compliance_total_issues,
+            "compliance_category_totals": compliance_category_totals,
+        },
+    }

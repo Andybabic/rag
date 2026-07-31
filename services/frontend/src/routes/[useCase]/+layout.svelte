@@ -47,6 +47,7 @@
 		{ id: 'tabelle' as const, label: 'Tabelle', icon: '&#128196;', href: '/tabelle' },
 		{ id: 'documents' as const, label: 'Dokumente', icon: '&#128196;', href: '/documents' },
 		{ id: 'history' as const, label: 'Verlauf', icon: '&#128337;', href: '/history' },
+		{ id: 'eval' as const, label: 'Eval', icon: '&#128202;', href: '/eval' },
 		{ id: 'settings' as const, label: 'Einstellungen', icon: '&#9881;', href: '/settings' }
 	];
 

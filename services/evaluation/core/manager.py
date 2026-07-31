@@ -27,6 +27,7 @@ from typing import Awaitable, Callable, Optional
 from core.agent import run_agent
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
+from shared.llm.pipeline import get_last_llm_timing, reset_llm_timing
 from shared.usecase_config import resolve_config
 from core.roles import (
     DEFAULT_ROLE,
@@ -368,6 +369,46 @@ Kein Vor- oder Nachspann, nur das JSON.
 """
 
 
+# Compliance issue keyword classification
+_COMPLIANCE_KEYWORDS: dict[str, list[str]] = {
+    "citation_coverage": [
+        "zitat", "citation", "[n]", "referenz", "verweis",
+        "quelle nicht angegeben", "fehlende quellenangabe", "unbelegt",
+        "fehlende zitation", "zitierung fehlt", "ohne quellenangabe",
+        "quellenbezeichnung", "quellenangabe", "quellenverweis",
+        "ziffer", "fehlende nummer", "fehlende ziffer",
+    ],
+    "source_authenticity": [
+        "falsche quelle", "belegkraft", "echtheit",
+        "nicht belegbar", "widerspruch", "widerspricht",
+        "stuetzt nicht", "beweist nicht",
+        "falsch zitiert", "falsch wiedergegeben",
+        "inkonsistenz", "widerspruechlich",
+    ],
+    "hallucination": [
+        "halluzin", "erfunden", "frei erfunden", "nicht in chunk",
+        "existiert nicht", "kein chunk", "fiktiv",
+        "existier", "nicht vorhanden", "gibt es nicht",
+        "nicht existier", "nicht-existier",
+    ],
+    "use_case_policy": [
+        "richtlinie", "policy", "vorgabe", "satzlaenge", "format",
+        "regel", "irrelevant", "meta-kommentar", "meta-kommentare",
+        "grenze", "max.", "antwort-format", "laenge", "ton",
+        "umgangssprache", "nicht erlaubt", "nicht zulaessig",
+        "verstoss", "anforderung", "soll", "muss", "darf nicht",
+        "unklar", "zuordnung", "unverstaendlich", "mapping",
+        "thema verfehlt", "passt nicht", "ungeeignet",
+    ],
+}
+
+_CATEGORY_LABELS: dict[str, str] = {
+    "citation_coverage": "Zitierabdeckung",
+    "source_authenticity": "Quellenechtheit",
+    "hallucination": "Halluzination",
+    "use_case_policy": "Use-Case-Richtlinie",
+}
+
 _SYNTHESIZER_SYSTEM_TEMPLATE = """Du bist der Synthesizer-Agent.
 
 Du bekommst die Originalfrage des Nutzers, eine Liste von Antwort-
@@ -603,6 +644,151 @@ def _concat_fragments_fallback(subagents: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+
+async def _classify_via_llm(issues: list[str]) -> list[dict]:
+    """Classify unmatched issues with llama.cpp."""
+    import httpx
+
+    if not issues:
+        return []
+
+    # Build numbered issue list for the prompt
+    issues_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(issues))
+
+    system_prompt = (
+        "Du bist ein Klassifizierer fuer Compliance-Probleme eines RAG-Systems. "
+        "Ordne jedes Problem GENAU EINER der folgenden Kategorien zu:\n\n"
+        "1. ZITIERABDECKUNG - fehlende oder unzureichende Quellenangaben/Zitationen\n"
+        "2. QUELLENECHTHEIT - zitierte Quellen belegen die Aussage nicht oder widersprechen ihr\n"
+        "3. HALLUZINATION - erfundene Fakten, die in keinen Chunks existieren\n"
+        "4. USE_CASE_RICHTLINIE - Verstoss gegen Format-, Laengen-, Relevanz- oder Ton-Vorgaben\n\n"
+        "Antworte NUR mit JSON-Array, kein Markdown, kein Vor-/Nachspann:\n"
+        '[{"issue": 1, "category": "ZITIERABDECKUNG"}, ...]'
+    )
+
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": issues_text},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 256,
+        "model": "Qwen3.5-0.8B",
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            "http://172.19.0.1:8081/v1/chat/completions",
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
+
+    # Parse JSON response
+    # Strip markdown fences if present
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    raw = re.sub(r"\s*```$", "", raw.strip())
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # Try to extract JSON array via regex
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+        else:
+            logger.warning(f"LLM classification parse failed: {raw[:200]}")
+            return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    # Map LLM categories back to our keys
+    CAT_MAP = {
+        "ZITIERABDECKUNG": "citation_coverage",
+        "QUELLENECHTHEIT": "source_authenticity",
+        "HALLUZINATION": "hallucination",
+        "USE_CASE_RICHTLINIE": "use_case_policy",
+    }
+
+    results = []
+    for item in parsed:
+        cat = item.get("category", "").upper().strip()
+        cat_key = None
+        for llm_cat, our_key in CAT_MAP.items():
+            if llm_cat in cat:
+                cat_key = our_key
+                break
+
+        results.append({
+            "text": issues[item.get("issue", 1) - 1] if item.get("issue") else "",
+            "category": cat_key or "unknown",
+            "category_label": _CATEGORY_LABELS.get(cat_key or "unknown", "Unbekannt"),
+            "confidence": 70.0,
+            "nli_label": "LLM",
+        })
+
+    return results
+
+
+async def _classify_compliance_issues(issues: list[str]) -> list[dict]:
+    """Classify each compliance issue. Keywords first, llama.cpp fallback if no match."""
+    if not issues:
+        return []
+
+    results: list[dict] = []
+    unknown_indices: list[int] = []
+
+    # Try keyword matching first
+    for i, issue_text in enumerate(issues):
+        text_lower = issue_text.lower()
+        scores: dict[str, int] = {}
+        for cat_key, keywords in _COMPLIANCE_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            scores[cat_key] = score
+
+        best_cat = max(scores, key=scores.get)
+        best_score = scores[best_cat]
+
+        if best_score >= 1:
+            conf = 60.0 if best_score == 1 else 80.0 if best_score == 2 else 95.0
+            results.append({
+                "text": issue_text,
+                "category": best_cat,
+                "category_label": _CATEGORY_LABELS.get(best_cat, "Unbekannt"),
+                "confidence": conf,
+                "nli_label": "KEYWORD",
+            })
+        else:
+            unknown_indices.append(i)
+            results.append({})  # placeholder
+
+    # Use LLM for anything keywords missed
+    if unknown_indices:
+        unknown_issues = [issues[idx] for idx in unknown_indices]
+        try:
+            llm_results = await _classify_via_llm(unknown_issues)
+        except Exception:
+            logger.warning("LLM classification fallback failed")
+            llm_results = []
+
+        for j, idx in enumerate(unknown_indices):
+            if j < len(llm_results) and llm_results[j] and llm_results[j].get("category") != "unknown":
+                results[idx] = llm_results[j]
+            else:
+                results[idx] = {
+                    "text": issues[idx],
+                    "category": "unknown",
+                    "category_label": "Unbekannt",
+                    "confidence": 0.0,
+                    "nli_label": "LLM_FAILED",
+                }
+
+    return results
+
+
 async def check_compliance(
     *,
     answer: str,
@@ -618,7 +804,7 @@ async def check_compliance(
     answers because the checker itself broke).
     """
     if not answer.strip():
-        return {"verdict": "OK", "issues": [], "guidance": ""}
+        return {"verdict": "OK", "issues": [], "classified_issues": [], "guidance": ""}
 
     if on_event:
         await on_event({"type": "compliance", "phase": "started"})
@@ -639,20 +825,24 @@ async def check_compliance(
         logger.warning(f"Compliance LLM failed: {exc} — passing through")
         if on_event:
             await on_event({"type": "compliance", "phase": "error", "detail": str(exc)})
-        return {"verdict": "OK", "issues": [], "guidance": ""}
+        return {"verdict": "OK", "issues": [], "classified_issues": [], "guidance": ""}
 
     parsed = _extract_json(raw)
     if not isinstance(parsed, dict):
         if on_event:
             await on_event({"type": "compliance", "phase": "done",
-                            "verdict": "OK", "issues": [], "guidance": ""})
+                            "verdict": "OK", "issues": [], "classified_issues": [], "guidance": ""})
         return {"verdict": "OK", "issues": [], "guidance": ""}
 
     verdict = parsed.get("verdict") if parsed.get("verdict") in ("OK", "REWRITE", "REFUSE") else "OK"
     issues = parsed.get("issues") if isinstance(parsed.get("issues"), list) else []
     guidance = parsed.get("guidance") if isinstance(parsed.get("guidance"), str) else ""
 
-    result = {"verdict": verdict, "issues": issues, "guidance": guidance}
+    # Classify issues via NLI if any
+    # Classify issues via NLI if any (with fallback — don't crash compliance on NLI failure)
+    classified_issues = await _classify_compliance_issues(issues) if issues else []
+
+    result = {"verdict": verdict, "issues": issues, "classified_issues": classified_issues, "guidance": guidance}
     if on_event:
         await on_event({"type": "compliance", "phase": "done", **result})
     return result
@@ -671,6 +861,114 @@ def _clean_synthesized(text: str) -> str:
     text = re.sub(r"\s*```\s*$", "", text)
     text = _SYNTH_CLEANUP_RE.sub("", text)
     return text.strip(' "\n')
+
+
+# ── Chunk similarity enrichment ─────────────────────────────────────────────
+
+async def _enrich_chunk_similarities(subagents: list[dict], global_chunks: list[dict], final_answer: str) -> None:
+    """Compute similarity_to_rank_1 and answer_similarity for every chunk.
+
+    Calls the embedding service once for all chunk texts + the final answer,
+    then computes cosine similarity (dot product on normalised vectors) and
+    stores the results directly on each chunk dict in every sub-agent step.
+    """
+    import httpx
+    import numpy as np
+
+    if not final_answer.strip():
+        return
+
+    # Collect every chunk from every step. We track (text → list of chunk
+    # dicts) so we can update duplicates in-place after embedding.
+    text_to_chunks: dict[str, list[dict]] = {}
+    all_texts: list[str] = []
+
+    for sub in subagents:
+        for step in sub.get("agent_steps", []):
+            for chunk in step.get("chunks") or []:
+                text = (chunk.get("text") or "").strip()
+                if not text:
+                    continue
+                if text in text_to_chunks:
+                    text_to_chunks[text].append(chunk)
+                else:
+                    text_to_chunks[text] = [chunk]
+                    all_texts.append(text)
+
+    # Also collect from global_chunks (used by SYNTHESIZE step)
+    for chunk in global_chunks:
+        text = (chunk.get("text") or "").strip()
+        if not text:
+            continue
+        if text in text_to_chunks:
+            text_to_chunks[text].append(chunk)
+        else:
+            text_to_chunks[text] = [chunk]
+            all_texts.append(text)
+
+    if not all_texts:
+        return
+
+    # Build batch: chunk texts + final answer as the last entry
+    batch = [{"chunk_id": str(i), "content": t} for i, t in enumerate(all_texts)]
+    answer_idx = len(batch)
+    batch.append({"chunk_id": "answer", "content": final_answer})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "http://embedding:8003/v1/embed/batch",
+                json={"chunks": batch},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning(f"Chunk similarity enrichment failed (embedding): {exc}")
+        return
+
+    embeddings_list: list = data.get("embeddings", [])
+    if len(embeddings_list) != len(batch):
+        logger.warning(
+            "Chunk similarity enrichment: embedding count mismatch "
+            f"({len(embeddings_list)} vs {len(batch)})"
+        )
+        return
+
+    # Build text → normalised vector map
+    text_to_vec: dict[str, "np.ndarray"] = {}
+    for i, emb in enumerate(embeddings_list):
+        vec_raw = emb.get("vector", [])
+        if not vec_raw:
+            continue
+        vec = np.array(vec_raw, dtype=np.float64)
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        text_to_vec[batch[i]["content"]] = vec
+
+    answer_vec = text_to_vec.get(final_answer)
+    if answer_vec is None:
+        return
+
+    # Rank-1 = chunk with the highest rerank_score (not just first in iteration)
+    _best_score = -1.0
+    rank1_text: str | None = None
+    for text in all_texts:
+        for chunk in text_to_chunks.get(text, []):
+            s = chunk.get("rerank_score") or chunk.get("score") or 0.0
+            if s > _best_score:
+                _best_score = s
+                rank1_text = text
+    rank1_vec = text_to_vec.get(rank1_text) if rank1_text else None
+
+    for text, vec in text_to_vec.items():
+        if text == final_answer:
+            continue
+        sim_r1 = round(float(np.dot(vec, rank1_vec)), 4) if rank1_vec is not None else None
+        sim_ans = round(float(np.dot(vec, answer_vec)), 4)
+        for chunk in text_to_chunks.get(text, []):
+            chunk["similarity_to_rank_1"] = sim_r1
+            chunk["answer_similarity"] = sim_ans
 
 
 # ── Top-level entry point ───────────────────────────────────────────────────
@@ -708,11 +1006,15 @@ async def run_manager(
         await on_event({"type": "started", "stage": "manager"})
 
     plan = await plan_subtasks(query, use_case=use_case, history=history)
+    _plan_llm_timing = get_last_llm_timing()
+    _plan_dur = round((time.perf_counter() - _t0) * 1000)
     if on_event:
         await on_event({"type": "manager_plan", **plan})
 
     # Fan-out — run sub-agents in parallel. Each gets a stable ``sub_id``
     # used by the frontend to group their events.
+    # Reset timing: sub-agents will fill it with their own LLM calls;
+    # we want the synthesize timing to be clean afterwards.
     subagent_coros = []
     for i, st in enumerate(plan["subtasks"], 1):
         role = get_role(st["role"])
@@ -736,6 +1038,8 @@ async def run_manager(
     subagents = await asyncio.gather(*subagent_coros)
 
     # Synthesize
+    _synth_start = time.perf_counter()
+    reset_llm_timing()  # guard against synthesize skipping the LLM call
     final_answer, global_chunks = await synthesize(
         query=query,
         plan=plan,
@@ -743,8 +1047,12 @@ async def run_manager(
         use_case=use_case,
         on_event=on_event,
     )
+    _synth_llm_timing = get_last_llm_timing()
+    _synth_dur = round((time.perf_counter() - _synth_start) * 1000)
 
     # Compliance check + optional one-shot rewrite
+    _compliance_start = time.perf_counter()
+    reset_llm_timing()  # guard against compliance skipping the LLM call
     compliance = await check_compliance(
         answer=final_answer,
         global_chunks=global_chunks,
@@ -752,7 +1060,20 @@ async def run_manager(
         use_case=use_case,
         on_event=on_event,
     )
+    _compliance_llm_timing = get_last_llm_timing()
+    _compliance_dur = round((time.perf_counter() - _compliance_start) * 1000)
+    # Fallback: when the LLM call fails (e.g. Ollama 504), _capture_llm_timing
+    # was never called and get_last_llm_timing() returns {}. Use wall-clock
+    # duration so the UI still shows timing instead of nothing.
+    if not _compliance_llm_timing or not _compliance_llm_timing.get("total_ms"):
+        _compliance_llm_timing = {
+            "total_ms": _compliance_dur,
+            "load_ms": 0, "pp_ms": 0, "tp_ms": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+        }
     if compliance["verdict"] == "REWRITE" and global_chunks:
+        _synth_start2 = time.perf_counter()
+        reset_llm_timing()
         final_answer, _ = await synthesize(
             query=query,
             plan=plan,
@@ -762,6 +1083,8 @@ async def run_manager(
             compliance_guidance=compliance.get("guidance", "") or
                 "; ".join(compliance.get("issues") or []),
         )
+        _synth_llm_timing = get_last_llm_timing()
+        _synth_dur = round((time.perf_counter() - _synth_start2) * 1000)
         # Re-check is intentionally skipped — a single rewrite pass keeps
         # latency bounded. Surface the original verdict so the UI sees that
         # a correction took place.
@@ -815,6 +1138,9 @@ async def run_manager(
     for sub in subagents:
         searched.update(sub.get("searched_collections") or [])
 
+    # Enrich chunks with similarity metrics (uses embedding service)
+    await _enrich_chunk_similarities(list(subagents), global_chunks, final_answer)
+
     # Flattened compatibility trace so the existing DB column + old UI keep
     # showing *something* sensible. The hierarchical UI uses ``subagents``
     # directly; this list is for fallback display only.
@@ -825,6 +1151,8 @@ async def run_manager(
         "args": {"subtasks": plan["subtasks"], "merge_strategy": plan["merge_strategy"]},
         "observation": f"{len(plan['subtasks'])} Sub-Task(s) erzeugt.",
         "chunks": [],
+        "duration_ms": _plan_dur,
+        "llm_timing": _plan_llm_timing if _plan_llm_timing else None,
     }]
     for sub in subagents:
         for s in sub.get("agent_steps", []):
@@ -838,6 +1166,20 @@ async def run_manager(
                  "global_chunk_count": len(global_chunks)},
         "observation": final_answer[:300],
         "chunks": global_chunks[:7],
+        "duration_ms": _synth_dur,
+        "llm_timing": _synth_llm_timing if _synth_llm_timing else None,
+    })
+    flat_steps.append({
+        "step": len(flat_steps),
+        "thought": f"Prüfe Antwort auf Halluzinationen, Citation-Coverage und Policy-Verstöße",
+        "action": "COMPLIANCE_CHECK",
+        "args": {"verdict": compliance["verdict"],
+                 "issues": compliance.get("issues", []),
+                 "classified_issues": compliance.get("classified_issues", [])},
+        "observation": compliance.get("guidance", "") or "OK" if compliance["verdict"] == "OK" else compliance["verdict"],
+        "chunks": [],
+        "duration_ms": _compliance_dur,
+        "llm_timing": _compliance_llm_timing if _compliance_llm_timing else None,
     })
 
     sufficient = bool(global_chunks) and any(
@@ -859,6 +1201,17 @@ async def run_manager(
         _audit = {}
     _audit["generated_at"] = datetime.now(timezone.utc).isoformat()
     _audit["processing_ms"] = round((time.perf_counter() - _t0) * 1000)
+    _audit["step_count"] = len(flat_steps)
+    _audit["subtask_count"] = len(plan["subtasks"])
+    _audit["chunk_count"] = len(global_chunks)
+    _audit["citation_count"] = len(citations)
+    _audit["answer_length"] = len(final_answer)
+    _audit["compliance_verdict"] = compliance["verdict"]
+    _audit["compliance_issues_count"] = len(compliance.get("issues", []))
+    _audit["compliance_classified_issues"] = compliance.get("classified_issues", [])
+    _audit["merge_strategy"] = plan["merge_strategy"]
+    _audit["sufficient"] = sufficient
+    _audit["searched_collections_count"] = len(searched)
 
     result = {
         "answer": final_answer,

@@ -28,6 +28,10 @@ def _normalize_images(messages: list[dict]) -> list[dict]:
 
 @register("ollama")
 class OllamaProvider(LLMProvider):
+    def __init__(self, config):
+        super().__init__(config)
+        self.last_token_counts: dict = {}
+
     def _headers(self) -> dict[str, str]:
         if self.config.ollama_api_key:
             return {"X-API-Key": self.config.ollama_api_key}
@@ -55,7 +59,17 @@ class OllamaProvider(LLMProvider):
                     },
                 )
                 resp.raise_for_status()
-                return resp.json()["message"]["content"]
+                data = resp.json()
+                # Capture token counts from Ollama response
+                self.last_token_counts = {
+                    "prompt_eval_count": data.get("prompt_eval_count", 0),
+                    "eval_count": data.get("eval_count", 0),
+                    "prompt_eval_duration": data.get("prompt_eval_duration", 0),
+                    "eval_duration": data.get("eval_duration", 0),
+                    "total_duration": data.get("total_duration", 0),
+                    "load_duration": data.get("load_duration", 0),
+                }
+                return data["message"]["content"]
         except httpx.ConnectError as exc:
             raise LLMUnavailableError(
                 f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
@@ -109,10 +123,6 @@ class OllamaProvider(LLMProvider):
         *,
         model: str,
     ) -> str:
-        # Ollama-Doku: Vision-Modelle erwarten Bilder im /api/chat-Endpoint
-        # *innerhalb* des message-Objekts. Der frühere /api/generate-Pfad
-        # mit images im Top-Level wurde von einigen VL-Modellen ignoriert,
-        # sodass nur der Text-Prompt verarbeitet wurde.
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
@@ -135,9 +145,13 @@ class OllamaProvider(LLMProvider):
                     },
                 )
                 resp.raise_for_status()
-                return (
-                    resp.json().get("message", {}).get("content", "").strip()
-                )
+                data = resp.json()
+                # Capture token counts
+                self.last_token_counts = {
+                    "prompt_eval_count": data.get("prompt_eval_count", 0),
+                    "eval_count": data.get("eval_count", 0),
+                }
+                return data.get("message", {}).get("content", "").strip()
         except httpx.ConnectError as exc:
             raise LLMUnavailableError(
                 f"Ollama not reachable at {self.config.ollama_base_url}: {exc}"
