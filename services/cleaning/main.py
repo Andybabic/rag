@@ -6,6 +6,7 @@ from router.v1 import router as v1_router
 from shared.errors import handle_error
 from shared.logging import setup_logging
 from shared.tracing import RequestIDMiddleware
+from shared.phoenix import setup_phoenix
 
 SERVICE_NAME = "cleaning-service"
 VERSION = "1.0.0"
@@ -18,6 +19,7 @@ app = FastAPI(
     version=VERSION,
 )
 app.add_middleware(RequestIDMiddleware)
+setup_phoenix(app, SERVICE_NAME)
 app.include_router(v1_router)
 
 

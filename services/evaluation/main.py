@@ -16,6 +16,7 @@ from shared.auth import ensure_bootstrap_admin
 from shared.errors import handle_error
 from shared.logging import setup_logging
 from shared.tracing import RequestIDMiddleware
+from shared.phoenix import setup_phoenix
 from shared.usecase_config import set_pool as set_resolver_pool
 
 SERVICE_NAME = "evaluation-service"
@@ -49,6 +50,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(RequestIDMiddleware)
+setup_phoenix(app, SERVICE_NAME)
 app.include_router(v1_router)
 app.include_router(admin_router)
 app.include_router(auth_router)

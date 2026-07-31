@@ -7,6 +7,7 @@
 		updateAction,
 		getConfig,
 		updateConfig,
+		listModels,
 		listPromptKeys,
 		updatePromptKey,
 		listSkills,
@@ -78,6 +79,8 @@
 	let openaiApiKey = $state('');
 	let llmModel = $state('');
 	let visionModel = $state('');
+	let availableModels: string[] = $state([]);
+	let modelsLoading = $state(false);
 	let temperature = $state<number | ''>('');
 	let maxTokens = $state<number | ''>('');
 	let agentMaxSteps = $state<number | ''>('');
@@ -103,6 +106,17 @@
 	let createSkillError = $state('');
 
 	// ── Loaders ─────────────────────────────────────────────
+
+	async function loadModels() {
+		modelsLoading = true;
+		try {
+			const data = await listModels();
+			availableModels = data.models ?? [];
+		} catch {
+			availableModels = [];
+		}
+		modelsLoading = false;
+	}
 
 	async function loadConfig() {
 		cfgLoading = true;
@@ -383,6 +397,7 @@
 		app.useCase;
 		app.role;
 		loadConfig();
+		loadModels();
 		loadPrompts();
 		loadSkills();
 		loadMemory();
@@ -471,12 +486,28 @@
 					</label>
 					<label class="flex flex-col gap-1">
 						<span class="text-xs font-medium text-gray-500">LLM-Modell</span>
-						<input
-							type="text"
-							bind:value={llmModel}
-							placeholder="qwen3:8b"
-							class="rounded border border-gray-200 px-2.5 py-1.5 text-sm"
-						/>
+						{#if availableModels.length > 0}
+							<select
+								bind:value={llmModel}
+								class="rounded border border-gray-200 px-2.5 py-1.5 text-sm"
+							>
+								<option value="">– .env Default –</option>
+								{#each availableModels as m}
+									<option value={m}>{m}</option>
+								{/each}
+								{#if llmModel && !availableModels.includes(llmModel)}
+									<option value={llmModel}>{llmModel} (aktuell)</option>
+								{/if}
+							</select>
+						{:else}
+							<input
+								type="text"
+								bind:value={llmModel}
+								placeholder={modelsLoading ? 'Laden...' : 'qwen3:8b'}
+								class="rounded border border-gray-200 px-2.5 py-1.5 text-sm"
+								disabled={modelsLoading}
+							/>
+						{/if}
 					</label>
 					<label class="flex flex-col gap-1">
 						<span class="text-xs font-medium text-gray-500">Temperature</span>

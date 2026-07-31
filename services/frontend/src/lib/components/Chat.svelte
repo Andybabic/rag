@@ -272,6 +272,7 @@
 							phase: event.phase as ComplianceTrace['phase'],
 							verdict: (event.verdict as ComplianceTrace['verdict']) ?? prev.verdict,
 							issues: (event.issues as string[]) ?? prev.issues,
+							classified_issues: (event.classified_issues as ComplianceTrace['classified_issues']) ?? prev.classified_issues,
 							guidance: (event.guidance as string) ?? prev.guidance,
 							detail: (event.detail as string) ?? prev.detail
 						};
