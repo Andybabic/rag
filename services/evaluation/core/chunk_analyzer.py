@@ -790,6 +790,16 @@ async def analyze_chunk_utilization_claim(
         um["matched_answer_indices"] = new_indices
         um["matched_answer_sims"] = new_sims
         um["entailment_labels"] = labels_for_display
+        # Also include NLI label for best sub-threshold pair (displayed on unmatched claims)
+        if not um.get("matched_answer_indices"):
+            ba = um.get("best_ans_idx", -1)
+            if ba >= 0:
+                key = (ci, ct[:40], ba)
+                if key in autopass_pairs:
+                    labels_for_display[str(ba)] = "ENTAILMENT (autopass)"
+                elif key in entailment_labels_all:
+                    label_dict = entailment_labels_all[key]
+                    labels_for_display[str(ba)] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
 
         # Rebuild chunk_results matched counts from filtered matches
         for ci in sorted(chunk_results.keys()):
