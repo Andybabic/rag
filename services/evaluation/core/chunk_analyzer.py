@@ -129,7 +129,7 @@ def _build_per_chunk_claims(
     ci: int,
     unit_matches: list[dict],
 ) -> list[dict]:
-    """Build per-chunk claim detail list with IDs and matched_to (list of {id, sim})."""
+    """Build per-chunk claim detail list with IDs and matched_to (list of {id, sim}) or best_match for unmatched."""
     chunk_claims: list[dict] = []
     for um in unit_matches:
         if um["chunk_idx"] == ci:
@@ -139,12 +139,21 @@ def _build_per_chunk_claims(
             entailment_lookup = um.get("entailment_labels", {})
             if mas:
                 matched_to = [{"id": f"A{ma + 1}", "sim": s, "entailment": entailment_lookup.get(str(ma), "?")} for ma, s in zip(mas, sims)]
+                best_match = None
             else:
                 matched_to = None
+                ba = um.get("best_ans_idx", -1)
+                bs = um.get("best_sim", 0.0)
+                if ba >= 0 and bs > 0:
+                    ent_label = entailment_lookup.get(str(ba), "?")
+                    best_match = {"id": f"A{ba + 1}", "sim": bs, "entailment": ent_label}
+                else:
+                    best_match = None
             chunk_claims.append({
                 "id": f"C{ci + 1}.{local_idx + 1}",
                 "text": um["text"],
                 "matched_to": matched_to,
+                "best_match": best_match,
             })
     return chunk_claims
 
@@ -672,6 +681,7 @@ async def analyze_chunk_utilization_claim(
     answer_matched_by: dict[int, set[int]] = {}
     answer_best_sim: dict[int, float] = {}
     unit_matches: list[dict] = []
+    chunk_best: dict[int, tuple[int, float]] = {}  # claim_map index -> (best_ans_idx, best_sim)
 
     for i, (ci, claim_text) in enumerate(claim_map):
         if ci not in chunk_results:
@@ -685,6 +695,8 @@ async def analyze_chunk_utilization_claim(
 
         vec = claim_vecs[i] if i < len(claim_vecs) else []
         matches: list[dict] = []
+        best_ans = -1
+        best_sim_val = 0.0
 
         if vec:
             for j, ans_vec in enumerate(answer_vecs):
@@ -693,9 +705,13 @@ async def analyze_chunk_utilization_claim(
                 sim = _cosine(vec, ans_vec)
                 if j not in answer_best_sim or sim > answer_best_sim[j]:
                     answer_best_sim[j] = sim
+                if sim > best_sim_val:
+                    best_sim_val = sim
+                    best_ans = j
                 if sim >= threshold:
                     matches.append({"ans_idx": j, "sim": round(sim, 4)})
         matches.sort(key=lambda m: m["sim"], reverse=True)
+        chunk_best[i] = (best_ans, best_sim_val)
 
         matched = len(matches) > 0
         if matched:
@@ -704,12 +720,16 @@ async def analyze_chunk_utilization_claim(
             for m in matches:
                 answer_matched_by.setdefault(m["ans_idx"], set()).add(claim_id)
 
-        unit_matches.append({
+        um = {
             "chunk_idx": ci,
             "text": claim_text[:200],
             "matched_answer_indices": [m["ans_idx"] for m in matches] if matched else [],
             "matched_answer_sims": [m["sim"] for m in matches] if matched else [],
-        })
+        }
+        if not matched and best_ans >= 0:
+            um["best_ans_idx"] = best_ans
+            um["best_sim"] = round(best_sim_val, 4)
+        unit_matches.append(um)
 
     # 5b. NLI entailment verification via local DeBERTa-v3 model (fast + deterministic)
     COSINE_AUTOPASS = 0.90
@@ -724,6 +744,11 @@ async def analyze_chunk_utilization_claim(
                     autopass_pairs.add((ci, ct[:40], ai))
                 else:
                     ent_pairs_meta.append((ci, ct, ai, ct[:40], answer_claims_texts[ai]))
+        # Also run NLI on best sub-threshold pair for unmatched claims
+        if not um.get("matched_answer_indices"):
+            ba = um.get("best_ans_idx", -1)
+            if ba >= 0 and ba < len(answer_claims_texts):
+                ent_pairs_meta.append((ci, ct, ba, ct[:40], answer_claims_texts[ba]))
 
     # Run local NLI model on all pairs (single call, batched internally)
     ent_pairs_text: list[tuple[str, str]] = [(ct, at) for (_, ct, _, _, at) in ent_pairs_meta]

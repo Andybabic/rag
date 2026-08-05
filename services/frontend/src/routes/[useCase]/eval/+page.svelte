@@ -733,7 +733,9 @@
 																			<div class="rounded px-2 py-1 text-[9px] leading-relaxed {matchedBy.length > 1 ? 'bg-amber-50' : matchedBy.length === 0 ? 'bg-red-50' : 'bg-green-50'}">
 																				<div class="flex items-start gap-1.5">
 																					<span class="font-semibold text-gray-500 whitespace-nowrap mt-px">{a.id as string}</span>
-																					{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[8px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}{#if (a.category_confidence as number) != null} <span class="font-normal opacity-60">NLI: {a.category_confidence as number}%</span>{/if}</span>{/if}
+																					{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[8px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}      {#if (a.category_confidence as number) != null} 
+         <span class="font-normal opacity-60">{a.category_confidence as number}%</span>
+       {/if}</span>{/if}
 																					<span class="text-gray-600 break-words">{(a.text as string)?.substring(0, 200)}</span>
 																				</div>
 																				<div class="mt-0.5">
@@ -770,7 +772,9 @@
 															{@const matchedBy = (a.matched_by_chunks as string[]) || []}
 															<div class="rounded px-2 py-1 text-[10px] leading-relaxed {matchedBy.length > 1 ? 'bg-amber-50' : matchedBy.length === 0 ? 'bg-red-50' : 'bg-green-50'}">
 																<span class="font-semibold text-gray-500">{a.id as string}</span>
-															{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[9px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}{#if (a.category_confidence as number) != null} <span class="font-normal opacity-60">NLI: {a.category_confidence as number}%</span>{/if}</span>{/if}
+															{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[9px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}      {#if (a.category_confidence as number) != null} 
+         <span class="font-normal opacity-60">{a.category_confidence as number}%</span>
+       {/if}</span>{/if}
 																<span class="ml-1 text-gray-600">{(a.text as string)?.substring(0, 150)}</span>
 																{#if matchedBy.length > 1}
 																	<span class="ml-1 text-amber-600 font-semibold">&#9888; Duplicate matches: {matchedBy.slice(0, 8).join(", ")}{#if matchedBy.length > 8} +{matchedBy.length - 8} more{/if}</span>
@@ -849,17 +853,18 @@
 																							{/if}
 																							<div class="max-h-40 overflow-y-auto space-y-0.5">
 																							{#each claims as claim}
-																							{@const cl = claim as Record<string,unknown>}
-																							{@const matchedTo = cl.matched_to as Array<{id: string, sim: number, entailment?: string}> | null}
-																							<div class="flex flex-col gap-0.5 text-[9px] leading-relaxed {matchedTo ? 'text-green-700' : 'text-red-500'}">
+																							{@const cl = claim as Record<string,unknown>}												{@const matchedTo = cl.matched_to as Array<{id: string, sim: number, entailment?: string}> | null}
+												{@const bestMatch = cl.best_match as {id: string, sim: number, entailment?: string} | null}
+												<div class="flex flex-col gap-0.5 text-[9px] leading-relaxed {matchedTo ? 'text-green-700' : (bestMatch ? 'text-amber-600' : 'text-red-500')}">
 																								<div class="flex items-start gap-2">
 																									<span class="font-semibold text-gray-400 whitespace-nowrap">{cl.id as string}</span>
 																									<span class="break-words">{(cl.text as string)?.substring(0, 200)}</span>
 																								</div>
 																								{#if matchedTo && matchedTo.length > 0}
-																									<div class="text-green-500 font-semibold break-words">&rarr; {matchedTo.slice(0, 8).map(m => m.id + " (" + Math.round(m.sim * 100) + "%" + (m.entailment ? ", " + m.entailment : "") + ")").join(", ")}{#if matchedTo.length > 8} +{matchedTo.length - 8} more{/if} &check;</div>
-																								{:else}
-																									<div class="text-red-400">&rarr; &times;</div>
+																									<div class="text-green-500 font-semibold break-words">&rarr; {matchedTo.slice(0, 8).map(m => m.id + " (" + Math.round(m.sim * 100) + "%" + (m.entailment ? ", " + m.entailment : "") + ")").join(", ")}{#if matchedTo.length > 8} +{matchedTo.length - 8} more{/if} &check;</div>												{:else if bestMatch}
+													<div class="break-words">&rarr; {bestMatch.id} ({Math.round(bestMatch.sim * 100)}%{bestMatch.entailment && bestMatch.entailment !== '?' ? ', ' + bestMatch.entailment : ''}) &cross;</div>
+												{:else}
+													<div class="text-red-400">&rarr; &times;</div>
 																								{/if}
 																							</div>
 																						{/each}
