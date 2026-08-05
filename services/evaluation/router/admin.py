@@ -748,7 +748,7 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                 "data": {
                     "query_id": query_id,
                     "query_text": row["query_text"],
-                    "answer_preview": answer_text[:200],
+                    "answer_text": answer_text,
                     "threshold": body.threshold,
                     "mode": "claim",
                     "models": body.models,
@@ -864,7 +864,7 @@ async def get_metrics(use_case: str = "", limit: int = 50):
             "session_id": str(r["session_id"]) if r["session_id"] else None,
             "role": r["role"],
             "query_text": r["query_text"],
-            "answer_text": (r["answer_text"] or "")[:200],  # truncated for table
+            "answer_text": (r["answer_text"] or ""),  # full text
             "answer_length": len(r["answer_text"] or ""),
             "step_count": len(agent_steps),
             "subtask_count": len(subagent_ids) or 1,

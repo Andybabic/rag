@@ -1,4 +1,15 @@
-"""Chunk utilization and answer attribution analysis. Supports sentence-split and LLM claim extraction modes."""
+"""
+Standalone chunk utilization analysis — does NOT touch the query pipeline.
+
+Call after a query completes to get per-chunk utilization and answer attribution.
+
+Two modes:
+- "sentence" (default): split on .!? → embed → cosine. Fast, deterministic.
+- "claim": LLM extracts atomic factual claims via local Ollama (JSON schema) → embed → cosine.
+  Uses /v1/chat/completions with response_format:json_object for JSON output — no regex parsing needed.
+  Calls a local llama.cpp server on spark (not gim-ollama) to avoid reverse-proxy timeouts.
+  Exceptions propagate — no silent fallback.
+"""
 
 from __future__ import annotations
 
@@ -389,6 +400,129 @@ async def _extract_claims_via_llamacpp(
     # Filter: skip empty or too-short claims
     return [c.strip() for c in claims if isinstance(c, str) and len(c.strip()) >= 10]
 
+
+_MAP_CLAIMS_PROMPT = (
+    "You are a text alignment expert. Given an answer text and a list of claims extracted from it, "
+    "for each claim find the EXACT text span in the answer that best matches it. "
+    "The claim may be paraphrased — find the closest actual wording in the answer. "
+    "If a claim's content does NOT appear in the answer at all (not even paraphrased), "
+    "set its text_in_answer to an empty string. "
+    "Return ONLY valid JSON."
+)
+
+_MAP_CLAIMS_USER_TEMPLATE = "ANSWER TEXT:\n<<ANSWER>>\n\nCLAIMS TO LOCATE:\n<<CLAIMS>>"
+
+
+async def _map_claims_to_answer_text(
+    answer_claims: list[dict],
+    answer_text: str,
+    *,
+    model: str = "qwen3.5:9b",
+    timeout: float = 90.0,
+) -> dict[str, str]:
+    """Ask the LLM to find exact text spans in the answer for each claim.
+
+    Returns dict mapping claim_id -> exact_text_in_answer (empty string if not found).
+    """
+    if not answer_claims or not answer_text:
+        return {}
+
+    claims_list = "\n".join(
+        f"[{c['id']}] {c['text']}" for c in answer_claims if c.get("text")
+    )
+    if not claims_list:
+        return {}
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _MAP_CLAIMS_PROMPT},
+            {"role": "user", "content": _MAP_CLAIMS_USER_TEMPLATE.replace("<<ANSWER>>", answer_text[:6000]).replace("<<CLAIMS>>", claims_list[:4000])},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4096,
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "claim_mapping",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "mappings": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "claim_id": {"type": "string"},
+                                    "text_in_answer": {"type": "string"},
+                                },
+                                "required": ["claim_id", "text_in_answer"],
+                            },
+                        }
+                    },
+                    "required": ["mappings"],
+                },
+            },
+        },
+    }
+
+    last_exc = None
+    for attempt in range(3):
+        try:
+            client = _get_llamacpp_client(timeout)
+            resp = await client.post(
+                _LLAMACPP_CHAT_URL,
+                json=payload,
+                headers={"Connection": "keep-alive"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except httpx.ConnectError as exc:
+            last_exc = exc
+            if attempt < 2:
+                logger.warning(
+                    "Claim mapping connection failed (attempt %d/3), retrying in 15s...",
+                    attempt + 1,
+                )
+                await asyncio.sleep(15.0)
+            else:
+                raise
+        except Exception:
+            raise
+    else:
+        raise last_exc  # type: ignore[possibly-unbound]
+
+    msg = data.get("choices", [{}])[0].get("message", {})
+    content_raw = msg.get("content", "") or msg.get("reasoning_content", "")
+    if not content_raw:
+        logger.warning("_map_claims_to_answer_text: empty LLM response")
+        return {}
+
+    try:
+        parsed = json.loads(content_raw)
+    except (json.JSONDecodeError, TypeError):
+        stripped = re.sub(r"```(?:json)?\s*", "", content_raw).strip()
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("_map_claims_to_answer_text: JSON parse failed")
+            return {}
+
+    mappings = parsed.get("mappings", [])
+    result: dict[str, str] = {}
+    for m in mappings:
+        cid = m.get("claim_id", "")
+        tex = m.get("text_in_answer", "")
+        if cid:
+            result[cid] = tex
+
+    logger.info("_map_claims_to_answer_text: mapped %d/%d claims", len(result), len(answer_claims))
+    return result
+
+
 async def analyze_chunk_utilization_claim(
     chunks: list[dict],
     answer_text: str,
@@ -679,6 +813,17 @@ async def analyze_chunk_utilization_claim(
     # 6. Build output
     answer_claims = _build_answer_claims(answer_claims_texts, answer_matched_by, answer_best_sim)
 
+    # 6b. Map claims to exact answer text spans via LLM (for reliable highlighting)
+    try:
+        claim_text_map = await _map_claims_to_answer_text(answer_claims, answer_text, model=model)
+        for ac in answer_claims:
+            mapped = claim_text_map.get(ac["id"], "")
+            ac["text_in_answer"] = mapped if mapped and mapped.strip() else ""
+    except Exception:
+        logger.warning("Claim-to-answer mapping failed, falling back to claim text for highlighting", exc_info=True)
+        for ac in answer_claims:
+            ac["text_in_answer"] = ""
+
     per_chunk: list[dict] = []
     for ci in sorted(chunk_results.keys()):
         cr = chunk_results[ci]
@@ -761,7 +906,10 @@ def _classify_entailment_pairs(pairs: list[tuple[str, str]]) -> list[str]:
     return labels
 
 
-# Judge review — factual summary of the generator's analysis
+# ---------------------------------------------------------------------------
+# Judge Review — second LLM reviews the generator's analysis quality
+# (Now just a factual summary — no LLM involved)
+# ---------------------------------------------------------------------------
 
     "You are a quality reviewer for a RAG (Retrieval-Augmented Generation) evaluation system. "
     "A generator model has extracted atomic factual claims from an answer and from retrieved chunks, "
