@@ -102,6 +102,9 @@ def _build_answer_claims(
     answer_units: list[str],
     answer_matched_by: dict[int, set[int]],
     answer_best_sim: dict[int, float] | None = None,
+    answer_best_nli: dict[int, str] | None = None,
+    categories: list[str] | None = None,
+    confidences: list[int] | None = None,
 ) -> list[dict]:
     """Build answer claims list with IDs and which chunks matched each."""
     answer_claims: list[dict] = []
@@ -110,10 +113,15 @@ def _build_answer_claims(
         claim: dict = {
             "id": f"A{j + 1}",
             "text": unit_text[:200],
+            "category": categories[j] if categories and j < len(categories) else "no_category",
             "matched_by_chunks": matched_by,
         }
+        if confidences and j < len(confidences):
+            claim["category_confidence"] = confidences[j]
         if not matched_by and answer_best_sim and j in answer_best_sim:
             claim["best_similarity"] = round(answer_best_sim[j], 4)
+            if answer_best_nli and j in answer_best_nli:
+                claim["best_nli"] = answer_best_nli[j]
         answer_claims.append(claim)
     return answer_claims
 
@@ -303,22 +311,50 @@ _EXTRACT_SYSTEM_PROMPT = (
 
 _EXTRACT_USER_TEMPLATE = "Text: {text}"
 
+_EXTRACT_CATEGORY_PROMPT = (
+    "You are a fact extractor. Extract all atomic factual claims from the given text. "
+    "For each claim also pick exactly one category from: fact, verified_fact, recommendation, "
+    "conclusion, no_category. fact = plain factual statement; verified_fact = factual statement "
+    "that is explicitly confirmed or verified in the text; recommendation = advice, suggestion or "
+    "proposed action; conclusion = a summarizing or concluding statement; no_category = anything "
+    "that fits none of the above. "
+    "Also provide a confidence score 0-100 for your category choice (100 = completely certain). "
+    "Output ONLY valid JSON in this exact format: "
+    '{"claims": [{"text": "claim text", "category": "fact", "confidence": 95}]}'
+)
+
 async def _extract_claims_via_llamacpp(
     text: str,
     *,
     model: str = "qwen3.5:9b",
     timeout: float = 90.0,
-) -> list[str]:
+    categorize: bool = False,
+) -> list[str] | list[dict]:
     """Call local Ollama via /api/chat with format:"json" for guaranteed valid JSON output."""
     if not text or not text.strip():
         return []
 
     text = text[:2000].strip()
 
+    if categorize:
+        claim_schema: dict = {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "category": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["text", "category"],
+        }
+        system_prompt = _EXTRACT_CATEGORY_PROMPT
+    else:
+        claim_schema = {"type": "string"}
+        system_prompt = _EXTRACT_SYSTEM_PROMPT
+
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _EXTRACT_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": _EXTRACT_USER_TEMPLATE.format(text=text)},
         ],
         "temperature": 0.1,
@@ -397,6 +433,27 @@ async def _extract_claims_via_llamacpp(
             return []
     claims = parsed.get("claims", [])
 
+    if categorize:
+        allowed = {"fact", "verified_fact", "recommendation", "conclusion", "no_category"}
+        out: list[dict] = []
+        for c in claims:
+            if isinstance(c, dict):
+                text = (c.get("text") or "").strip()
+                cat = (c.get("category") or "").strip().lower().replace(" ", "_")
+            else:
+                text = str(c).strip()
+                cat = "no_category"
+            if cat not in allowed:
+                cat = "no_category"
+            raw_conf = c.get("confidence") if isinstance(c, dict) else None
+            if raw_conf is not None and isinstance(raw_conf, (int, float)) and 0 <= raw_conf <= 100:
+                confidence = int(raw_conf)
+            else:
+                confidence = None
+            if len(text) >= 10:
+                out.append({"text": text, "category": cat, "confidence": confidence})
+        return out
+
     # Filter: skip empty or too-short claims
     return [c.strip() for c in claims if isinstance(c, str) and len(c.strip()) >= 10]
 
@@ -405,9 +462,11 @@ _MAP_CLAIMS_PROMPT = (
     "You are a text alignment expert. Given an answer text and a list of claims extracted from it, "
     "for each claim find the EXACT text span in the answer that best matches it. "
     "The claim may be paraphrased — find the closest actual wording in the answer. "
-    "If a claim's content does NOT appear in the answer at all (not even paraphrased), "
-    "set its text_in_answer to an empty string. "
-    "Return ONLY valid JSON."
+    "If a claim's content does NOT appear in the answer at all, output EMPTY for that line.\n\n"
+    "Output format (one line per claim, nothing else):\n"
+    "A1: <exact text from answer or EMPTY>\n"
+    "A2: <exact text from answer or EMPTY>\n"
+    "..."
 )
 
 _MAP_CLAIMS_USER_TEMPLATE = "ANSWER TEXT:\n<<ANSWER>>\n\nCLAIMS TO LOCATE:\n<<CLAIMS>>"
@@ -422,6 +481,7 @@ async def _map_claims_to_answer_text(
 ) -> dict[str, str]:
     """Ask the LLM to find exact text spans in the answer for each claim.
 
+    Uses simple line-based format (A1: text) to avoid json_schema truncation issues.
     Returns dict mapping claim_id -> exact_text_in_answer (empty string if not found).
     """
     if not answer_claims or not answer_text:
@@ -440,32 +500,8 @@ async def _map_claims_to_answer_text(
             {"role": "user", "content": _MAP_CLAIMS_USER_TEMPLATE.replace("<<ANSWER>>", answer_text[:6000]).replace("<<CLAIMS>>", claims_list[:4000])},
         ],
         "temperature": 0.0,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "claim_mapping",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "mappings": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "claim_id": {"type": "string"},
-                                    "text_in_answer": {"type": "string"},
-                                },
-                                "required": ["claim_id", "text_in_answer"],
-                            },
-                        }
-                    },
-                    "required": ["mappings"],
-                },
-            },
-        },
     }
 
     last_exc = None
@@ -501,25 +537,23 @@ async def _map_claims_to_answer_text(
         logger.warning("_map_claims_to_answer_text: empty LLM response")
         return {}
 
-    try:
-        parsed = json.loads(content_raw)
-    except (json.JSONDecodeError, TypeError):
-        stripped = re.sub(r"```(?:json)?\s*", "", content_raw).strip()
-        try:
-            parsed = json.loads(stripped)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("_map_claims_to_answer_text: JSON parse failed")
-            return {}
-
-    mappings = parsed.get("mappings", [])
+    # Parse line-based format: "A1: exact text" or "A1: EMPTY"
     result: dict[str, str] = {}
-    for m in mappings:
-        cid = m.get("claim_id", "")
-        tex = m.get("text_in_answer", "")
-        if cid:
-            result[cid] = tex
+    for line in content_raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Match "A1: text" or "A1:text"
+        m = re.match(r"^(A\d+)\s*:\s*(.+)$", line)
+        if m:
+            cid = m.group(1)
+            tex = m.group(2).strip()
+            if tex.upper() == "EMPTY" or tex == "":
+                result[cid] = ""
+            else:
+                result[cid] = tex
 
-    logger.info("_map_claims_to_answer_text: mapped %d/%d claims", len(result), len(answer_claims))
+    logger.info("_map_claims_to_answer_text: mapped %d/%d claims (line-based)", len(result), len(answer_claims))
     return result
 
 
@@ -552,12 +586,16 @@ async def analyze_chunk_utilization_claim(
         current = _analysis_progress.get(query_id, {"done": 0, "total": 0})
         _analysis_progress[query_id] = {"done": current["done"], "total": current["total"] + total_extractions}
 
-    answer_claims_texts = await _extract_claims_via_llamacpp(answer_text, model=model)
+    answer_claims_data = await _extract_claims_via_llamacpp(answer_text, model=model, categorize=True)
     if query_id:
         _analysis_progress[query_id]["done"] += 1
 
-    if not answer_claims_texts:
+    if not answer_claims_data:
         return {"per_chunk": [], "answer_claims": [], "summary": {"error": "no_answer_claims_extracted"}, "mode": "claim"}
+
+    answer_claims_texts = [c["text"] for c in answer_claims_data]
+    answer_claim_categories = [c.get("category", "no_category") for c in answer_claims_data]
+    answer_claim_confidences = [c.get("confidence") for c in answer_claims_data]
 
     # 2. Extract claims from chunks with bounded concurrency
     sem = asyncio.Semaphore(max_concurrent)
@@ -810,8 +848,22 @@ async def analyze_chunk_utilization_claim(
                 if key in autopass_pairs or entailment_labels_all.get(key, {"label": "NEUTRAL", "conf": 0.0})["label"] == "ENTAILMENT":
                     answer_matched_by.setdefault(ai, set()).add(claim_id)
 
+    # Compute best NLI label per answer claim (for unmatched claims display)
+    answer_best_nli: dict[int, str] = {}
+    for um in unit_matches:
+        ci = um["chunk_idx"]
+        ct = um.get("text", "")
+        for ai, sim in zip(um.get("matched_answer_indices", []), um.get("matched_answer_sims", [])):
+            if ai in answer_best_sim and abs(sim - answer_best_sim[ai]) < 0.0001:
+                key = (ci, ct[:40], ai)
+                if key in autopass_pairs:
+                    answer_best_nli[ai] = "ENTAILMENT (autopass)"
+                else:
+                    label_dict = entailment_labels_all.get(key, {"label": "NEUTRAL", "conf": 0.0})
+                    answer_best_nli[ai] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
+
     # 6. Build output
-    answer_claims = _build_answer_claims(answer_claims_texts, answer_matched_by, answer_best_sim)
+    answer_claims = _build_answer_claims(answer_claims_texts, answer_matched_by, answer_best_sim, answer_best_nli=answer_best_nli, categories=answer_claim_categories, confidences=answer_claim_confidences)
 
     # 6b. Map claims to exact answer text spans via LLM (for reliable highlighting)
     try:
