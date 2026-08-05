@@ -370,7 +370,7 @@ async def _extract_claims_via_llamacpp(
                     "properties": {
                         "claims": {
                             "type": "array",
-                            "items": {"type": "string"},
+                            "items": claim_schema,
                         }
                     },
                     "required": ["claims"],
