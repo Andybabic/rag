@@ -391,12 +391,19 @@ async def _extract_claims_via_llamacpp(
             resp.raise_for_status()
             data = resp.json()
             break
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
             if attempt < 2:
+                # Reset shared client on protocol errors (stale keepalive connection)
+                if isinstance(exc, httpx.RemoteProtocolError):
+                    global _llamacpp_client
+                    if _llamacpp_client and not _llamacpp_client.is_closed:
+                        await _llamacpp_client.aclose()
+                    _llamacpp_client = None
                 logger.warning(
-                    "Ollama connection failed (attempt %d/3), model may be cold-loading. Retrying in 30s...",
+                    "Llama.cpp request failed (attempt %d/3, %s), retrying in 30s...",
                     attempt + 1,
+                    type(exc).__name__,
                 )
                 await asyncio.sleep(30.0)
             else:
@@ -435,6 +442,9 @@ async def _extract_claims_via_llamacpp(
 
     if categorize:
         allowed = {"fact", "verified_fact", "recommendation", "conclusion", "no_category"}
+        # Map German category names to English (LLM sometimes outputs German)
+        _cat_map = {"fakt": "fact", "verifizierter_fakt": "verified_fact", "empfehlung": "recommendation",
+                    "fazit": "conclusion", "schlussfolgerung": "conclusion", "keine_kategorie": "no_category"}
         out: list[dict] = []
         for c in claims:
             if isinstance(c, dict):
@@ -443,6 +453,7 @@ async def _extract_claims_via_llamacpp(
             else:
                 text = str(c).strip()
                 cat = "no_category"
+            cat = _cat_map.get(cat, cat)
             if cat not in allowed:
                 cat = "no_category"
             raw_conf = c.get("confidence") if isinstance(c, dict) else None
@@ -516,12 +527,18 @@ async def _map_claims_to_answer_text(
             resp.raise_for_status()
             data = resp.json()
             break
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
             if attempt < 2:
+                if isinstance(exc, httpx.RemoteProtocolError):
+                    global _llamacpp_client
+                    if _llamacpp_client and not _llamacpp_client.is_closed:
+                        await _llamacpp_client.aclose()
+                    _llamacpp_client = None
                 logger.warning(
-                    "Claim mapping connection failed (attempt %d/3), retrying in 15s...",
+                    "Claim mapping request failed (attempt %d/3, %s), retrying in 15s...",
                     attempt + 1,
+                    type(exc).__name__,
                 )
                 await asyncio.sleep(15.0)
             else:
@@ -771,83 +788,6 @@ async def analyze_chunk_utilization_claim(
                 if key in autopass_pairs or entailment_labels_all.get(key, {"label": "NEUTRAL", "conf": 0.0})["label"] == "ENTAILMENT":
                     answer_matched_by.setdefault(ai, set()).add(claim_id)
 
-    # 5b. NLI entailment verification via local DeBERTa-v3 model (fast + deterministic)
-    COSINE_AUTOPASS = 0.90
-    ent_pairs_meta: list[tuple[int, str, int, str, str]] = []  # (ci, ct_full, ai, ct40, answer_text)
-    autopass_pairs: set[tuple[int, str, int]] = set()
-    for um in unit_matches:
-        ci = um["chunk_idx"]
-        ct = um.get("text", "")
-        for ai, sim in zip(um.get("matched_answer_indices", []), um.get("matched_answer_sims", [])):
-            if ai < len(answer_claims_texts):
-                if sim >= COSINE_AUTOPASS:
-                    autopass_pairs.add((ci, ct[:40], ai))
-                else:
-                    ent_pairs_meta.append((ci, ct, ai, ct[:40], answer_claims_texts[ai]))
-
-    # Run local NLI model on all pairs (single call, batched internally)
-    ent_pairs_text: list[tuple[str, str]] = [(ct, at) for (_, ct, _, _, at) in ent_pairs_meta]
-    ent_labels: list[dict] = []
-    if ent_pairs_text:
-        if query_id:
-            prog = _analysis_progress.get(query_id, {"done": 0, "total": 0})
-            _analysis_progress[query_id] = {"done": prog["done"], "total": prog["total"] + 1}
-        ent_labels = await asyncio.to_thread(_classify_entailment_pairs, ent_pairs_text)
-        if query_id:
-            _analysis_progress[query_id]["done"] += 1
-
-    # Build lookup: (ci, ct[:40], ai) -> label
-    entailment_labels_all: dict[tuple[int, str, int], str] = {}
-    for k, (ci, _, ai, ct40, _) in enumerate(ent_pairs_meta):
-        entailment_labels_all[(ci, ct40, ai)] = ent_labels[k] if k < len(ent_labels) else "NEUTRAL"
-
-    # Filter: only keep ENTAILMENT-verified or autopass matches
-    for um in unit_matches:
-        ci = um["chunk_idx"]
-        ct = um.get("text", "")
-        old_indices = um.get("matched_answer_indices", [])
-        old_sims = um.get("matched_answer_sims", [])
-        new_indices: list[int] = []
-        new_sims: list[float] = []
-        labels_for_display: dict[str, str] = {}
-        for ai, sim in zip(old_indices, old_sims):
-            key = (ci, ct[:40], ai)
-            if key in autopass_pairs:
-                labels_for_display[str(ai)] = "ENTAILMENT (autopass)"
-                new_indices.append(ai)
-                new_sims.append(sim)
-            else:
-                label_dict = entailment_labels_all.get(key, {"label": "NEUTRAL", "conf": 0.0})
-                labels_for_display[str(ai)] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
-                if label_dict["label"] == "ENTAILMENT":
-                    new_indices.append(ai)
-                    new_sims.append(sim)
-        um["matched_answer_indices"] = new_indices
-        um["matched_answer_sims"] = new_sims
-        um["entailment_labels"] = labels_for_display
-
-        # Rebuild chunk_results matched counts from filtered matches
-        for ci in sorted(chunk_results.keys()):
-            cr = chunk_results[ci]
-            cr["matched"] = sum(
-                1 for um in unit_matches
-                if um["chunk_idx"] == ci and len(um.get("matched_answer_indices", [])) > 0
-            )
-
-        # Rebuild answer_matched_by with proper claim IDs
-        answer_matched_by = {}
-        claim_counter: dict[int, int] = {}
-        for um in unit_matches:
-            ci = um["chunk_idx"]
-            ct = um.get("text", "")
-            ccount = claim_counter.get(ci, 0) + 1
-            claim_counter[ci] = ccount
-            claim_id = f"C{ci + 1}.{ccount}"
-            for ai in um.get("matched_answer_indices", []):
-                key = (ci, ct[:40], ai)
-                if key in autopass_pairs or entailment_labels_all.get(key, {"label": "NEUTRAL", "conf": 0.0})["label"] == "ENTAILMENT":
-                    answer_matched_by.setdefault(ai, set()).add(claim_id)
-
     # Compute best NLI label per answer claim (for unmatched claims display)
     answer_best_nli: dict[int, str] = {}
     for um in unit_matches:
@@ -963,9 +903,6 @@ def _classify_entailment_pairs(pairs: list[tuple[str, str]]) -> list[str]:
 # (Now just a factual summary — no LLM involved)
 # ---------------------------------------------------------------------------
 
-    "You are a quality reviewer for a RAG (Retrieval-Augmented Generation) evaluation system. "
-    "A generator model has extracted atomic factual claims from an answer and from retrieved chunks, "
-    "then matched which chunk claims support which answer claims.\n\n"
 async def review_analysis_with_judge(
     answer_text: str,
     chunks: list[dict],
