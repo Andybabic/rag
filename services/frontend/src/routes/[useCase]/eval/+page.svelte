@@ -184,6 +184,168 @@
 	function countUnmatched(answerClaims: unknown[]): number {
 		return answerClaims.filter(ac => ((ac as Record<string,unknown>).matched_by_chunks as unknown[])?.length === 0).length;
 	}
+
+	const CATEGORY_LABELS: Record<string, string> = {
+		fact: 'Fakt',
+		verified_fact: 'Verifizierter Fakt',
+		recommendation: 'Empfehlung',
+		conclusion: 'Fazit',
+		no_category: 'Keine Kategorie'
+	};
+
+	const CATEGORY_CLASSES: Record<string, string> = {
+		fact: 'bg-blue-100 text-blue-700',
+		verified_fact: 'bg-green-100 text-green-700',
+		recommendation: 'bg-purple-100 text-purple-700',
+		conclusion: 'bg-amber-100 text-amber-700',
+		no_category: 'bg-gray-100 text-gray-500'
+	};
+
+	function catLabel(cat: unknown): string {
+		const c = (cat as string) || 'no_category';
+		return CATEGORY_LABELS[c] || CATEGORY_LABELS.no_category;
+	}
+
+	function catClass(cat: unknown): string {
+		const c = (cat as string) || 'no_category';
+		return CATEGORY_CLASSES[c] || CATEGORY_CLASSES.no_category;
+	}
+
+	function catCounts(answerClaims: unknown[]): Record<string, number> {
+		const counts: Record<string, number> = {};
+		for (const ac of answerClaims) {
+			const c = ((ac as Record<string, unknown>).category as string) || 'no_category';
+			counts[c] = (counts[c] || 0) + 1;
+		}
+		return counts;
+	}
+
+	function catSummary(answerClaims: unknown[]): string {
+		const counts = catCounts(answerClaims);
+		const parts: string[] = [];
+		for (const [c, n] of Object.entries(counts)) {
+			if (n > 0 && c !== 'no_category') parts.push(`${CATEGORY_LABELS[c]}: ${n}`);
+		}
+		return parts.length ? ' · ' + parts.join(' · ') : '';
+	}
+
+	// Merge answer claims across steps: a claim is marked matched if ANY step found a match.
+	// Uses union of matched_by_chunks and best best_similarity across all steps.
+	function mergeAnswerClaims(adSteps: unknown[]): Record<string, unknown[]> {
+		const modelClaims: Record<string, Record<string, Record<string, unknown>>> = {};
+		for (const step of adSteps) {
+			const so = step as Record<string, unknown>;
+			const analyses = so.analyses as Record<string, Record<string, unknown>> | undefined;
+			if (!analyses) continue;
+			for (const [modelName, stepAnalysis] of Object.entries(analyses)) {
+				if (modelName === '_judge') continue;
+				const claims = stepAnalysis.answer_claims as unknown[] | undefined;
+				if (!claims) continue;
+				if (!modelClaims[modelName]) modelClaims[modelName] = {};
+				for (const ac of claims) {
+					const a = ac as Record<string, unknown>;
+					const id = a.id as string;
+					if (!id) continue;
+					if (!modelClaims[modelName][id]) {
+						modelClaims[modelName][id] = { ...a };
+					} else {
+						const existing = modelClaims[modelName][id];
+						const existingMatched = (existing.matched_by_chunks as string[]) || [];
+						const newMatched = (a.matched_by_chunks as string[]) || [];
+						const mergedMatched = [...new Set([...existingMatched, ...newMatched])];
+						(existing as Record<string, unknown>).matched_by_chunks = mergedMatched;
+						if (mergedMatched.length === 0) {
+							const existingSim = (existing.best_similarity as number) || 0;
+							const newSim = (a.best_similarity as number) || 0;
+							(existing as Record<string, unknown>).best_similarity = Math.max(existingSim, newSim);
+						} else {
+							delete (existing as Record<string, unknown>).best_similarity;
+						}
+					}
+				}
+			}
+		}
+		const result: Record<string, unknown[]> = {};
+		for (const [modelName, claimsById] of Object.entries(modelClaims)) {
+			result[modelName] = Object.values(claimsById);
+		}
+		return result;
+	}
+
+	function escapeHtml(text: string): string {
+		return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+	}
+
+	function highlightAnswerText(answerText: string, answerClaims: unknown[]): string {
+		if (!answerText || !answerClaims || answerClaims.length === 0) return escapeHtml(answerText || '');
+		interface ClaimMatch { start: number; end: number; matchedBy: string[]; id: string }
+		const matches: ClaimMatch[] = [];
+		const used: { start: number; end: number }[] = [];
+		// Sort: matched first, then duplicates, then unmatched
+		const sorted = [...answerClaims].sort((a, b) => {
+			const am = ((a as Record<string,unknown>).matched_by_chunks as string[]) || [];
+			const bm = ((b as Record<string,unknown>).matched_by_chunks as string[]) || [];
+			if (am.length === 1 && bm.length !== 1) return -1;
+			if (bm.length === 1 && am.length !== 1) return 1;
+			if (am.length > 1 && bm.length === 0) return -1;
+			if (bm.length > 1 && am.length === 0) return 1;
+			return 0;
+		});
+		for (const ac of sorted) {
+			const a = ac as Record<string, unknown>;
+			const matchedBy = (a.matched_by_chunks as string[]) || [];
+			const id = (a.id as string) || '';
+			// Use LLM-mapped exact text if available, otherwise fall back to claim text
+			const searchText = ((a.text_in_answer as string) || (a.text as string) || '').trim();
+			if (!searchText || searchText.length < 3) continue;
+			let idx = answerText.indexOf(searchText);
+			if (idx === -1) idx = answerText.toLowerCase().indexOf(searchText.toLowerCase());
+			if (idx === -1) continue;
+			const found = { start: idx, end: idx + searchText.length };
+			// Check overlap with existing matches
+			let overlaps = false;
+			let existingIdx = -1;
+			for (let ri = 0; ri < used.length; ri++) {
+				const r = used[ri];
+				if (found.start === r.start && found.end === r.end) {
+					existingIdx = ri;
+					break;
+				}
+				if (found.start < r.end && found.end > r.start) { overlaps = true; break; }
+			}
+			if (existingIdx >= 0) {
+				const existing = matches[existingIdx];
+				existing.matchedBy = [...new Set([...existing.matchedBy, ...matchedBy])];
+				existing.id = existing.id + ', ' + id;
+			} else if (!overlaps) {
+				used.push(found);
+				matches.push({ start: found.start, end: found.end, matchedBy, id });
+			}
+		}
+		if (matches.length === 0) return escapeHtml(answerText);
+		matches.sort((a, b) => a.start - b.start);
+		let html = '';
+		let pos = 0;
+		for (const m of matches) {
+			html += escapeHtml(answerText.slice(pos, m.start));
+			let cls: string;
+			let title: string;
+			if (m.matchedBy.length === 0) {
+				cls = 'bg-red-100 border-b-2 border-red-300 rounded';
+				title = m.id + ': Unmatched';
+			} else if (m.matchedBy.length > 1) {
+				cls = 'bg-amber-100 border-b-2 border-amber-300 rounded';
+				title = m.id + ': Duplicate (' + m.matchedBy.slice(0, 3).join(', ') + (m.matchedBy.length > 3 ? '...' : '') + ')';
+			} else {
+				cls = 'bg-green-100 border-b-2 border-green-300 rounded';
+				title = m.id + ': ' + m.matchedBy[0];
+			}
+			html += '<mark class="' + cls + '" title="' + escapeHtml(title) + '">' + escapeHtml(answerText.slice(m.start, m.end)) + '</mark>';
+			pos = m.end;
+		}
+		html += escapeHtml(answerText.slice(pos));
+		return html;
+	}
 </script>
 
 <main class="flex h-full flex-1 flex-col overflow-y-auto bg-gray-50">
@@ -397,8 +559,8 @@
 															{#if q.created_at}
 																<span class="text-[10px] text-gray-400">&middot; Time: {stepTimes[i]}</span>
 															{/if}
-															{#if llmTiming && llmTiming.total_ms > 0}										<span class="text-[10px] text-gray-400">&middot; LLM: {(llmTiming.total_ms / 1000).toFixed(1)}s</span>
-																			{#if typeof duration === 'number' && typeof llmTiming?.total_ms === 'number'}{@const otherMs = duration - llmTiming.total_ms}{#if otherMs > 100}<span class="text-[10px] text-amber-500">&middot; Embed: {(otherMs / 1000).toFixed(1)}s</span>{/if}{/if}
+															{#if llmTiming && llmTiming.total_ms > 0}										{#if typeof duration === 'number' && typeof llmTiming?.total_ms === 'number'}{@const otherMs = duration - llmTiming.total_ms}{#if otherMs > 100}<span class="text-[10px] text-amber-500">&middot; Embed: {(otherMs / 1000).toFixed(1)}s</span>{/if}{/if}
+																			<span class="text-[10px] text-gray-400">&middot; LLM: {(llmTiming.total_ms / 1000).toFixed(1)}s</span>
 																		<span class="text-[10px] text-gray-400">(L:{(llmTiming.load_ms / 1000).toFixed(1)} PP:{(llmTiming.pp_ms / 1000).toFixed(1)} TP:{(llmTiming.tp_ms / 1000).toFixed(1)}{#if llmTiming.prompt_tokens || llmTiming.completion_tokens} &middot; In: {llmTiming.prompt_tokens}, Out: {llmTiming.completion_tokens} Tok.{/if})</span>
 															{/if}
 														{/if}
@@ -529,25 +691,40 @@
 											{@const isClaim = adMode === "claim"}
 											{@const unitName = isClaim ? "Claims" : "S&auml;tze"}
 											<p class="mb-1 text-[10px] text-gray-400">
-												Modus: {adMode} &middot; Threshold: {ad.threshold as number}
+												Modus: {adMode} &middot; Cosine Similarity Threshold: {ad.threshold as number}
 											</p>
+
+											<!-- Highlighted Answer -->
+											{#if (ad.answer_text as string)}
+												{@const adModelsArr = (ad.models as string[] | undefined)}
+												{@const mergedForHighlight = mergeAnswerClaims(adSteps)}
+												{@const firstClaims = adModelsArr && adModelsArr.length > 0 && Object.keys(mergedForHighlight).length > 0 ? mergedForHighlight[adModelsArr[0]] : (Object.values(mergedForHighlight)[0] as unknown[] | undefined)}
+												<details class="mb-3 rounded border border-gray-200 bg-gray-50/50 p-3" open>
+													<summary class="cursor-pointer text-[10px] font-semibold text-gray-600 hover:text-gray-800">Antwort (mit Claim-Hervorhebung)</summary>
+													<div class="mt-2 max-h-96 overflow-y-auto rounded bg-white p-3 text-sm leading-relaxed text-gray-700 whitespace-pre-wrap">
+														{#if firstClaims && firstClaims.length > 0}
+															{@html highlightAnswerText(ad.answer_text as string, firstClaims)}
+														{:else}
+															{ad.answer_text as string}
+														{/if}
+													</div>
+												</details>
+											{/if}
 
 											<!-- Answer Claims Overview -->
 											{@const adModels = ad.models as string[] | undefined}
 											{#if adModels}
-												{@const firstWithAnalyses = adSteps.find((s: unknown) => (s as Record<string,unknown>).analyses != null) as Record<string,unknown> | undefined}
-												{@const firstStepAnalyses = firstWithAnalyses?.analyses as Record<string, Record<string,unknown>> | undefined}
-												{#if firstStepAnalyses}
+												{@const mergedClaimsByModel = mergeAnswerClaims(adSteps)}
+												{#if Object.keys(mergedClaimsByModel).length > 0}
 													<div class="grid grid-cols-2 gap-2 mb-3">
-														{#each Object.entries(firstStepAnalyses).filter(([n]) => n !== "_judge") as [modelName, stepAnalysis]}
-															{@const answerClaims = (stepAnalysis as Record<string,unknown>).answer_claims as unknown[] | undefined}
+														{#each Object.entries(mergedClaimsByModel) as [modelName, answerClaims]}
 															{#if answerClaims && answerClaims.length > 0}
 																{@const dupes = countDuplicates(answerClaims)}
 																{@const unmatched = countUnmatched(answerClaims)}
 																{@const matched = answerClaims.length - unmatched - dupes}
 																<details class="rounded border border-gray-200 bg-gray-50/50 p-2">
 																	<summary class="cursor-pointer text-[9px] font-semibold text-gray-600 hover:text-gray-800">
-																		<span class="text-indigo-600">{modelName}</span> &mdash; {answerClaims.length} Claims &mdash; M: {matched} ({((matched/answerClaims.length)*100).toFixed(0)}%) | U: {unmatched} ({((unmatched/answerClaims.length)*100).toFixed(0)}%) | D: {dupes} ({((dupes/answerClaims.length)*100).toFixed(0)}%)
+																		<span class="text-indigo-600">{modelName}</span> &mdash; {answerClaims.length} Claims &mdash; M: {matched + dupes} ({(((matched + dupes)/answerClaims.length)*100).toFixed(0)}%) [{matched}&#10003; + {dupes}&#9888;] | U: {unmatched} ({((unmatched/answerClaims.length)*100).toFixed(0)}%)<span class="ml-1 font-normal text-gray-400">{catSummary(answerClaims)}</span>
 																	</summary>
 																	<div class="mt-1 max-h-40 overflow-y-auto space-y-0.5">
 																		{#each answerClaims as ac}
@@ -556,13 +733,14 @@
 																			<div class="rounded px-2 py-1 text-[9px] leading-relaxed {matchedBy.length > 1 ? 'bg-amber-50' : matchedBy.length === 0 ? 'bg-red-50' : 'bg-green-50'}">
 																				<div class="flex items-start gap-1.5">
 																					<span class="font-semibold text-gray-500 whitespace-nowrap mt-px">{a.id as string}</span>
+																					{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[8px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}{#if (a.category_confidence as number) != null} <span class="font-normal opacity-60">NLI: {a.category_confidence as number}%</span>{/if}</span>{/if}
 																					<span class="text-gray-600 break-words">{(a.text as string)?.substring(0, 200)}</span>
 																				</div>
 																				<div class="mt-0.5">
 																					{#if matchedBy.length > 1}
 																						<span class="text-amber-600 font-semibold">&#9888; Duplicate matches: {matchedBy.slice(0, 8).join(", ")}{#if matchedBy.length > 8} +{matchedBy.length - 8} more{/if}</span>
 																					{:else if matchedBy.length === 0}
-																						<span class="text-red-500">&#10060; Not matched{#if (a.best_similarity as number) != null} ({(a.best_similarity as number).toFixed(2)}){/if}</span>
+																						<span class="text-red-500">&#10060; Not matched{#if (a.best_similarity as number) != null} (cosine: {(a.best_similarity as number).toFixed(2)}{#if (a.best_nli as string)}, NLI: {a.best_nli as string}{/if}){/if}</span>
 																					{:else}
 																						<span class="text-green-500">&check; {matchedBy[0]}</span>
 																					{/if}
@@ -576,15 +754,15 @@
 													</div>
 												{/if}
 											{:else}
-												{@const firstStepWithAnalysis = adSteps.find((s: unknown) => ((s as Record<string,unknown>).analysis as Record<string,unknown>)?.answer_claims) as Record<string,unknown> | undefined}
-												{@const answerClaims = (firstStepWithAnalysis?.analysis as Record<string,unknown>)?.answer_claims as unknown[] | undefined}
+												{@const merged = mergeAnswerClaims(adSteps)}
+												{@const answerClaims = Object.values(merged)[0] as unknown[] | undefined}
 											{#if answerClaims && answerClaims.length > 0}
 												{@const dupes = countDuplicates(answerClaims)}
 												{@const unmatched = countUnmatched(answerClaims)}
 												{@const matched = answerClaims.length - unmatched - dupes}
 												<details class="mb-3 rounded border border-gray-200 bg-gray-50/50 p-3">
 													<summary class="cursor-pointer text-[10px] font-semibold text-gray-600 hover:text-gray-800">
-														Answer Claims ({answerClaims.length} total) &mdash; Matched: {matched} ({((matched/answerClaims.length)*100).toFixed(0)}%) | Unmatched: {unmatched} ({((unmatched/answerClaims.length)*100).toFixed(0)}%) | Duplicate matches: {dupes} ({((dupes/answerClaims.length)*100).toFixed(0)}%)
+														Answer Claims ({answerClaims.length} total) &mdash; Matched: {matched + dupes} ({(((matched + dupes)/answerClaims.length)*100).toFixed(0)}%) [{matched}&#10003; + {dupes}&#9888;] | Unmatched: {unmatched} ({((unmatched/answerClaims.length)*100).toFixed(0)}%)<span class="ml-1 font-normal text-gray-400">{catSummary(answerClaims)}</span>
 													</summary>
 													<div class="mt-2 max-h-60 overflow-y-auto space-y-1">
 														{#each answerClaims as ac}
@@ -592,11 +770,12 @@
 															{@const matchedBy = (a.matched_by_chunks as string[]) || []}
 															<div class="rounded px-2 py-1 text-[10px] leading-relaxed {matchedBy.length > 1 ? 'bg-amber-50' : matchedBy.length === 0 ? 'bg-red-50' : 'bg-green-50'}">
 																<span class="font-semibold text-gray-500">{a.id as string}</span>
+															{#if (a.category as string)}<span class="ml-1 rounded px-1 py-px text-[9px] font-semibold {catClass(a.category as string)}">{catLabel(a.category as string)}{#if (a.category_confidence as number) != null} <span class="font-normal opacity-60">NLI: {a.category_confidence as number}%</span>{/if}</span>{/if}
 																<span class="ml-1 text-gray-600">{(a.text as string)?.substring(0, 150)}</span>
 																{#if matchedBy.length > 1}
 																	<span class="ml-1 text-amber-600 font-semibold">&#9888; Duplicate matches: {matchedBy.slice(0, 8).join(", ")}{#if matchedBy.length > 8} +{matchedBy.length - 8} more{/if}</span>
 																{:else if matchedBy.length === 0}
-																	<span class="ml-1 text-red-500">&#10060; Not matched{#if (a.best_similarity as number) != null} ({(a.best_similarity as number).toFixed(2)}){/if}</span>
+																	<span class="ml-1 text-red-500">&#10060; Not matched{#if (a.best_similarity as number) != null} (cosine: {(a.best_similarity as number).toFixed(2)}{#if (a.best_nli as string)}, NLI: {a.best_nli as string}{/if}){/if}</span>
 																{:else}
 																	<span class="ml-1 text-green-500">&check; {matchedBy[0]}</span>
 																{/if}
