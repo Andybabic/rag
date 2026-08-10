@@ -635,6 +635,7 @@ class ChunkAnalysisRequest(BaseModel):
     max_concurrent: int = 8
     models: list[str] = ["qwen3.5:9b"]
     mapping_model: str | None = None
+    nli_model: str = "deberta"
 
 
 
@@ -706,6 +707,7 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                     max_concurrent=body.max_concurrent,
                     query_id=query_id,
                     mapping_model=body.mapping_model,
+                    nli_model=body.nli_model,
                 )
                 step_analyses[gen_model] = gen_analysis
 

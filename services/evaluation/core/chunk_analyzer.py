@@ -447,6 +447,7 @@ async def analyze_chunk_utilization_claim(
     max_concurrent: int = 8,
     query_id: str = "",
     mapping_model: str | None = None,
+    nli_model: str = "deberta",
 ) -> dict:
     """
     Claim-level analysis using local Ollama for atomic fact extraction (JSON schema).
@@ -613,7 +614,7 @@ async def analyze_chunk_utilization_claim(
         if query_id:
             prog = _analysis_progress.get(query_id, {"done": 0, "total": 0})
             _analysis_progress[query_id] = {"done": prog["done"], "total": prog["total"] + 1}
-        ent_labels = await asyncio.to_thread(_classify_entailment_pairs, ent_pairs_text)
+        ent_labels = await asyncio.to_thread(_classify_entailment_pairs, ent_pairs_text, nli_model=nli_model)
         if query_id:
             _analysis_progress[query_id]["done"] += 1
 
@@ -754,18 +755,23 @@ async def analyze_chunk_utilization_claim(
 # ---------------------------------------------------------------------------
 
 _nli_model = None
+_nli_model_name: str = "deberta"
 
 
-def _get_nli_model():
-    """Lazy-load the DeBERTa-v3 NLI cross-encoder model."""
-    global _nli_model
-    if _nli_model is None:
+def _get_nli_model(model_name: str = "deberta"):
+    """Lazy-load the NLI cross-encoder model (deberta=English-only/fast, xlm-roberta=multilingual)."""
+    global _nli_model, _nli_model_name
+    if _nli_model is None or _nli_model_name != model_name:
         from sentence_transformers import CrossEncoder
-        _nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
+        if model_name == "xlm-roberta":
+            _nli_model = CrossEncoder('cross-encoder/nli-xlm-roberta-base')
+        else:
+            _nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
+        _nli_model_name = model_name
     return _nli_model
 
 
-def _classify_entailment_pairs(pairs: list[tuple[str, str]]) -> list[str]:
+def _classify_entailment_pairs(pairs: list[tuple[str, str]], nli_model: str = "deberta") -> list[str]:
     """Classify (premise, hypothesis) pairs via DeBERTa-v3 NLI model.
     
     Returns list of {"label": str, "conf": float} dicts.
@@ -773,7 +779,7 @@ def _classify_entailment_pairs(pairs: list[tuple[str, str]]) -> list[str]:
     """
     if not pairs:
         return []
-    model = _get_nli_model()
+    model = _get_nli_model(nli_model)
     # CrossEncoder.predict returns logits (n_pairs, n_classes)
     scores = model.predict(pairs, show_progress_bar=False, batch_size=32)
     id2label = model.model.config.id2label
