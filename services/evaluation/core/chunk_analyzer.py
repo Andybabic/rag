@@ -446,6 +446,7 @@ async def analyze_chunk_utilization_claim(
     model: str = "qwen3.5:9b",
     max_concurrent: int = 8,
     query_id: str = "",
+    mapping_model: str | None = None,
 ) -> dict:
     """
     Claim-level analysis using local Ollama for atomic fact extraction (JSON schema).
@@ -701,7 +702,7 @@ async def analyze_chunk_utilization_claim(
 
     # 6b. Map claims to exact answer text spans via LLM (for reliable highlighting)
     try:
-        claim_text_map = await _map_claims_to_answer_text(answer_claims, answer_text, model=model)
+        claim_text_map = await _map_claims_to_answer_text(answer_claims, answer_text, model=mapping_model or model)
         for ac in answer_claims:
             mapped = claim_text_map.get(ac["id"], "")
             ac["text_in_answer"] = mapped if mapped and mapped.strip() else ""

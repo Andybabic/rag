@@ -17,6 +17,7 @@
 	let analysisError: string = $state("");
 	let analysisConcurrency: number = $state(8);
 	let analysisModel1: string = $state("qwen3.5:9b");
+	let analysisModel2: string = $state("");  // mapping model (empty = use same as extraction)
 		let availableModels: string[] = $state(["qwen3.5:9b", "gemma4:12b"]);
 
 	async function loadModels() {
@@ -78,7 +79,7 @@
 			const startResp = await fetch(`/api/admin/analyze-chunks/${queryId}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1] }),
+				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1], mapping_model: analysisModel2 || null }),
 			});
 			if (!startResp.ok) {
 				const err = await startResp.json().catch(() => ({}));
@@ -916,8 +917,18 @@
 											<select
 												bind:value={analysisModel1}
 												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Generator"
+												title="Extraction model (answer + chunk claims)"
 											>
+												{#each availableModels as m}
+													<option value={m}>{m}</option>
+												{/each}
+											</select>
+											<select
+												bind:value={analysisModel2}
+												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
+												title="Mapping model (claim-to-answer alignment; same as extraction if empty)"
+											>
+												<option value="">(same)</option>
 												{#each availableModels as m}
 													<option value={m}>{m}</option>
 												{/each}
