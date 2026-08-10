@@ -941,7 +941,7 @@
 											<select
 												bind:value={nliModel}
 												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="NLI model: DeBERTa-v3 (English, fast) or mDeBERTa-v3 (100 languages, slower)"
+												title="NLI model: DeBERTa-v3 (English, fast) or XLM-RoBERTa (multilingual, slower)"
 											>
 												<option value="deberta">EN</option>
 												<option value="xlm-roberta">MULTI</option>

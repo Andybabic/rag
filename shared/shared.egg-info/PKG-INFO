@@ -5,8 +5,6 @@ Summary: Shared models, errors, and tracing for the RAG platform
 Requires-Python: >=3.11
 Requires-Dist: pydantic>=2.0
 Requires-Dist: starlette>=0.27
-Requires-Dist: cryptography>=42.0
-Requires-Dist: asyncpg>=0.29
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
 Requires-Dist: httpx>=0.24; extra == "dev"
