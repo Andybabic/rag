@@ -578,6 +578,7 @@ async def analyze_chunk_utilization_claim(
 
         um = {
             "chunk_idx": ci,
+            "claim_idx": i,
             "text": claim_text[:200],
             "matched_answer_indices": [m["ans_idx"] for m in matches] if matched else [],
             "matched_answer_sims": [m["sim"] for m in matches] if matched else [],
@@ -606,6 +607,17 @@ async def analyze_chunk_utilization_claim(
             ba = um.get("best_ans_idx", -1)
             if ba >= 0 and ba < len(answer_claims_texts):
                 ent_pairs_meta.append((ci, ct, ba, ct[:40], answer_claims_texts[ba]))
+            # When using multilingual NLI, also send other sub-threshold candidates
+            # (cosine misses cross-lingual pairs, but NLI can recover them)
+            if nli_model == "xlm-roberta":
+                claim_i = um.get("claim_idx", -1)
+                if claim_i >= 0 and claim_i < len(claim_vecs) and claim_vecs[claim_i]:
+                    for j, ans_vec in enumerate(answer_vecs):
+                        if not ans_vec or j == ba:
+                            continue
+                        sim = _cosine(claim_vecs[claim_i], ans_vec)
+                        if sim >= 0.35 and j < len(answer_claims_texts):
+                            ent_pairs_meta.append((ci, ct, j, ct[:40], answer_claims_texts[j]))
 
     # Run local NLI model on all pairs (single call, batched internally)
     ent_pairs_text: list[tuple[str, str]] = [(ct, at) for (_, ct, _, _, at) in ent_pairs_meta]
@@ -615,6 +627,7 @@ async def analyze_chunk_utilization_claim(
             prog = _analysis_progress.get(query_id, {"done": 0, "total": 0})
             _analysis_progress[query_id] = {"done": prog["done"], "total": prog["total"] + 1}
         ent_labels = await asyncio.to_thread(_classify_entailment_pairs, ent_pairs_text, nli_model=nli_model)
+        logger.info("NLI classified %d pairs with model=%s — entailment: %d, neutral: %d, contradiction: %d", len(ent_labels), nli_model, sum(1 for l in ent_labels if l.get("label")=="ENTAILMENT"), sum(1 for l in ent_labels if l.get("label")=="NEUTRAL"), sum(1 for l in ent_labels if l.get("label")=="CONTRADICTION"))
         if query_id:
             _analysis_progress[query_id]["done"] += 1
 
@@ -647,20 +660,32 @@ async def analyze_chunk_utilization_claim(
         um["matched_answer_indices"] = new_indices
         um["matched_answer_sims"] = new_sims
         um["entailment_labels"] = labels_for_display
-        # Also include NLI label for best sub-threshold pair (displayed on unmatched claims)
+        # Scan all sub-threshold NLI pairs for promotion + display
         if not um.get("matched_answer_indices"):
-            ba = um.get("best_ans_idx", -1)
-            if ba >= 0:
-                key = (ci, ct[:40], ba)
-                if key in autopass_pairs:
-                    labels_for_display[str(ba)] = "ENTAILMENT (autopass)"
-                elif key in entailment_labels_all:
-                    label_dict = entailment_labels_all[key]
-                    labels_for_display[str(ba)] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
-                    # Promote: NLI-entailed sub-threshold pairs where confidence is high enough
-                    if label_dict["label"] == "ENTAILMENT" and label_dict["conf"] >= NLI_OVERRIDE_CONFIDENCE:
-                        um["matched_answer_indices"] = [ba]
-                        um["matched_answer_sims"] = [round(um.get("best_sim", 0), 4)]
+            promoted_indices: list[int] = []
+            promoted_sims: list[float] = []
+            first_best = um.get("best_ans_idx", -1)
+            for (ci_key, ct_key, ai_key), label_dict in entailment_labels_all.items():
+                if ci_key != ci or ct_key != ct[:40]:
+                    continue
+                if ai_key == first_best:
+                    labels_for_display[str(ai_key)] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
+                if label_dict["label"] == "ENTAILMENT" and label_dict["conf"] >= NLI_OVERRIDE_CONFIDENCE:
+                    # Find cosine for this pair
+                    sim_for_ai = um.get("best_sim", 0) if ai_key == first_best else 0.0
+                    if sim_for_ai == 0.0 and ai_key < len(answer_vecs):
+                        claim_i = um.get("claim_idx", -1)
+                        if claim_i >= 0 and claim_i < len(claim_vecs) and claim_vecs[claim_i]:
+                            sim_for_ai = round(_cosine(claim_vecs[claim_i], answer_vecs[ai_key]), 4)
+                    if sim_for_ai > 0:
+                        promoted_indices.append(ai_key)
+                        promoted_sims.append(sim_for_ai)
+                        logger.info("NLI OVERRIDE: promoted sub-threshold pair C%d->A%d (cos=%.3f, nli=%s %.0f%%)", ci+1, ai_key+1, sim_for_ai, label_dict["label"], label_dict["conf"]*100)
+            if promoted_indices:
+                # Sort by sim descending
+                paired = sorted(zip(promoted_indices, promoted_sims), key=lambda x: x[1], reverse=True)
+                um["matched_answer_indices"] = [p[0] for p in paired]
+                um["matched_answer_sims"] = [p[1] for p in paired]
 
         # Rebuild chunk_results matched counts from filtered matches
         for ci in sorted(chunk_results.keys()):
