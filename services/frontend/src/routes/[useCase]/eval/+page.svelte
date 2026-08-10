@@ -914,19 +914,21 @@
 												<option value={4}>4 parallel</option>
 												<option value={8}>8 parallel</option>
 											</select>
+											<span class="text-[10px] text-gray-400">Extraction</span>
 											<select
 												bind:value={analysisModel1}
 												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Extraction model (answer + chunk claims)"
+												title="Answer + chunk claim extraction"
 											>
 												{#each availableModels as m}
 													<option value={m}>{m}</option>
 												{/each}
 											</select>
+											<span class="text-[10px] text-gray-400">Mapping</span>
 											<select
 												bind:value={analysisModel2}
 												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Mapping model (claim-to-answer alignment; same as extraction if empty)"
+												title="Claim-to-answer text alignment (same as extraction if empty)"
 											>
 												<option value="">(same)</option>
 												{#each availableModels as m}
