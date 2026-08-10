@@ -446,7 +446,6 @@ async def analyze_chunk_utilization_claim(
     model: str = "qwen3.5:9b",
     max_concurrent: int = 8,
     query_id: str = "",
-    entailment_model: str | None = None,
 ) -> dict:
     """
     Claim-level analysis using local Ollama for atomic fact extraction (JSON schema).
@@ -791,22 +790,3 @@ def _classify_entailment_pairs(pairs: list[tuple[str, str]]) -> list[str]:
         else:
             labels.append({"label": "NEUTRAL", "conf": conf})
     return labels
-
-
-# ---------------------------------------------------------------------------
-# Judge Review — second LLM reviews the generator's analysis quality
-# (Now just a factual summary — no LLM involved)
-# ---------------------------------------------------------------------------
-
-async def review_analysis_with_judge(
-    answer_text: str,
-    chunks: list[dict],
-    generator_results: dict,
-    *,
-    model: str = "qwen3.5:9b",
-    query_id: str = "",
-    timeout: float = 120.0,
-) -> dict:
-    """Now returns a factual computed summary instead of an LLM judge review.
-    Kept with same signature for backward compatibility."""
-    return _build_factual_summary(generator_results)
