@@ -759,12 +759,12 @@ _nli_model_name: str = "deberta"
 
 
 def _get_nli_model(model_name: str = "deberta"):
-    """Lazy-load the NLI cross-encoder model (deberta=English-only/fast, xlm-roberta=multilingual)."""
+    """Lazy-load the NLI cross-encoder model (deberta=English-only/fast, mdeberta=multilingual)."""
     global _nli_model, _nli_model_name
     if _nli_model is None or _nli_model_name != model_name:
         from sentence_transformers import CrossEncoder
         if model_name == "xlm-roberta":
-            _nli_model = CrossEncoder('cross-encoder/nli-xlm-roberta-base')
+            _nli_model = CrossEncoder('MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7')
         else:
             _nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
         _nli_model_name = model_name
