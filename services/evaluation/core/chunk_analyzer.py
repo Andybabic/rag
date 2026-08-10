@@ -733,6 +733,7 @@ async def analyze_chunk_utilization_claim(
 
     # 5b. NLI entailment verification via local DeBERTa-v3 model (fast + deterministic)
     COSINE_AUTOPASS = 0.90
+    NLI_OVERRIDE_CONFIDENCE = 0.75  # NLI confidence threshold to override a sub-threshold cosine miss
     ent_pairs_meta: list[tuple[int, str, int, str, str]] = []  # (ci, ct_full, ai, ct40, answer_text)
     autopass_pairs: set[tuple[int, str, int]] = set()
     for um in unit_matches:
@@ -800,6 +801,10 @@ async def analyze_chunk_utilization_claim(
                 elif key in entailment_labels_all:
                     label_dict = entailment_labels_all[key]
                     labels_for_display[str(ba)] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
+                    # Promote: NLI-entailed sub-threshold pairs where confidence is high enough
+                    if label_dict["label"] == "ENTAILMENT" and label_dict["conf"] >= NLI_OVERRIDE_CONFIDENCE:
+                        um["matched_answer_indices"] = [ba]
+                        um["matched_answer_sims"] = [round(um.get("best_sim", 0), 4)]
 
         # Rebuild chunk_results matched counts from filtered matches
         for ci in sorted(chunk_results.keys()):
