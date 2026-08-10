@@ -3,12 +3,10 @@ Standalone chunk utilization analysis — does NOT touch the query pipeline.
 
 Call after a query completes to get per-chunk utilization and answer attribution.
 
-Two modes:
-- "sentence" (default): split on .!? → embed → cosine. Fast, deterministic.
-- "claim": LLM extracts atomic factual claims via local Ollama (JSON schema) → embed → cosine.
-  Uses /v1/chat/completions with response_format:json_object for JSON output — no regex parsing needed.
-  Calls a local llama.cpp server on spark (not gim-ollama) to avoid reverse-proxy timeouts.
-  Exceptions propagate — no silent fallback.
+Claim mode: LLM extracts atomic factual claims via local Ollama (JSON schema) → embed → cosine.
+Uses /v1/chat/completions with response_format:json_object for JSON output — no regex parsing needed.
+Calls a local llama.cpp server on spark (not gim-ollama) to avoid reverse-proxy timeouts.
+Exceptions propagate — no silent fallback.
 """
 
 from __future__ import annotations
@@ -27,15 +25,7 @@ _analysis_results: dict[str, dict] = {}
 
 logger = logging.getLogger(__name__)
 
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 _EMBED_BATCH_SIZE = 20  # max texts per embedding request
-
-def split_into_sentences(text: str) -> list[str]:
-    """Split text into sentences, filtering out empty/whitespace-only entries."""
-    if not text or not text.strip():
-        return []
-    sentences = _SENTENCE_RE.split(text.strip())
-    return [s.strip() for s in sentences if s.strip()]
 
 async def _embed_batch(
     texts: list[str],
@@ -156,141 +146,6 @@ def _build_per_chunk_claims(
                 "best_match": best_match,
             })
     return chunk_claims
-
-async def _analyze_inner(
-    chunks: list[dict],
-    answer_text: str,
-    *,
-    split_fn,
-    threshold: float,
-) -> dict:
-    """Core analysis: split, embed, match — parameterised by the split function."""
-    if not chunks or not answer_text or not answer_text.strip():
-        return {"per_chunk": [], "answer_claims": [], "summary": {"error": "no_data"}}
-
-    answer_units = split_fn(answer_text)
-    if not answer_units:
-        return {"per_chunk": [], "answer_claims": [], "summary": {"error": "no_answer_units"}}
-
-    all_texts: list[str] = list(answer_units)
-    unit_map: list[tuple[int, str]] = []
-
-    for ci, chunk in enumerate(chunks):
-        text = (chunk.get("text") or "").strip()
-        if not text:
-            continue
-        for unit in split_fn(text):
-            unit_map.append((ci, unit))
-            all_texts.append(unit)
-
-    if not unit_map:
-        return {"per_chunk": [], "answer_claims": [], "summary": {"error": "no_chunk_units"}}
-
-    try:
-        vectors = await _embed_batch(all_texts)
-    except Exception as exc:
-        logger.warning("Chunk analyzer embedding failed: %s", exc)
-        return {"per_chunk": [], "answer_claims": [], "summary": {"error": f"embedding_failed: {exc}"}}
-
-    if len(vectors) != len(all_texts):
-        return {"per_chunk": [], "answer_claims": [], "summary": {"error": "embedding_count_mismatch"}}
-
-    answer_vecs = vectors[: len(answer_units)]
-    unit_vecs = vectors[len(answer_units) :]
-    n_answer = len(answer_units)
-
-    chunk_results: dict[int, dict] = {}
-    answer_matched_by: dict[int, set[int]] = {}
-    answer_best_sim: dict[int, float] = {}
-    unit_matches: list[dict] = []
-
-    for i, (ci, unit_text) in enumerate(unit_map):
-        if ci not in chunk_results:
-            chunk_results[ci] = {
-                "rank": ci + 1,
-                "chunk_text": (chunks[ci].get("text") or ""), "chunk_text_preview": (chunks[ci].get("text") or "")[:120],
-                "total": 0,
-                "matched": 0,
-            }
-        chunk_results[ci]['total'] += 1
-
-        vec = unit_vecs[i] if i < len(unit_vecs) else []
-        matches: list[dict] = []
-
-        if vec:
-            for j, ans_vec in enumerate(answer_vecs):
-                if not ans_vec:
-                    continue
-                sim = _cosine(vec, ans_vec)
-                if j not in answer_best_sim or sim > answer_best_sim[j]:
-                    answer_best_sim[j] = sim
-                if sim >= threshold:
-                    matches.append({"ans_idx": j, "sim": round(sim, 4)})
-        matches.sort(key=lambda m: m["sim"], reverse=True)
-
-        matched = len(matches) > 0
-        if matched:
-            chunk_results[ci]["matched"] += 1
-            claim_id = f"C{ci + 1}.{chunk_results[ci]['total']}"
-            for m in matches:
-                answer_matched_by.setdefault(m["ans_idx"], set()).add(claim_id)
-
-        unit_matches.append({
-            "chunk_idx": ci,
-            "text": unit_text[:200],
-            "matched_answer_indices": [m["ans_idx"] for m in matches] if matched else [],
-            "matched_answer_sims": [m["sim"] for m in matches] if matched else [],
-        })
-
-    answer_claims = _build_answer_claims(answer_units, answer_matched_by, answer_best_sim)
-
-    per_chunk: list[dict] = []
-    for ci in sorted(chunk_results.keys()):
-        cr = chunk_results[ci]
-        total = cr["total"]
-        matched = cr["matched"]
-        utilization = round(matched / total * 100, 1) if total > 0 else 0.0
-        attributed = sum(1 for ans_idx, gis in answer_matched_by.items() if any(cid.startswith(f"C{ci + 1}.") for cid in gis))
-        attribution = round(attributed / n_answer * 100, 1) if n_answer > 0 else 0.0
-        per_chunk.append({
-            "rank": cr["rank"],
-            "chunk_text": cr["chunk_text"], "chunk_text_preview": cr["chunk_text_preview"],
-            "total_units": total,
-            "matched_units": matched,
-            "utilization_pct": utilization,
-            "attribution_pct": attribution,
-            "claims": _build_per_chunk_claims(ci, unit_matches),
-        })
-
-    utils = [c["utilization_pct"] for c in per_chunk]
-    attrs = [c["attribution_pct"] for c in per_chunk]
-
-    return {
-        "per_chunk": per_chunk,
-        "answer_claims": answer_claims,
-        "summary": {
-            "avg_utilization_pct": round(sum(utils) / len(utils), 1) if utils else 0,
-            "avg_attribution_pct": round(sum(attrs) / len(attrs), 1) if attrs else 0,
-            "total_chunk_units": sum(c["total_units"] for c in per_chunk),
-            "total_answer_units": n_answer,
-            "total_matched": sum(c["matched_units"] for c in per_chunk),
-            "threshold": threshold,
-        },
-    }
-
-async def analyze_chunk_utilization(
-    chunks: list[dict],
-    answer_text: str,
-    *,
-    threshold: float = 0.70,
-    query_id: str = "",
-) -> dict:
-    """Sentence-level analysis: split on .!?, embed, cosine match."""
-    result = await _analyze_inner(
-        chunks, answer_text, split_fn=split_into_sentences, threshold=threshold,
-    )
-    result["mode"] = "sentence"
-    return result
 
 # ---------------------------------------------------------------------------
 # Claim extraction via local Ollama — /api/chat with format:"json"
