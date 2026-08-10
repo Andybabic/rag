@@ -660,7 +660,7 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
     LLM extracts atomic claims via local Ollama → embed → cosine.
     Does NOT modify the stored query — purely read + compute.
     """
-    from core.chunk_analyzer import analyze_chunk_utilization_claim, review_analysis_with_judge
+    from core.chunk_analyzer import analyze_chunk_utilization_claim
 
     pool = await get_pool()
     row = await pool.fetchrow(
@@ -704,33 +704,8 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                     model=gen_model,
                     max_concurrent=body.max_concurrent,
                     query_id=query_id,
-                    entailment_model=body.models[1] if len(body.models) > 1 else None,
                 )
                 step_analyses[gen_model] = gen_analysis
-
-                # Model 2: Judge — reviews the generator's analysis (if provided)
-                if len(body.models) > 1:
-                    judge_model = body.models[1]
-                    if query_id:
-                        prog = _analysis_progress.get(query_id, {"done": 0, "total": 0})
-                        _analysis_progress[query_id] = {"done": prog["done"], "total": prog["total"] + 1}
-
-                    judge_result = await review_analysis_with_judge(
-                        answer_text=answer_text,
-                        chunks=chunks,
-                        generator_results=gen_analysis,
-                        model=judge_model,
-                        query_id=query_id,
-                    )
-
-                    if query_id:
-                        _analysis_progress[query_id]["done"] += 1
-
-                    step_analyses["_judge"] = {
-                        "model": judge_model,
-                        "review_text": judge_result["review_text"],
-                        "confidence": judge_result["confidence"],
-                    }
 
                 results.append({
                     "step_index": step_i,
