@@ -630,9 +630,8 @@ async def admin_delete_use_case(use_case_id: str):
 
 
 class ChunkAnalysisRequest(BaseModel):
-    """Request body: mode = "sentence" or "claim"."""
+    """Request body for claim-level chunk utilization analysis."""
     threshold: float = 0.70
-    mode: str = "sentence"
     max_concurrent: int = 8
     models: list[str] = ["qwen3.5:9b"]
 
@@ -656,12 +655,9 @@ async def get_analysis_result(query_id: str):
 
 @router.post("/analyze-chunks/{query_id}")
 async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalysisRequest()):
-    """Run chunk utilization analysis for a completed query.
+    """Run claim-level chunk utilization analysis for a completed query.
 
-    Two modes:
-    - "sentence" (default): regex split .!? → embed → cosine. Fast, deterministic.
-    - "claim": LLM extracts atomic claims via local Ollama → embed → cosine. Precise.
-
+    LLM extracts atomic claims via local Ollama → embed → cosine.
     Does NOT modify the stored query — purely read + compute.
     """
     from core.chunk_analyzer import analyze_chunk_utilization_claim, review_analysis_with_judge
