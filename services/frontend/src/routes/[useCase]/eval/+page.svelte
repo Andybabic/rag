@@ -18,6 +18,7 @@
 	let analysisConcurrency: number = $state(8);
 	let analysisModel1: string = $state("qwen3.5:9b");
 	let analysisModel2: string = $state("");  // mapping model (empty = use same as extraction)
+	let nliModel: string = $state("deberta");  // NLI model: deberta (English/fast) or xlm-roberta (multilingual)
 		let availableModels: string[] = $state(["qwen3.5:9b", "gemma4:12b"]);
 
 	async function loadModels() {
@@ -79,7 +80,7 @@
 			const startResp = await fetch(`/api/admin/analyze-chunks/${queryId}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1], mapping_model: analysisModel2 || null }),
+				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1], mapping_model: analysisModel2 || null, nli_model: nliModel }),
 			});
 			if (!startResp.ok) {
 				const err = await startResp.json().catch(() => ({}));
@@ -934,6 +935,16 @@
 												{#each availableModels as m}
 													<option value={m}>{m}</option>
 												{/each}
+											</select>
+
+											<span class="text-[10px] text-gray-400">NLI</span>
+											<select
+												bind:value={nliModel}
+												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
+												title="NLI model: DeBERTa-v3 (English, fast) or XLM-RoBERTa (multilingual, slower)"
+											>
+												<option value="deberta">EN</option>
+												<option value="xlm-roberta">MULTI</option>
 											</select>
 
 											<button
