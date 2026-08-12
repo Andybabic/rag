@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+import time
 import httpx
 from config import settings
 
@@ -30,6 +31,7 @@ async def action_search(args: dict, *, use_case: str) -> dict:
 
     try:
         # 1. Get embedding
+        _embed_start = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
             embed_resp = await client.post(
                 f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
@@ -40,6 +42,7 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             embed_json = embed_resp.json()
             vector = embed_json["vector"]
             query_embed_model = embed_json.get("model")
+            _embed_ms = round((time.perf_counter() - _embed_start) * 1000)
 
         # 2. Resolve collections – HARD USE-CASE ISOLATION
         #    Only collections whose prefix matches the use_case are allowed.
@@ -129,6 +132,7 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             "observation": f"Suche fehlgeschlagen: {exc.response.status_code}. "
                            f"Beantworte die Frage mit deinem Wissen und weise darauf hin, dass keine Quellen verfügbar waren.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": [],
         }
     except httpx.HTTPError as exc:
@@ -136,6 +140,7 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             "observation": f"Suchservice nicht erreichbar: {exc}. "
                            f"Beantworte die Frage mit deinem Wissen und weise darauf hin, dass keine Quellen verfügbar waren.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": [],
         }
 
@@ -179,7 +184,8 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             "score": r.get("rerank_score", 0.0),
             "metadata": meta,
         })
-    return {"observation": "\n".join(lines), "chunks": chunks, "searched_collections": collections_to_search}
+    return {"observation": "\n".join(lines), "chunks": chunks, "searched_collections": collections_to_search,
+            "embed_ms": _embed_ms}
 
 
 def _op_facet(meta: dict, key: str):
@@ -267,6 +273,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         return {
             "observation": f"SEARCH_CNC ist für Use Case '{use_case}' nicht verfügbar.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": [],
         }
 
@@ -303,6 +310,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
     material_filter = {"extra.material_class": material} if material else {}
 
     try:
+        _embed_start = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
             embed_resp = await client.post(
                 f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
@@ -313,6 +321,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             embed_json = embed_resp.json()
             vector = embed_json["vector"]
             embed_model = embed_json.get("model")
+            _embed_ms = round((time.perf_counter() - _embed_start) * 1000)
 
             async def _search(filters: dict) -> list[dict]:
                 r = await client.post(
@@ -338,6 +347,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         return {
             "observation": f"Suchservice nicht erreichbar: {exc}.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": [],
         }
 
@@ -345,6 +355,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         return {
             "observation": "Keine passenden CNC-Schritte in der Datenbank gefunden.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": ["gw_cnc_steps"],
         }
 
@@ -408,7 +419,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             if missing_tokens else
             "Keine passenden Werkzeuge in der Datenbank gefunden."
         )
-        return {"observation": msg, "chunks": [], "searched_collections": ["gw_cnc_steps"]}
+        return {"observation": msg, "chunks": [], "embed_ms": _embed_ms, "searched_collections": ["gw_cnc_steps"]}
 
     head = f"Bearbeitungsschritt: {operation or '—'}"
     if requested_dia is not None:
@@ -477,6 +488,7 @@ async def action_refine_query(args: dict, *, use_case: str, collection: str, fil
         return {
             "observation": "REFINE_QUERY benötigt eine neue Query im 'query'-Feld.",
             "chunks": [],
+            "embed_ms": _embed_ms,
             "searched_collections": [],
         }
     reason = (args.get("reason") or "").strip()

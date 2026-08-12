@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Awaitable, Callable, Optional
 
 StepCallback = Optional[Callable[[dict], Awaitable[None]]]
@@ -19,6 +20,7 @@ from core.actions import (
 )
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
+from shared.llm.pipeline import get_last_llm_timing
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
 from core.use_cases import get_react_suffix
@@ -39,7 +41,7 @@ _NO_INFO_RE = re.compile(
     r"(keine\s+(?:passenden\s+|spezifischen\s+|konkreten\s+)?"
     r"(?:information|informationen|angabe|angaben|hinweise|dokumente)"
     r"|nicht\s+(?:in\s+den\s+|enthalten|dokumentiert|genannt|beschrieben)"
-    r"|enthalten\s+die\s+dokumente\s+keine"
+    r"|enthalten\s+die\dokumente\s+keine"
     r"|liegen\s+keine\s+.*vor"
     r"|keine\s+\S+(?:\s+\S+){0,4}?\s+vorliegen"
     r"|(?:handlungsempfehlung|empfehlung|aussage|antwort)\s+nicht\s+möglich"
@@ -182,6 +184,55 @@ def _parse_action(llm_response: str) -> tuple[str, str, dict]:
 
 
 async def _execute_action(
+    action_name: str,
+    action_args: dict,
+    *,
+    session_id: str,
+    use_case: str,
+    collection: str = "",
+    filters: dict | None = None,
+) -> str | dict:
+    """Execute an action and return the observation string (or dict with chunks).
+
+    Wrapped with an OpenInference tool span so Phoenix tracks tool usage.
+    """
+    try:
+        from shared.phoenix import get_tracer
+        tracer = get_tracer("agent")
+    except Exception:
+        tracer = None
+
+    if tracer is None:
+        return await _execute_action_inner(
+            action_name, action_args,
+            session_id=session_id, use_case=use_case,
+            collection=collection, filters=filters,
+        )
+
+    from openinference.semconv.trace import SpanAttributes, OpenInferenceSpanKindValues
+
+    with tracer.start_as_current_span(f"tool.{action_name.lower()}") as span:
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.TOOL.value)
+        span.set_attribute(SpanAttributes.TOOL_NAME, action_name)
+        span.set_attribute(SpanAttributes.TOOL_PARAMETERS, str(action_args))
+
+        try:
+            result = await _execute_action_inner(
+                action_name, action_args,
+                session_id=session_id, use_case=use_case,
+                collection=collection, filters=filters,
+            )
+            if isinstance(result, dict):
+                span.set_attribute(SpanAttributes.OUTPUT_VALUE, result.get("observation", str(result)))
+            else:
+                span.set_attribute(SpanAttributes.OUTPUT_VALUE, str(result)[:500])
+            return result
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
+
+
+async def _execute_action_inner(
     action_name: str,
     action_args: dict,
     *,
@@ -345,7 +396,9 @@ async def run_agent(
             await on_event({"type": "thinking", "step": step_num})
 
         # 1. Call LLM (use_case threads provider/model overrides through resolver)
+        _step_start = time.perf_counter()
         llm_response = await call_llm(messages, use_case=use_case)
+        _llm_timing_data = get_last_llm_timing()
         thought, action_name, action_args = _parse_action(llm_response)
 
         # Hard guard: small models (e.g. qwen3:8b) sometimes skip SEARCH on
@@ -433,6 +486,7 @@ async def run_agent(
 
         # 3. Log step – keep the full trace so the UI can show what the LLM
         #    saw (raw response) and which chunks it received for each SEARCH.
+        _step_dur = round((time.perf_counter() - _step_start) * 1000)
         step_dict = {
             "step": step_num,
             "thought": thought,
@@ -441,6 +495,9 @@ async def run_agent(
             "observation": observation,
             "llm_response": llm_response,
             "chunks": step_chunks,
+            "duration_ms": _step_dur,
+            "llm_timing": _llm_timing_data if _llm_timing_data else None,
+            "embed_timing": result.get("embed_ms") if isinstance(result, dict) else None,
         }
         steps.append(step_dict)
         if on_event:

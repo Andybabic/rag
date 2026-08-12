@@ -13,6 +13,7 @@ from shared.models import (
     SearchResult,
 )
 from shared.tracing import RequestIDMiddleware
+from shared.phoenix import setup_phoenix, get_tracer, get_tracer_provider, log_evaluation_to_phoenix
 
 __all__ = [
     "APIError",
@@ -26,5 +27,9 @@ __all__ = [
     "get_logger",
     "handle_error",
     "RequestIDMiddleware",
+    "setup_phoenix",
+    "get_tracer",
+    "get_tracer_provider",
     "setup_logging",
+    "log_evaluation_to_phoenix",
 ]

@@ -126,6 +126,15 @@ def _merge_row_into_config(base: LLMConfig, row: Any) -> LLMConfig:
         except CryptoError as exc:
             logger.warning("Cannot decrypt openai_api_key: %s — using env value", exc)
 
+    # Model, tuning, and limit columns — any non-NULL DB value overrides env
+    for col in (
+        "llm_model", "embedding_model", "vision_model",
+        "temperature", "max_tokens", "embed_batch_size",
+        "agent_max_steps", "memory_max_chars", "embedding_dimension",
+    ):
+        if row[col] is not None:
+            overrides[col] = row[col]
+
     return replace(base, **overrides) if overrides else base
 
 
@@ -143,16 +152,19 @@ async def upsert_config(use_case: str, fields: dict[str, Any]) -> None:
     values: list[Any] = [use_case]
     insert_cols: list[str] = ["use_case"]
     insert_placeholders: list[str] = ["$1"]
-    for i, (col, value) in enumerate(fields.items(), start=2):
+    param_idx = 2
+    for col, value in fields.items():
         if value is None:
             continue
         # empty string in an _encrypted field means "clear it"
         if isinstance(value, str) and value == "" and col.endswith("_encrypted"):
-            value = None
-        set_clauses.append(f"{col} = ${i}")
+            set_clauses.append(f"{col} = NULL")
+            continue
+        set_clauses.append(f"{col} = ${param_idx}")
         insert_cols.append(col)
-        insert_placeholders.append(f"${i}")
+        insert_placeholders.append(f"${param_idx}")
         values.append(value)
+        param_idx += 1
 
     if not set_clauses:
         return  # nothing to update
