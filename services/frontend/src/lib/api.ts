@@ -297,6 +297,12 @@ export async function updateConfig(
 	return resp.json();
 }
 
+export async function listModels(): Promise<{ models: string[]; error?: string }> {
+	const resp = await fetch(`${BASE}/admin/models`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
 export interface PromptKeyEntry {
 	key: string;
 	scope: string;
@@ -390,5 +396,54 @@ export async function updateAction(
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(update)
 	});
+	return resp.json();
+}
+
+// ── Metrics Dashboard ──────────────────────────────────────
+
+export interface MetricsQuery {
+	id: string;
+	use_case: string;
+	session_id: string | null;
+	role: string;
+	query_text: string;
+	answer_text: string;
+	answer_length: number;
+	step_count: number;
+	subtask_count: number;
+	chunk_count: number;
+	citation_count: number;
+	sufficient: boolean;
+	agent_steps: Record<string, unknown>[];
+	processing_ms: number | null;
+	compliance_verdict: string | null;
+	merge_strategy: string | null;
+	model: string | null;
+	llm_provider: string | null;
+	total_tokens: number | null;
+	retrieval_quality: number | null;
+	created_at: string | null;
+}
+
+export interface MetricsSummary {
+	total: number;
+	avg_steps: number;
+	avg_chunks: number;
+	avg_answer_length: number;
+	sufficient_count: number;
+	sufficient_pct: number;
+	avg_processing_ms: number | null;
+	avg_total_tokens: number | null;
+	avg_retrieval_quality: number | null;
+}
+
+export interface MetricsResponse {
+	queries: MetricsQuery[];
+	summary: MetricsSummary;
+}
+
+export async function getMetrics(useCase: string): Promise<MetricsResponse> {
+	const resp = await fetch(`${BASE}/admin/metrics?use_case=${useCase}`);
+	if (!resp.ok) throw new Error(await resp.text());
 	return resp.json();
 }

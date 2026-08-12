@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
-
-import asyncio
 
 import asyncpg
 from core.citations import map_citations
@@ -29,6 +29,21 @@ from models import (
     RerankRequest,
 )
 from shared.usecase_config import list_use_cases
+from shared.phoenix import get_tracer, log_evaluation_to_phoenix
+
+
+def _best_rerank_metric(chunks):
+    """Return (best_score, best_label) from global chunks, or (None, None)."""
+    best_score = None
+    best_label = None
+    for c in (chunks or []):
+        s = c.get("rerank_score") or c.get("score") or 0.0
+        lbl = c.get("relevance_label") or None
+        if best_score is None or s > best_score:
+            best_score = s
+            best_label = lbl or "unranked"
+    return best_score, best_label
+
 
 router = APIRouter(prefix="/v1", tags=["v1"])
 
@@ -117,41 +132,74 @@ async def agent_query(body: AgentQueryRequest, request: Request):
 
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
-    result = await run_manager(
-        query=body.query,
-        use_case=body.use_case,
-        session_id=body.session_id,
-        use_case_prompt=system_prompt,
-        available_actions=available_actions,
-        collection=collection,
-        filters=body.config.filters,
-        history=history,
-        images=body.images,
-    )
-
-    # Persist query to database (non-blocking)
     try:
-        pool = await get_pool()
-        # Use the request_id as the query's primary key so user feedback
-        # (which only knows the request_id) can be linked back to this row.
-        await pool.execute(
-            """INSERT INTO queries (id, use_case, session_id, role, query_text, answer_text,
-                                    agent_steps, citations, images, sufficient)
-               VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
-               ON CONFLICT (id) DO NOTHING""",
-            request_id,
-            body.use_case,
-            body.session_id,
-            body.role,
-            body.query,
-            result.get("answer", ""),
-            json.dumps(result.get("agent_steps", [])),
-            json.dumps(result.get("citations", [])),
-            json.dumps(body.images),
-            result.get("sufficient", False),
+        tracer = get_tracer("evaluation-service")
+        _span_ctx = tracer.start_as_current_span("agent_query")
+    except RuntimeError:
+        _span_ctx = contextlib.nullcontext()
+
+    with _span_ctx as agent_span:
+        _span_id = format(agent_span.get_span_context().span_id, "016x") if agent_span is not None else None
+
+        result = await run_manager(
+            query=body.query,
+            use_case=body.use_case,
+            session_id=body.session_id,
+            use_case_prompt=system_prompt,
+            available_actions=available_actions,
+            collection=collection,
+            filters=body.config.filters,
+            history=history,
+            images=body.images,
         )
-    except Exception as exc:
-        logging.getLogger(__name__).warning(f"Failed to log query: {exc}")
+
+        # Persist query to database (non-blocking)
+        try:
+            pool = await get_pool()
+            # Use the request_id as the query's primary key so user feedback
+            # (which only knows the request_id) can be linked back to this row.
+            await pool.execute(
+                """INSERT INTO queries (id, use_case, session_id, role, query_text, answer_text,
+                                        agent_steps, citations, images, sufficient, scores)
+                   VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11::jsonb)
+                   ON CONFLICT (id) DO NOTHING""",
+                request_id,
+                body.use_case,
+                body.session_id,
+                body.role,
+                body.query,
+                result.get("answer", ""),
+                json.dumps(result.get("agent_steps", [])),
+                json.dumps(result.get("citations", [])),
+                json.dumps(body.images),
+                result.get("sufficient", False),
+                json.dumps(result.get("audit", {}) or {}),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(f"Failed to log query: {exc}")
+
+        _chunks = result.get("global_chunks", []) or []
+        _best_score, _best_label = _best_rerank_metric(_chunks)
+
+        asyncio.create_task(
+            log_evaluation_to_phoenix(
+                evaluation_name="retrieval_sufficiency",
+                label="sufficient" if result.get("sufficient") else "insufficient",
+                score=1.0 if result.get("sufficient") else 0.0,
+                explanation="Chunks: " + str(len(result.get("citations", []))) + " cited, searched: " + str(result.get("searched_collections", [])),
+                span_id=_span_id,
+            )
+        )
+        if _best_score is not None and _best_label:
+            asyncio.create_task(
+                log_evaluation_to_phoenix(
+                    evaluation_name="retrieval_quality",
+                    label=_best_label,
+                    score=round(float(_best_score), 3),
+                    explanation="Best rerank score among " + str(len(_chunks)) + " global chunks",
+                    span_id=_span_id,
+                )
+            )
 
     return {**result, "request_id": request_id}
 
@@ -177,6 +225,14 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                      "request_id": request_id, "service": "evaluation-service"},
         )
 
+    try:
+        tracer = get_tracer("evaluation-service")
+        agent_span = tracer.start_span("agent_query_stream")
+        agent_span_id = format(agent_span.get_span_context().span_id, "016x")
+    except RuntimeError:
+        agent_span = None
+        agent_span_id = None
+
     collection = body.config.collection or default_collection
     history = [{"role": m.role, "content": m.content} for m in body.history]
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
@@ -185,6 +241,7 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
         await queue.put(event)
 
     async def runner() -> None:
+        nonlocal agent_span
         try:
             result = await run_manager(
                 query=body.query,
@@ -204,8 +261,8 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                 # request_id as PK — links this row to later user feedback.
                 await pool.execute(
                     """INSERT INTO queries (id, use_case, session_id, role, query_text,
-                                            answer_text, agent_steps, citations, images, sufficient)
-                       VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
+                                            answer_text, agent_steps, citations, images, sufficient, scores)
+                       VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11::jsonb)
                        ON CONFLICT (id) DO NOTHING""",
                     request_id,
                     body.use_case, body.session_id, body.role, body.query,
@@ -214,12 +271,38 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                     json.dumps(result.get("citations", [])),
                     json.dumps(body.images),
                     result.get("sufficient", False),
+                    json.dumps(result.get("audit", {}) or {}),
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning(f"Failed to log query: {exc}")
+
+            _chunks = result.get("global_chunks", []) or []
+            _best_score, _best_label = _best_rerank_metric(_chunks)
+
+            asyncio.create_task(
+                log_evaluation_to_phoenix(
+                    evaluation_name="retrieval_sufficiency",
+                    label="sufficient" if result.get("sufficient") else "insufficient",
+                    score=1.0 if result.get("sufficient") else 0.0,
+                    explanation="Chunks: " + str(len(result.get("citations", []))) + " cited, searched: " + str(result.get("searched_collections", [])),
+                    span_id=agent_span_id,
+                )
+            )
+            if _best_score is not None and _best_label:
+                asyncio.create_task(
+                    log_evaluation_to_phoenix(
+                        evaluation_name="retrieval_quality",
+                        label=_best_label,
+                        score=round(float(_best_score), 3),
+                        explanation="Best rerank score among " + str(len(_chunks)) + " global chunks",
+                        span_id=agent_span_id,
+                    )
+                )
         except Exception as exc:
             await queue.put({"type": "error", "detail": str(exc)})
         finally:
+            if agent_span is not None:
+                agent_span.end()
             await queue.put(None)  # sentinel: stream done
 
     async def event_stream():
@@ -358,6 +441,23 @@ async def log_feedback(body: FeedbackRequest, request: Request):
                 "service": "evaluation-service",
             },
         )
+
+    try:
+        from opentelemetry import trace as otel_trace
+        _span = otel_trace.get_current_span()
+        _span_id = format(_span.get_span_context().span_id, "016x") if _span and _span.get_span_context().is_valid else None
+    except (ImportError, RuntimeError):
+        _span_id = None
+    asyncio.create_task(
+        log_evaluation_to_phoenix(
+            evaluation_name="user_feedback",
+            label=body.feedback,
+            score=1.0 if body.feedback == "positive" else 0.0,
+            explanation=comment,
+            query_id=body.query_id,
+            span_id=_span_id,
+        )
+    )
 
     return {
         "status": "ok",

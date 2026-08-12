@@ -32,6 +32,7 @@ export interface AgentStep {
 	chunks?: RetrievedChunk[];
 	subagent_id?: string;
 	subagent_role?: string;
+	duration_ms?: number;
 }
 
 export interface ManagerSubtask {
@@ -73,6 +74,13 @@ export interface SynthesizerTrace {
 export interface ComplianceTrace {
 	verdict?: 'OK' | 'REWRITE' | 'REFUSE';
 	issues?: string[];
+	classified_issues?: Array<{
+		text: string;
+		category: string;
+		category_label: string;
+		confidence: number;
+		nli_label: string;
+	}>;
 	guidance?: string;
 	phase?: 'started' | 'done' | 'error';
 	detail?: string;
@@ -85,6 +93,15 @@ export interface AuditInfo {
 	max_tokens?: number | null;
 	generated_at?: string;
 	processing_ms?: number;
+	step_count?: number;
+	subtask_count?: number;
+	chunk_count?: number;
+	citation_count?: number;
+	answer_length?: number;
+	compliance_verdict?: string;
+	merge_strategy?: string;
+	sufficient?: boolean;
+	searched_collections_count?: number;
 }
 
 export interface ImageRef {

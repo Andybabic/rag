@@ -156,6 +156,17 @@
 		return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '';
 	}
 
+	function categoryColor(cat: string): string {
+		const colors: Record<string, string> = {
+			citation_coverage: 'border-blue-200 bg-blue-50 text-blue-700',
+			source_authenticity: 'border-purple-200 bg-purple-50 text-purple-700',
+			hallucination: 'border-red-200 bg-red-50 text-red-700',
+			use_case_policy: 'border-amber-200 bg-amber-50 text-amber-700',
+			unknown: 'border-gray-200 bg-gray-50 text-gray-600'
+		};
+		return colors[cat] || colors['unknown'];
+	}
+
 	function escapeAttr(s: string): string {
 		return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
@@ -567,6 +578,8 @@
 							{/if}
 
 							<!-- Compliance verdict -->
+							
+
 							{#if message.compliance && message.compliance.verdict}
 								{@const verdict = message.compliance.verdict}
 								{@const vColor = verdict === 'OK'
@@ -583,7 +596,18 @@
 											{verdict}
 										</span>
 									</div>
-									{#if message.compliance.issues && message.compliance.issues.length > 0}
+									{#if message.compliance.classified_issues && message.compliance.classified_issues.length > 0}
+										<ul class="mt-1 space-y-1 pl-0">
+											{#each message.compliance.classified_issues as ci}
+												<li class="flex items-start gap-1.5 text-[11px]">
+													<span class="mt-0.5 shrink-0 rounded border px-1 py-0 text-[9px] font-bold uppercase {categoryColor(ci.category)}">
+														{ci.category_label}
+													</span>
+													<span class="pt-0.5">{ci.text}</span>
+												</li>
+											{/each}
+										</ul>
+									{:else if message.compliance.issues && message.compliance.issues.length > 0}
 										<ul class="mt-1 list-disc space-y-0.5 pl-4 text-[11px]">
 											{#each message.compliance.issues as issue}
 												<li>{issue}</li>

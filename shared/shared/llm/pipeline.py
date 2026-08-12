@@ -11,9 +11,33 @@ Callers that need per-usecase overrides can pass a pre-resolved
 
 from __future__ import annotations
 
+import contextvars
+
 from shared.llm.base import LLMProvider
 from shared.llm.config import LLMConfig
 from shared.llm.registry import get_provider
+
+__all__ = ["chat", "embed", "embed_batch", "list_models", "vision_describe", "get_last_llm_timing", "reset_llm_timing"]
+
+# Per-request timing store using contextvars so concurrent requests don't cross each other's data.
+_last_llm_timing: contextvars.ContextVar = contextvars.ContextVar('last_llm_timing', default={})
+
+
+def get_last_llm_timing() -> dict:
+    """Return timing from the most recent Ollama /chat call within this request.
+
+    Keys: ``load_ms``, ``pp_ms``, ``tp_ms``, ``total_ms``,
+          ``prompt_tokens``, ``completion_tokens``.
+    Returns empty dict when there is no data yet.
+    """
+    return dict(_last_llm_timing.get())
+
+
+def reset_llm_timing() -> None:
+    """Clear the per-request timing store. Call before a function that may
+    or may not make an LLM call, so that ``get_last_llm_timing()`` returns
+    ``{}`` instead of stale data from the previous caller."""
+    _last_llm_timing.set({})
 
 
 def _resolve(role: str, config: LLMConfig | None = None) -> LLMProvider:
@@ -23,6 +47,46 @@ def _resolve(role: str, config: LLMConfig | None = None) -> LLMProvider:
     return get_provider(cfg.provider_for(role), cfg.for_role(role))
 
 
+def _tracer():
+    try:
+        from shared.phoenix import get_tracer
+        return get_tracer("shared.llm")
+    except Exception:
+        return None
+
+
+def _capture_llm_timing(provider):
+    """Store Ollama timing breakdown into the per-request context variable."""
+    counts = getattr(provider, "last_token_counts", {})
+    if counts:
+        _last_llm_timing.set({
+            "load_ms": round(counts.get("load_duration", 0) / 1_000_000, 1) if counts.get("load_duration") else 0,
+            "pp_ms": round(counts.get("prompt_eval_duration", 0) / 1_000_000, 1) if counts.get("prompt_eval_duration") else 0,
+            "tp_ms": round(counts.get("eval_duration", 0) / 1_000_000, 1) if counts.get("eval_duration") else 0,
+            "total_ms": round(counts.get("total_duration", 0) / 1_000_000, 1) if counts.get("total_duration") else 0,
+            "prompt_tokens": counts.get("prompt_eval_count", 0) or 0,
+            "completion_tokens": counts.get("eval_count", 0) or 0,
+        })
+
+
+def _set_token_counts(span, provider):
+    """Extract token counts from provider (e.g. Ollama) and set on span."""
+    from openinference.semconv.trace import SpanAttributes
+
+    counts = getattr(provider, "last_token_counts", {})
+    if not counts:
+        return
+
+    prompt_tokens = counts.get("prompt_eval_count", 0) or 0
+    completion_tokens = counts.get("eval_count", 0) or 0
+    total_tokens = prompt_tokens + completion_tokens
+
+    if total_tokens > 0:
+        span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_PROMPT, prompt_tokens)
+        span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_COMPLETION, completion_tokens)
+        span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_TOTAL, total_tokens)
+
+
 async def chat(
     messages: list[dict],
     *,
@@ -30,7 +94,33 @@ async def chat(
     config: LLMConfig | None = None,
     **opts,
 ) -> str:
-    return await _resolve("chat", config).chat(messages, model=model, **opts)
+    tracer = _tracer()
+    if tracer is None:
+        provider = _resolve("chat", config)
+        result = await provider.chat(messages, model=model, **opts)
+        _capture_llm_timing(provider)
+        return result
+
+    with tracer.start_as_current_span("llm.chat") as span:
+        from openinference.semconv.trace import (
+            SpanAttributes,
+            OpenInferenceSpanKindValues,
+        )
+
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.LLM.value)
+        span.set_attribute(SpanAttributes.LLM_MODEL_NAME, model)
+        span.set_attribute(SpanAttributes.LLM_INPUT_MESSAGES, str(messages))
+
+        try:
+            provider = _resolve("chat", config)
+            result = await provider.chat(messages, model=model, **opts)
+            _capture_llm_timing(provider)
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, result)
+            _set_token_counts(span, provider)
+            return result
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
 
 
 async def embed(
@@ -39,7 +129,27 @@ async def embed(
     model: str,
     config: LLMConfig | None = None,
 ) -> list[float]:
-    return await _resolve("embedding", config).embed(text, model=model)
+    tracer = _tracer()
+    if tracer is None:
+        return await _resolve("embedding", config).embed(text, model=model)
+
+    with tracer.start_as_current_span("llm.embed") as span:
+        from openinference.semconv.trace import (
+            SpanAttributes,
+            OpenInferenceSpanKindValues,
+        )
+
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.EMBEDDING.value)
+        span.set_attribute(SpanAttributes.EMBEDDING_MODEL_NAME, model)
+        span.set_attribute(SpanAttributes.INPUT_VALUE, text)
+
+        try:
+            result = await _resolve("embedding", config).embed(text, model=model)
+            span.set_attribute(SpanAttributes.EMBEDDING_EMBEDDINGS, str([{"vector_dim": len(result)}]))
+            return result
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
 
 
 async def embed_batch(
@@ -71,6 +181,30 @@ async def vision_describe(
     model: str,
     config: LLMConfig | None = None,
 ) -> str:
-    return await _resolve("vision", config).vision_describe(
-        prompt, image_base64, model=model
-    )
+    tracer = _tracer()
+    if tracer is None:
+        return await _resolve("vision", config).vision_describe(
+            prompt, image_base64, model=model
+        )
+
+    with tracer.start_as_current_span("llm.vision") as span:
+        from openinference.semconv.trace import (
+            SpanAttributes,
+            OpenInferenceSpanKindValues,
+        )
+
+        span.set_attribute(SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.LLM.value)
+        span.set_attribute(SpanAttributes.LLM_MODEL_NAME, model)
+        span.set_attribute(SpanAttributes.INPUT_VALUE, prompt)
+
+        try:
+            provider = _resolve("vision", config)
+            result = await provider.vision_describe(
+                prompt, image_base64, model=model
+            )
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, result)
+            _set_token_counts(span, provider)
+            return result
+        except Exception as exc:
+            span.record_exception(exc)
+            raise
