@@ -12,12 +12,21 @@ Callers that need per-usecase overrides can pass a pre-resolved
 from __future__ import annotations
 
 import contextvars
+import time
 
 from shared.llm.base import LLMProvider
 from shared.llm.config import LLMConfig
 from shared.llm.registry import get_provider
 
-__all__ = ["chat", "embed", "embed_batch", "list_models", "vision_describe", "get_last_llm_timing", "reset_llm_timing"]
+__all__ = [
+    "chat",
+    "embed",
+    "embed_batch",
+    "list_models",
+    "vision_describe",
+    "get_last_llm_timing",
+    "reset_llm_timing",
+]
 
 # Per-request timing store using contextvars so concurrent requests don't cross each other's data.
 _last_llm_timing: contextvars.ContextVar = contextvars.ContextVar('last_llm_timing', default={})
@@ -55,18 +64,30 @@ def _tracer():
         return None
 
 
-def _capture_llm_timing(provider):
-    """Store Ollama timing breakdown into the per-request context variable."""
-    counts = getattr(provider, "last_token_counts", {})
+def _ns_to_ms(counts: dict, key: str) -> float:
+    raw = counts.get(key)
+    return round(raw / 1_000_000, 1) if raw else 0
+
+
+def _capture_llm_timing(provider, wall_ms: float | None = None):
+    """Store timing from the most recent chat call (Ollama breakdown + wall clock)."""
+    counts = getattr(provider, "last_token_counts", {}) or {}
+    timing: dict = {}
     if counts:
-        _last_llm_timing.set({
-            "load_ms": round(counts.get("load_duration", 0) / 1_000_000, 1) if counts.get("load_duration") else 0,
-            "pp_ms": round(counts.get("prompt_eval_duration", 0) / 1_000_000, 1) if counts.get("prompt_eval_duration") else 0,
-            "tp_ms": round(counts.get("eval_duration", 0) / 1_000_000, 1) if counts.get("eval_duration") else 0,
-            "total_ms": round(counts.get("total_duration", 0) / 1_000_000, 1) if counts.get("total_duration") else 0,
+        timing = {
+            "load_ms": _ns_to_ms(counts, "load_duration"),
+            "pp_ms": _ns_to_ms(counts, "prompt_eval_duration"),
+            "tp_ms": _ns_to_ms(counts, "eval_duration"),
+            "total_ms": _ns_to_ms(counts, "total_duration"),
             "prompt_tokens": counts.get("prompt_eval_count", 0) or 0,
             "completion_tokens": counts.get("eval_count", 0) or 0,
-        })
+        }
+    if wall_ms is not None:
+        timing["wall_ms"] = wall_ms
+        if not timing.get("total_ms"):
+            timing["total_ms"] = wall_ms
+    if timing:
+        _last_llm_timing.set(timing)
 
 
 def _set_token_counts(span, provider):
@@ -94,11 +115,12 @@ async def chat(
     config: LLMConfig | None = None,
     **opts,
 ) -> str:
+    t0 = time.perf_counter()
     tracer = _tracer()
     if tracer is None:
         provider = _resolve("chat", config)
         result = await provider.chat(messages, model=model, **opts)
-        _capture_llm_timing(provider)
+        _capture_llm_timing(provider, wall_ms=round((time.perf_counter() - t0) * 1000, 1))
         return result
 
     with tracer.start_as_current_span("llm.chat") as span:
@@ -114,7 +136,7 @@ async def chat(
         try:
             provider = _resolve("chat", config)
             result = await provider.chat(messages, model=model, **opts)
-            _capture_llm_timing(provider)
+            _capture_llm_timing(provider, wall_ms=round((time.perf_counter() - t0) * 1000, 1))
             span.set_attribute(SpanAttributes.OUTPUT_VALUE, result)
             _set_token_counts(span, provider)
             return result

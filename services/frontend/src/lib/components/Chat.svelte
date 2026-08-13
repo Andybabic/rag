@@ -8,7 +8,8 @@
 		type ManagerPlan,
 		type SynthesizerTrace,
 		type ComplianceTrace,
-		type AuditInfo
+		type AuditInfo,
+		type TimingReport
 	} from '$lib/state.svelte';
 	import { streamQuery } from '$lib/api';
 	import { getUseCaseBySlug } from '$lib/use-cases';
@@ -126,7 +127,14 @@
 				llm_response: payload.llm_response as string,
 				chunks: (payload.chunks as AgentStep['chunks']) ?? [],
 				subagent_id: sub.subagent_id,
-				subagent_role: sub.role
+				subagent_role: sub.role,
+				duration_ms: payload.duration_ms as number | undefined,
+				llm_ms: payload.llm_ms as number | undefined,
+				action_ms: payload.action_ms as number | undefined,
+				embed_ms: payload.embed_ms as number | undefined,
+				search_ms: payload.search_ms as number | undefined,
+				rerank_ms: payload.rerank_ms as number | undefined,
+				llm_timing: payload.llm_timing as AgentStep['llm_timing']
 			};
 			if (idx >= 0) steps[idx] = full;
 			else steps.push(full);
@@ -274,7 +282,8 @@
 							answer: (event.answer_preview as string) ?? '',
 							sufficient: event.sufficient as boolean,
 							error: (event.error as string | null) ?? null,
-							status: event.error ? 'error' : 'done'
+							status: event.error ? 'error' : 'done',
+							duration_ms: event.duration_ms as number | undefined
 						});
 						updateMsg({
 							subAgents: list,
@@ -344,6 +353,9 @@
 				requestId: (result.request_id as string) ?? '',
 				sufficient: result.sufficient as boolean | undefined,
 				audit: (result.audit as AuditInfo | undefined) ?? undefined,
+				timing:
+					(result.timing as TimingReport | undefined) ??
+					((result.audit as AuditInfo | undefined)?.timing),
 				imagesUsed: (result.images_used as Message['imagesUsed']) ?? [],
 				durationMs: Math.round(performance.now() - startedAt),
 				streaming: false,
@@ -403,6 +415,12 @@
 			action: s.action,
 			args: s.args,
 			observation: s.observation,
+			duration_ms: s.duration_ms,
+			llm_ms: s.llm_ms,
+			action_ms: s.action_ms,
+			embed_ms: s.embed_ms,
+			search_ms: s.search_ms,
+			rerank_ms: s.rerank_ms,
 			chunks: s.chunks,
 			...(nested ? {} : { subagent_id: s.subagent_id, subagent_role: s.subagent_role })
 		});
@@ -434,6 +452,7 @@
 						? { duration_ms: m.durationMs }
 						: {}),
 					audit: m.audit,
+					timing: m.timing,
 					enriched_query:
 						m.enrichedQuery && m.enrichedQuery !== m.text ? m.enrichedQuery : undefined,
 					citations: m.citations,
@@ -447,6 +466,7 @@
 								focus: s.focus,
 								status: s.status,
 								sufficient: s.sufficient,
+								duration_ms: s.duration_ms,
 								searched_collections: s.searched_collections,
 								error: s.error,
 								answer: s.answer,

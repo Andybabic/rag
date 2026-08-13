@@ -72,3 +72,25 @@ def test_parse_empty_thought():
     response = 'ACTION: SEARCH({"query": "test"})'
     thought, action, _ = _parse_action(response)
     assert action == "SEARCH"
+
+
+def test_parse_strips_thinking_before_action():
+    response = (
+        "<think>interne Überlegungen, nicht zeigen</think>\n"
+        "THOUGHT: genug Infos\n"
+        'ACTION: FINAL_ANSWER({"answer": "Hallo!", "extras": {}})'
+    )
+    thought, action, args = _parse_action(response)
+    assert thought == "genug Infos"
+    assert action == "FINAL_ANSWER"
+    assert args["answer"] == "Hallo!"
+
+
+def test_parse_nemotron_style_closing_tag():
+    response = (
+        "Here's a thinking process:\n1. greet\n"
+        "</think>Hallo! Mir geht es gut."
+    )
+    _, action, args = _parse_action(response)
+    assert action == "FINAL_ANSWER"
+    assert args["answer"] == "Hallo! Mir geht es gut."

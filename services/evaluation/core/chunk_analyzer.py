@@ -18,6 +18,7 @@ import re
 
 import httpx
 import numpy as np
+from shared.llm.thinking import extract_assistant_text
 
 # In-memory progress tracker: {"query_id": {"done": N, "total": M}}
 _analysis_progress: dict[str, dict[str, int]] = {}
@@ -278,7 +279,7 @@ async def _extract_claims_via_llamacpp(
         raise last_exc  # type: ignore[possibly-unbound]
 
     msg = data.get("choices", [{}])[0].get("message", {})
-    content = msg.get("content", "") or msg.get("reasoning_content", "")
+    content = extract_assistant_text(msg)
     if not content:
         return []
 
@@ -413,7 +414,7 @@ async def _map_claims_to_answer_text(
         raise last_exc  # type: ignore[possibly-unbound]
 
     msg = data.get("choices", [{}])[0].get("message", {})
-    content_raw = msg.get("content", "") or msg.get("reasoning_content", "")
+    content_raw = extract_assistant_text(msg)
     if not content_raw:
         logger.warning("_map_claims_to_answer_text: empty LLM response")
         return {}

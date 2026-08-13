@@ -10,12 +10,32 @@ is required.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import httpx
 
 from shared.llm.base import LLMProvider
 from shared.llm.errors import LLMUnavailableError
 from shared.llm.images import to_data_uri
 from shared.llm.registry import register
+from shared.llm.thinking import extract_assistant_text, openai_thinking_kwargs
+
+
+def normalize_openai_base_url(url: str) -> str:
+    """Append ``/v1`` when the base URL has no path.
+
+    OpenAI-compatible servers (vLLM, LiteLLM, NIM) expose
+    ``/v1/chat/completions``. A host-only URL would otherwise hit
+    ``/chat/completions`` and 404. Existing paths (``/v1``, Azure
+    ``/openai/deployments/...``) are left unchanged.
+    """
+    raw = (url or "").strip().rstrip("/")
+    if not raw:
+        return raw
+    path = urlparse(raw).path
+    if path in ("", "/"):
+        return f"{raw}/v1"
+    return raw
 
 
 def _normalize_images(messages: list[dict]) -> list[dict]:
@@ -50,7 +70,13 @@ class OpenAIProvider(LLMProvider):
         }
 
     def _url(self, path: str) -> str:
-        return f"{self.config.openai_base_url.rstrip('/')}{path}"
+        return f"{normalize_openai_base_url(self.config.openai_base_url)}{path}"
+
+    def _http_error(self, exc: httpx.HTTPStatusError) -> LLMUnavailableError:
+        return LLMUnavailableError(
+            f"OpenAI returned {exc.response.status_code} at {exc.request.url}: "
+            f"{exc.response.text}"
+        )
 
     async def chat(self, messages: list[dict], *, model: str, **opts) -> str:
         body: dict = {
@@ -65,6 +91,7 @@ class OpenAIProvider(LLMProvider):
             body["temperature"] = 0.2
         if "max_tokens" in options:
             body["max_tokens"] = options["max_tokens"]
+        body.update(openai_thinking_kwargs(self.config.enable_thinking))
 
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
@@ -74,15 +101,20 @@ class OpenAIProvider(LLMProvider):
                     json=body,
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                usage = data.get("usage") or {}
+                self.last_token_counts = {
+                    "prompt_eval_count": usage.get("prompt_tokens", 0) or 0,
+                    "eval_count": usage.get("completion_tokens", 0) or 0,
+                }
+                message = (data.get("choices") or [{}])[0].get("message") or {}
+                return extract_assistant_text(message)
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
                 f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise LLMUnavailableError(
-                f"OpenAI returned {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            raise self._http_error(exc) from exc
 
     async def embed(self, text: str, *, model: str) -> list[float]:
         try:
@@ -99,9 +131,7 @@ class OpenAIProvider(LLMProvider):
                 f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise LLMUnavailableError(
-                f"OpenAI returned {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            raise self._http_error(exc) from exc
 
     async def list_models(self) -> list[dict]:
         try:
@@ -120,9 +150,7 @@ class OpenAIProvider(LLMProvider):
                 f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise LLMUnavailableError(
-                f"OpenAI returned {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            raise self._http_error(exc) from exc
 
     async def vision_describe(
         self,
@@ -152,15 +180,15 @@ class OpenAIProvider(LLMProvider):
                         "model": model,
                         "messages": messages,
                         "stream": False,
+                        **openai_thinking_kwargs(self.config.enable_thinking),
                     },
                 )
                 resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"].strip()
+                message = (resp.json().get("choices") or [{}])[0].get("message") or {}
+                return extract_assistant_text(message)
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
                 f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
             ) from exc
         except httpx.HTTPStatusError as exc:
-            raise LLMUnavailableError(
-                f"OpenAI returned {exc.response.status_code}: {exc.response.text}"
-            ) from exc
+            raise self._http_error(exc) from exc

@@ -40,6 +40,13 @@ def _env_float(name: str, default: float | None = None) -> float | None:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     """Snapshot of the LLM-related env vars at call time.
@@ -86,6 +93,10 @@ class LLMConfig:
     # timeout aborts a whole document ingest on one image.
     vision_timeout: float = 180.0
 
+    # Chain-of-thought / thinking tokens (Nemotron, Qwen3, …). Off unless
+    # ``THINKING=true`` is set in the environment.
+    enable_thinking: bool = False
+
     @classmethod
     def from_env(cls) -> LLMConfig:
         return cls(
@@ -109,6 +120,7 @@ class LLMConfig:
             agent_max_steps=_env_int("AGENT_MAX_STEPS"),
             memory_max_chars=_env_int("MEMORY_MAX_CHARS"),
             vision_timeout=_env_float("VISION_TIMEOUT", 180.0) or 180.0,
+            enable_thinking=_env_bool("THINKING", False),
         )
 
     def provider_for(self, role: str) -> str:

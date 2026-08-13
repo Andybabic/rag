@@ -20,10 +20,11 @@ from core.actions import (
 )
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import call_llm
-from shared.llm.pipeline import get_last_llm_timing
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
 from core.use_cases import get_react_suffix
+from shared.llm.pipeline import get_last_llm_timing
+from shared.llm.thinking import strip_thinking
 from shared.usecase_config import list_skills
 
 _ACTION_NAME_RE = re.compile(r"ACTION:\s*(\w+)\(", re.DOTALL)
@@ -159,6 +160,7 @@ def _parse_action(llm_response: str) -> tuple[str, str, dict]:
     Returns (thought, action_name, action_args).
     Falls back to FINAL_ANSWER with the entire response if no action found.
     """
+    llm_response = strip_thinking(llm_response or "")
     thought_match = _THOUGHT_RE.search(llm_response)
     thought = thought_match.group(1).strip() if thought_match else ""
 
@@ -399,6 +401,7 @@ async def run_agent(
         _step_start = time.perf_counter()
         llm_response = await call_llm(messages, use_case=use_case)
         _llm_timing_data = get_last_llm_timing()
+        _llm_ms = round((time.perf_counter() - _step_start) * 1000)
         thought, action_name, action_args = _parse_action(llm_response)
 
         # Hard guard: small models (e.g. qwen3:8b) sometimes skip SEARCH on
@@ -463,6 +466,7 @@ async def run_agent(
             has_searched = True
 
         # 2. Execute action
+        _action_start = time.perf_counter()
         result = await _execute_action(
             action_name,
             action_args,
@@ -486,6 +490,7 @@ async def run_agent(
 
         # 3. Log step – keep the full trace so the UI can show what the LLM
         #    saw (raw response) and which chunks it received for each SEARCH.
+        _action_ms = round((time.perf_counter() - _action_start) * 1000)
         _step_dur = round((time.perf_counter() - _step_start) * 1000)
         step_dict = {
             "step": step_num,
@@ -496,8 +501,12 @@ async def run_agent(
             "llm_response": llm_response,
             "chunks": step_chunks,
             "duration_ms": _step_dur,
+            "llm_ms": _llm_ms,
+            "action_ms": _action_ms,
             "llm_timing": _llm_timing_data if _llm_timing_data else None,
-            "embed_timing": result.get("embed_ms") if isinstance(result, dict) else None,
+            "embed_ms": result.get("embed_ms") if isinstance(result, dict) else None,
+            "search_ms": result.get("search_ms") if isinstance(result, dict) else None,
+            "rerank_ms": result.get("rerank_ms") if isinstance(result, dict) else None,
         }
         steps.append(step_dict)
         if on_event:
