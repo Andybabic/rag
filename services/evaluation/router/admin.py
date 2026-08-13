@@ -2,6 +2,7 @@
 
 
 from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -11,6 +12,7 @@ import uuid
 from core.database import get_pool
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_CATALOG
+from core.provider_test import list_chat_models, overlay_config, run_connection_tests
 from core.use_cases import (
     GLOBAL_USE_CASE,
     PROMPT_KEY_REACT_SUFFIX,
@@ -42,8 +44,6 @@ from shared.usecase_config import (
     upsert_prompt,
     upsert_use_case,
 )
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -409,22 +409,41 @@ async def update_config(use_case: str, body: ConfigUpdate):
     return {"status": "ok", "use_case": use_case}
 
 
-# ── Available Ollama models ──────────────────────────────────
+class ConfigTestRequest(BaseModel):
+    """Optional unsaved form values. Empty/omitted fields keep the stored config."""
+
+    chat_provider: str | None = None
+    vision_provider: str | None = None
+    ollama_base_url: str | None = None
+    openai_base_url: str | None = None
+    ollama_api_key: str | None = None
+    openai_api_key: str | None = None
+    llm_model: str | None = None
+    vision_model: str | None = None
+
+
+@router.post("/config/{use_case}/test")
+async def test_config(use_case: str, body: ConfigTestRequest):
+    """Probe chat (and vision) against the effective use-case config.
+
+    Unsaved form values in the body overlay the stored config so admins can
+    verify a new URL or key before saving. Failures come back as German
+    ``message`` + ``hint`` rather than raw provider text.
+    """
+    cfg = overlay_config(await resolve_config(use_case), body.model_dump(exclude_unset=True))
+    result = await run_connection_tests(cfg)
+    result["use_case"] = use_case
+    return result
+
+
+# ── Available models on the configured chat provider ─────────
 
 
 @router.get("/models")
-async def list_ollama_models():
-    """Return model names currently available on the llama.cpp server."""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get("http://172.19.0.1:8081/v1/models")
-            data = r.json()
-            models = [m["id"] for m in data.get("data", [])]
-            models.sort()
-            return {"models": models}
-    except Exception as exc:
-        return {"models": ["qwen3.5:9b", "gemma4:12b"], "error": f"llama.cpp nicht erreichbar: {exc}"}
+async def list_available_models(use_case: str = ""):
+    """Return model names from the chat provider (env or per-use-case config)."""
+    cfg = await resolve_config(use_case) if use_case else LLMConfig.from_env()
+    return await list_chat_models(cfg)
 
 
 # ── Skills / Regeln ──────────────────────────────────────────

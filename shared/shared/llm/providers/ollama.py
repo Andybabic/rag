@@ -13,6 +13,7 @@ from shared.llm.base import LLMProvider
 from shared.llm.errors import LLMUnavailableError
 from shared.llm.images import to_raw_base64
 from shared.llm.registry import register
+from shared.llm.thinking import extract_assistant_text
 
 
 def _normalize_images(messages: list[dict]) -> list[dict]:
@@ -55,6 +56,7 @@ class OllamaProvider(LLMProvider):
                         "model": model,
                         "messages": _normalize_images(messages),
                         "stream": False,
+                        "think": bool(self.config.enable_thinking),
                         "options": options,
                     },
                 )
@@ -69,7 +71,7 @@ class OllamaProvider(LLMProvider):
                     "total_duration": data.get("total_duration", 0),
                     "load_duration": data.get("load_duration", 0),
                 }
-                return data["message"]["content"]
+                return extract_assistant_text(data.get("message") or {})
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
                 f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"
@@ -138,6 +140,7 @@ class OllamaProvider(LLMProvider):
                             }
                         ],
                         "stream": False,
+                        "think": bool(self.config.enable_thinking),
                         "options": {
                             "temperature": 0.2,
                             "num_ctx": self.config.ollama_num_ctx,
@@ -151,7 +154,7 @@ class OllamaProvider(LLMProvider):
                     "prompt_eval_count": data.get("prompt_eval_count", 0),
                     "eval_count": data.get("eval_count", 0),
                 }
-                return data.get("message", {}).get("content", "").strip()
+                return extract_assistant_text(data.get("message") or {})
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
                 f"Ollama not reachable / timed out at {self.config.ollama_base_url}: {exc}"

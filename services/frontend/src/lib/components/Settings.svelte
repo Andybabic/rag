@@ -7,6 +7,7 @@
 		updateAction,
 		getConfig,
 		updateConfig,
+		testConfig,
 		listModels,
 		listPromptKeys,
 		updatePromptKey,
@@ -16,7 +17,8 @@
 		deleteSkill,
 		type UsecaseConfig,
 		type PromptKeyEntry,
-		type Skill
+		type Skill,
+		type ConfigTestResult
 	} from '$lib/api';
 
 	// ── Active tab ──────────────────────────────────────────
@@ -81,6 +83,10 @@
 	let visionModel = $state('');
 	let availableModels: string[] = $state([]);
 	let modelsLoading = $state(false);
+	let modelsError = $state('');
+	let modelsHint = $state('');
+	let testLoading = $state(false);
+	let testResult: ConfigTestResult | null = $state(null);
 	let temperature = $state<number | ''>('');
 	let maxTokens = $state<number | ''>('');
 	let agentMaxSteps = $state<number | ''>('');
@@ -109,11 +115,18 @@
 
 	async function loadModels() {
 		modelsLoading = true;
+		modelsError = '';
+		modelsHint = '';
 		try {
-			const data = await listModels();
+			const data = await listModels(app.useCase);
 			availableModels = data.models ?? [];
-		} catch {
+			if (data.error) {
+				modelsError = data.message || data.error;
+				modelsHint = data.hint ?? '';
+			}
+		} catch (e) {
 			availableModels = [];
+			modelsError = e instanceof Error ? e.message : String(e);
 		}
 		modelsLoading = false;
 	}
@@ -142,9 +155,39 @@
 		cfgLoading = false;
 	}
 
+	async function testConnection() {
+		testLoading = true;
+		testResult = null;
+		cfgError = '';
+		const patch: Record<string, string | null> = {
+			chat_provider: chatProvider,
+			vision_provider: visionProvider,
+			ollama_base_url: ollamaBaseUrl || null,
+			openai_base_url: openaiBaseUrl || null,
+			llm_model: llmModel || null,
+			vision_model: visionModel || null
+		};
+		if (ollamaApiKey) patch.ollama_api_key = ollamaApiKey;
+		if (openaiApiKey) patch.openai_api_key = openaiApiKey;
+		try {
+			const result = await testConfig(app.useCase, patch);
+			testResult = result;
+			const chat = result.checks.find((c) => c.role === 'chat');
+			if (chat?.ok && chat.models.length > 0 && chat.models.length <= 50) {
+				availableModels = chat.models;
+				modelsError = '';
+				modelsHint = '';
+			}
+		} catch (e) {
+			cfgError = e instanceof Error ? e.message : String(e);
+		}
+		testLoading = false;
+	}
+
 	async function saveConfig() {
 		cfgLoading = true;
 		cfgError = '';
+		testResult = null;
 		const patch: Record<string, string | number | null> = {
 			chat_provider: chatProvider,
 			vision_provider: visionProvider,
@@ -164,7 +207,15 @@
 		try {
 			const result = await updateConfig(app.useCase, patch);
 			if (result.error) {
-				cfgError = result.detail || result.error;
+				if (result.error === 'crypto_unavailable') {
+					cfgError =
+						'API-Keys können nicht gespeichert werden: CONFIG_MASTER_KEY ist nicht gesetzt.';
+				} else if (result.error === 'db_unavailable') {
+					cfgError =
+						'Die Datenbank ist nicht erreichbar. Die Konfiguration wurde nicht gespeichert.';
+				} else {
+					cfgError = result.detail || result.error;
+				}
 			} else {
 				cfgSaved = true;
 				ollamaApiKey = '';
@@ -440,6 +491,7 @@
 					</h3>
 					<p class="mt-0.5 text-xs text-gray-400">
 						Leere Felder verwenden den Wert aus der globalen <code>.env</code>.
+						„Verbindung testen“ prüft die aktuell eingetragenen Werte (auch ungespeicherte Keys/URLs).
 					</p>
 				</div>
 				<div class="flex items-center gap-2">
@@ -447,8 +499,16 @@
 						<span class="text-xs text-green-600">Gespeichert!</span>
 					{/if}
 					<button
+						type="button"
+						onclick={testConnection}
+						disabled={cfgLoading || testLoading}
+						class="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-40"
+					>
+						{testLoading ? 'Teste…' : 'Verbindung testen'}
+					</button>
+					<button
 						onclick={saveConfig}
-						disabled={cfgLoading}
+						disabled={cfgLoading || testLoading}
 						class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40"
 					>
 						Speichern
@@ -459,6 +519,54 @@
 			{#if cfgError}
 				<div class="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
 					{cfgError}
+				</div>
+			{/if}
+
+			{#if testResult}
+				<div class="space-y-2">
+					{#each testResult.checks as check}
+						<div
+							class="rounded border p-3 text-xs
+								{check.ok
+								? 'border-green-200 bg-green-50 text-green-900'
+								: 'border-red-200 bg-red-50 text-red-800'}"
+						>
+							<div class="flex items-start justify-between gap-2">
+								<p class="font-semibold">
+									{check.ok ? '✓' : '✗'}
+									{check.role === 'chat' ? 'Chat' : 'Vision'}
+									<span class="font-normal text-gray-600">
+										· {check.provider}{#if check.model} · {check.model}{/if}
+									</span>
+								</p>
+								<span class="shrink-0 text-[10px] text-gray-500">{check.latency_ms} ms</span>
+							</div>
+							<p class="mt-1">{check.message}</p>
+							{#if check.hint}
+								<p class="mt-1 text-gray-700">{check.hint}</p>
+							{/if}
+							{#if check.base_url}
+								<p class="mt-1 font-mono text-[10px] text-gray-500">{check.base_url}</p>
+							{/if}
+							{#if !check.ok && !check.skipped && check.detail && check.detail !== check.message}
+								<details class="mt-1.5">
+									<summary class="cursor-pointer text-[10px] text-gray-500 hover:text-gray-700">
+										Technische Details
+									</summary>
+									<pre class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-gray-600">{check.detail}</pre>
+								</details>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+
+			{#if modelsError}
+				<div class="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+					<p class="font-medium">Modellliste: {modelsError}</p>
+					{#if modelsHint}
+						<p class="mt-0.5 text-amber-800">{modelsHint}</p>
+					{/if}
 				</div>
 			{/if}
 

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { sendFeedback } from '$lib/api';
-	import type { Message } from '$lib/state.svelte';
+	import type { Message, TimingPhase } from '$lib/state.svelte';
 	import { marked } from 'marked';
 
 	// `readonly` renders the message exactly like the live chat but without the
@@ -11,6 +11,7 @@
 	let showSteps = $state(false);
 	let showManager = $state(false);
 	let showCitations = $state(false);
+	let showTiming = $state(true);
 	let openSteps = $state<Set<number>>(new Set());
 	let openSubAgents = $state<Set<string>>(new Set());
 	// Panels stay collapsed by default – the user expands what they
@@ -25,6 +26,23 @@
 			openSubAgents.add(id);
 		}
 		openSubAgents = new Set(openSubAgents);
+	}
+
+	function fmtMs(ms: number | undefined | null): string {
+		if (ms == null || ms <= 0) return '';
+		if (ms < 1000) return `${Math.round(ms)} ms`;
+		return `${(ms / 1000).toFixed(1)} s`;
+	}
+
+	function barPct(ms: number, total: number): number {
+		if (!total) return 0;
+		return Math.max(2, Math.min(100, Math.round((100 * ms) / total)));
+	}
+
+	function containsNeck(phase: TimingPhase | undefined, neckId: string | undefined): boolean {
+		if (!phase || !neckId) return false;
+		if (phase.id === neckId) return true;
+		return (phase.children ?? []).some((child) => containsNeck(child, neckId));
 	}
 
 	const roleColors: Record<string, string> = {
@@ -277,6 +295,34 @@
 	};
 </script>
 
+{#snippet timingPhase(phase: TimingPhase, totalMs: number, neckId: string | undefined, depth: number)}
+	{@const isNeck = phase.id === neckId}
+	{@const inPath = containsNeck(phase, neckId)}
+	<div class={depth > 0 ? 'mt-1 pl-2' : ''}>
+		<div class="mb-0.5 flex items-center justify-between gap-2 text-[10px]">
+			<span class="{isNeck ? 'font-semibold text-amber-800' : depth ? 'text-gray-500' : 'text-gray-600'}">
+				{phase.label}
+			</span>
+			<span class="shrink-0 font-mono text-gray-500">
+				{fmtMs(phase.ms)}{#if phase.llm_ms} · LLM {fmtMs(phase.llm_ms)}{/if}
+			</span>
+		</div>
+		<div class="h-1.5 overflow-hidden rounded-full bg-gray-100">
+			<div
+				class="h-full rounded-full {isNeck || (inPath && depth === 0) ? 'bg-amber-500' : depth ? 'bg-gray-300' : 'bg-blue-400'}"
+				style="width: {barPct(phase.ms, totalMs)}%"
+			></div>
+		</div>
+		{#if phase.children && phase.children.length > 0}
+			<div class="mt-0.5">
+				{#each phase.children as child}
+					{@render timingPhase(child, totalMs, neckId, depth + 1)}
+				{/each}
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
 {#if message.role === 'user'}
 	<!-- User message -->
 	<div class="flex justify-end">
@@ -358,6 +404,41 @@
 						</div>
 					</div>
 				{/if}
+			{/if}
+
+			{#if message.timing && message.timing.total_ms > 0}
+				{@const t = message.timing}
+				{@const neck = t.bottleneck}
+				<div class="mt-3 border-t border-gray-100 pt-3">
+					<button
+						class="mb-2 flex w-full items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-600"
+						onclick={() => (showTiming = !showTiming)}
+					>
+						<span class="transform transition-transform {showTiming ? 'rotate-90' : ''}">&#9654;</span>
+						Laufzeit
+						<span class="ml-auto font-mono text-[11px] font-medium normal-case text-gray-600">
+							{fmtMs(t.total_ms)}
+						</span>
+					</button>
+					{#if showTiming}
+						{#if neck}
+							<p class="mb-2 text-[11px] text-amber-800">
+								Flaschenhals: <span class="font-semibold">{neck.label}</span>
+								({fmtMs(neck.ms)}, {neck.share_pct} %)
+							</p>
+						{/if}
+						<div class="space-y-1.5">
+							{#each t.phases as phase}
+								{@render timingPhase(phase, t.total_ms, neck?.id, 0)}
+							{/each}
+						</div>
+						{#if message.durationMs}
+							<p class="mt-2 text-[10px] text-gray-400">
+								Client inkl. Netzwerk: {fmtMs(message.durationMs)}
+							</p>
+						{/if}
+					{/if}
+				</div>
 			{/if}
 
 			<!-- Searched Collections -->
@@ -496,6 +577,9 @@
 													{statusLabels[sub.status ?? 'done'] ?? sub.status}
 												</span>
 												<span class="min-w-0 flex-1 truncate text-gray-700">{sub.sub_query}</span>
+												{#if sub.duration_ms}
+													<span class="shrink-0 font-mono text-[10px] text-gray-400">{fmtMs(sub.duration_ms)}</span>
+												{/if}
 												{#if sub.agent_steps && sub.agent_steps.length > 0}
 													<span class="shrink-0 text-[10px] text-gray-400">{sub.agent_steps.length} Schritte</span>
 												{/if}
@@ -545,6 +629,9 @@
 																			<span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[9px] font-bold text-gray-600">{step.step}</span>
 																			<span class="rounded border px-1 py-0.5 text-[9px] font-semibold {colors}">{step.action}</span>
 																			<span class="truncate text-gray-500">{label}</span>
+																			{#if step.duration_ms}
+																				<span class="ml-auto shrink-0 font-mono text-[9px] text-gray-400">{fmtMs(step.duration_ms)}</span>
+																			{/if}
 																		</button>
 																		{#if stepOpen}
 																			<div class="space-y-2 border-t border-gray-100 px-2 py-2">
@@ -562,6 +649,15 @@
 																				{/if}
 																				{#if step.chunks && step.chunks.length > 0}
 																					<p class="text-[9px] text-gray-500">{step.chunks.length} Chunks abgerufen</p>
+																				{/if}
+																				{#if step.duration_ms || step.llm_ms || step.embed_ms}
+																					<p class="text-[9px] text-gray-400">
+																						{#if step.llm_ms}LLM {fmtMs(step.llm_ms)}{/if}
+																						{#if step.action_ms} · Aktion {fmtMs(step.action_ms)}{/if}
+																						{#if step.embed_ms} · Embed {fmtMs(step.embed_ms)}{/if}
+																						{#if step.search_ms} · Suche {fmtMs(step.search_ms)}{/if}
+																						{#if step.rerank_ms} · Rerank {fmtMs(step.rerank_ms)}{/if}
+																					</p>
 																				{/if}
 																			</div>
 																		{/if}
@@ -692,6 +788,9 @@
 										<span class="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[10px] font-bold text-gray-600">{step.step}</span>
 										<span class="rounded-md border px-1.5 py-0.5 text-[10px] font-semibold {colors}">{step.action}</span>
 										<span class="truncate text-gray-500">{label}</span>
+										{#if step.duration_ms}
+											<span class="ml-auto shrink-0 font-mono text-[10px] text-gray-400">{fmtMs(step.duration_ms)}</span>
+										{/if}
 									</button>
 
 									<!-- Step details (expandable) -->
@@ -719,6 +818,16 @@
 													<p class="mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">Ergebnis (an LLM)</p>
 													<pre class="max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-gray-50 p-2 font-mono text-[11px] text-gray-600">{step.observation}</pre>
 												</div>
+											{/if}
+
+											{#if step.duration_ms || step.llm_ms || step.embed_ms}
+												<p class="text-[10px] text-gray-400">
+													{#if step.llm_ms}LLM {fmtMs(step.llm_ms)}{/if}
+													{#if step.action_ms} · Aktion {fmtMs(step.action_ms)}{/if}
+													{#if step.embed_ms} · Embed {fmtMs(step.embed_ms)}{/if}
+													{#if step.search_ms} · Suche {fmtMs(step.search_ms)}{/if}
+													{#if step.rerank_ms} · Rerank {fmtMs(step.rerank_ms)}{/if}
+												</p>
 											{/if}
 
 											<!-- Retrieved chunks (Vector-DB Rohdaten) -->

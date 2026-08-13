@@ -39,6 +39,7 @@ from core.roles import (
     filter_actions,
     get_role,
 )
+from core.timing import subagent_phase_children, timing_report
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +357,7 @@ async def _run_one_subagent(
     on_event: StepCallback,
 ) -> dict:
     """Run a single sub-agent. Wraps ``run_agent`` with the role config."""
+    _t0 = time.perf_counter()
     sub_actions = filter_actions(role, available_actions)
     sub_prompt = _build_sub_system_prompt(use_case_prompt, role, focus)
 
@@ -413,6 +415,7 @@ async def _run_one_subagent(
         "sufficient": result.get("sufficient", False),
         "searched_collections": result.get("searched_collections", []),
         "error": result.get("error"),
+        "duration_ms": round((time.perf_counter() - _t0) * 1000),
     }
 
     if on_event:
@@ -424,6 +427,7 @@ async def _run_one_subagent(
             "chunk_count": len(chunks),
             "sufficient": sub_result["sufficient"],
             "error": sub_result["error"],
+            "duration_ms": sub_result.get("duration_ms"),
         })
     return sub_result
 
@@ -1093,6 +1097,7 @@ async def run_manager(
       global_chunks       – deduped chunk pool used for citation mapping
     """
     _t0 = time.perf_counter()
+    phases: list[dict] = []
     if on_event:
         await on_event({"type": "started", "stage": "manager"})
 
@@ -1103,25 +1108,44 @@ async def run_manager(
     if images:
         if on_event:
             await on_event({"type": "image_analysis", "count": len(images)})
+        _img_t = time.perf_counter()
         image_context = await describe_uploaded_images(images, use_case=use_case)
+        phases.append({
+            "id": "images",
+            "label": "Bildanalyse",
+            "ms": round((time.perf_counter() - _img_t) * 1000),
+        })
 
     # Vague/incomplete query → recall the most relevant past Q&A from the
     # memory RAG so the manager can plan concrete sub-tasks instead of guessing.
     # Gated on vagueness so clear queries pay no extra embed+search cost.
     memory = ""
     if _is_vague_query(query, history):
+        _mem_t = time.perf_counter()
         mems = await recall(use_case, query)
         if mems:
             if on_event:
                 await on_event({"type": "memory_recall", "count": len(mems)})
             memory = format_memory(mems)
+            phases.append({
+                "id": "memory",
+                "label": "Gedächtnis-Suche",
+                "ms": round((time.perf_counter() - _mem_t) * 1000),
+            })
 
+    _plan_t = time.perf_counter()
     plan = await plan_subtasks(
         query, use_case=use_case, history=history,
         image_context=image_context, memory=memory,
     )
     _plan_llm_timing = get_last_llm_timing()
-    _plan_dur = round((time.perf_counter() - _t0) * 1000)
+    _plan_dur = round((time.perf_counter() - _plan_t) * 1000)
+    phases.append({
+        "id": "plan",
+        "label": "Planung (Manager)",
+        "ms": _plan_dur,
+        "llm_ms": (_plan_llm_timing or {}).get("total_ms"),
+    })
     if on_event:
         await on_event({"type": "manager_plan", **plan})
 
@@ -1150,7 +1174,15 @@ async def run_manager(
                 on_event=on_event,
             )
         )
+    _subs_t = time.perf_counter()
     subagents = await asyncio.gather(*subagent_coros)
+    _subs_dur = round((time.perf_counter() - _subs_t) * 1000)
+    phases.append({
+        "id": "subagents",
+        "label": "Sub-Agents (parallel)",
+        "ms": _subs_dur,
+        "children": subagent_phase_children(list(subagents)),
+    })
 
     # Synthesize
     _synth_start = time.perf_counter()
@@ -1164,6 +1196,12 @@ async def run_manager(
     )
     _synth_llm_timing = get_last_llm_timing()
     _synth_dur = round((time.perf_counter() - _synth_start) * 1000)
+    phases.append({
+        "id": "synthesize",
+        "label": "Synthese",
+        "ms": _synth_dur,
+        "llm_ms": (_synth_llm_timing or {}).get("total_ms"),
+    })
 
     # Compliance check + optional one-shot rewrite
     _compliance_start = time.perf_counter()
@@ -1177,6 +1215,12 @@ async def run_manager(
     )
     _compliance_llm_timing = get_last_llm_timing()
     _compliance_dur = round((time.perf_counter() - _compliance_start) * 1000)
+    phases.append({
+        "id": "compliance",
+        "label": "Compliance",
+        "ms": _compliance_dur,
+        "llm_ms": (_compliance_llm_timing or {}).get("total_ms"),
+    })
     # Fallback: when the LLM call fails (e.g. Ollama 504), _capture_llm_timing
     # was never called and get_last_llm_timing() returns {}. Use wall-clock
     # duration so the UI still shows timing instead of nothing.
@@ -1199,7 +1243,14 @@ async def run_manager(
                 "; ".join(compliance.get("issues") or []),
         )
         _synth_llm_timing = get_last_llm_timing()
-        _synth_dur = round((time.perf_counter() - _synth_start2) * 1000)
+        _rewrite_dur = round((time.perf_counter() - _synth_start2) * 1000)
+        _synth_dur = _rewrite_dur
+        phases.append({
+            "id": "synthesize_rewrite",
+            "label": "Synthese (Korrektur)",
+            "ms": _rewrite_dur,
+            "llm_ms": (_synth_llm_timing or {}).get("total_ms"),
+        })
         # Re-check is intentionally skipped — a single rewrite pass keeps
         # latency bounded. Surface the original verdict so the UI sees that
         # a correction took place.
@@ -1210,6 +1261,7 @@ async def run_manager(
             "Dokumente hoch."
         )
 
+    _post_t = time.perf_counter()
     citations = map_citations(final_answer, global_chunks)
     # Drop any [n] the synthesizer invented beyond the chunk pool so every
     # citation number shown in the answer actually opens a document.
@@ -1255,6 +1307,11 @@ async def run_manager(
 
     # Enrich chunks with similarity metrics (uses embedding service)
     await _enrich_chunk_similarities(list(subagents), global_chunks, final_answer)
+    phases.append({
+        "id": "post",
+        "label": "Zitate & Anreicherung",
+        "ms": round((time.perf_counter() - _post_t) * 1000),
+    })
 
     # Flattened compatibility trace so the existing DB column + old UI keep
     # showing *something* sensible. The hierarchical UI uses ``subagents``
@@ -1316,6 +1373,7 @@ async def run_manager(
         _audit = {}
     _audit["generated_at"] = datetime.now(timezone.utc).isoformat()
     _audit["processing_ms"] = round((time.perf_counter() - _t0) * 1000)
+    _audit["timing"] = timing_report(phases, _audit["processing_ms"])
     _audit["step_count"] = len(flat_steps)
     _audit["subtask_count"] = len(plan["subtasks"])
     _audit["chunk_count"] = len(global_chunks)
@@ -1345,6 +1403,7 @@ async def run_manager(
         "enriched_query": query,
         "use_case_extras": {},
         "audit": _audit,
+        "timing": _audit.get("timing"),
         "sufficient": sufficient and compliance["verdict"] != "REFUSE",
         "session_id": session_id,
         "use_case": use_case,

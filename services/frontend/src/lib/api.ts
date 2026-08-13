@@ -276,11 +276,27 @@ export interface UsecaseConfig {
 	memory_max_chars: number | null;
 }
 
+async function readErrorMessage(resp: Response, fallback = 'Anfrage fehlgeschlagen'): Promise<string> {
+	try {
+		const body = await resp.json();
+		const detail = body.message ?? body.detail ?? body.error;
+		if (typeof detail === 'string' && detail.trim()) return detail;
+		if (Array.isArray(detail)) {
+			return detail
+				.map((d) => (typeof d === 'string' ? d : d.msg ?? JSON.stringify(d)))
+				.join('; ');
+		}
+	} catch {
+		/* not JSON */
+	}
+	return `${fallback} (HTTP ${resp.status})`;
+}
+
 export async function getConfig(
 	useCase: string
 ): Promise<{ use_case: string; crypto_configured: boolean; config: UsecaseConfig }> {
 	const resp = await fetch(`${BASE}/admin/config/${useCase}`);
-	if (!resp.ok) throw new Error(await resp.text());
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Konfiguration konnte nicht geladen werden'));
 	return resp.json();
 }
 
@@ -293,13 +309,53 @@ export async function updateConfig(
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(patch)
 	});
-	if (!resp.ok) throw new Error(await resp.text());
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Konfiguration konnte nicht gespeichert werden'));
 	return resp.json();
 }
 
-export async function listModels(): Promise<{ models: string[]; error?: string }> {
-	const resp = await fetch(`${BASE}/admin/models`);
-	if (!resp.ok) throw new Error(await resp.text());
+export interface ProviderCheck {
+	role: 'chat' | 'vision';
+	ok: boolean;
+	skipped: boolean;
+	provider: string;
+	base_url: string;
+	model: string | null;
+	models: string[];
+	latency_ms: number;
+	code: string;
+	message: string;
+	hint: string;
+	detail: string;
+}
+
+export interface ConfigTestResult {
+	ok: boolean;
+	use_case?: string;
+	checks: ProviderCheck[];
+	error?: string;
+	detail?: string;
+	message?: string;
+}
+
+export async function testConfig(
+	useCase: string,
+	patch: Partial<Record<string, string | null>> = {}
+): Promise<ConfigTestResult> {
+	const resp = await fetch(`${BASE}/admin/config/${useCase}/test`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	});
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Verbindungstest fehlgeschlagen'));
+	return resp.json();
+}
+
+export async function listModels(
+	useCase = ''
+): Promise<{ models: string[]; error?: string; message?: string; hint?: string }> {
+	const qs = useCase ? `?use_case=${encodeURIComponent(useCase)}` : '';
+	const resp = await fetch(`${BASE}/admin/models${qs}`);
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Modellliste konnte nicht geladen werden'));
 	return resp.json();
 }
 

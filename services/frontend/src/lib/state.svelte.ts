@@ -33,6 +33,20 @@ export interface AgentStep {
 	subagent_id?: string;
 	subagent_role?: string;
 	duration_ms?: number;
+	llm_ms?: number;
+	action_ms?: number;
+	embed_ms?: number;
+	search_ms?: number;
+	rerank_ms?: number;
+	llm_timing?: {
+		load_ms?: number;
+		pp_ms?: number;
+		tp_ms?: number;
+		total_ms?: number;
+		wall_ms?: number;
+		prompt_tokens?: number;
+		completion_tokens?: number;
+	};
 }
 
 export interface ManagerSubtask {
@@ -60,6 +74,7 @@ export interface SubAgentTrace {
 	searched_collections?: string[];
 	error?: string | null;
 	status?: 'pending' | 'running' | 'done' | 'error';
+	duration_ms?: number;
 }
 
 export interface SynthesizerTrace {
@@ -86,6 +101,20 @@ export interface ComplianceTrace {
 	detail?: string;
 }
 
+export interface TimingPhase {
+	id: string;
+	label: string;
+	ms: number;
+	llm_ms?: number | null;
+	children?: TimingPhase[];
+}
+
+export interface TimingReport {
+	total_ms: number;
+	phases: TimingPhase[];
+	bottleneck?: { id: string; label: string; ms: number; share_pct: number } | null;
+}
+
 export interface AuditInfo {
 	model?: string | null;
 	llm_provider?: string;
@@ -93,6 +122,7 @@ export interface AuditInfo {
 	max_tokens?: number | null;
 	generated_at?: string;
 	processing_ms?: number;
+	timing?: TimingReport;
 	step_count?: number;
 	subtask_count?: number;
 	chunk_count?: number;
@@ -122,6 +152,7 @@ export interface Message {
 	durationMs?: number;
 	/** Server-reported model/provider/timing audit block. */
 	audit?: AuditInfo;
+	timing?: TimingReport;
 	citations?: Citation[];
 	agentSteps?: AgentStep[];
 	managerPlan?: ManagerPlan;
