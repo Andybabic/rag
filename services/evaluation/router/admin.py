@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import uuid
+from pathlib import Path
 
 from core.database import get_pool
 from core.memory import read_memory, write_memory
@@ -46,6 +48,34 @@ from shared.usecase_config import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Persistent store for chunk-utilization analysis results. One JSON file holds
+# every analyzed query, keyed by query id. Re-running analyze overwrites the key.
+_ANALYSIS_RESULTS_FILE = Path(__file__).resolve().parent.parent / "data" / "analysis_results.json"
+_analysis_results_lock = threading.Lock()
+
+
+def _load_analysis_results() -> dict:
+    try:
+        if _ANALYSIS_RESULTS_FILE.exists():
+            return json.loads(_ANALYSIS_RESULTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to load analysis results file")
+    return {}
+
+
+def _save_analysis_result(query_id: str, result: dict) -> None:
+    try:
+        with _analysis_results_lock:
+            data = _load_analysis_results()
+            data[query_id] = result
+            _ANALYSIS_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _ANALYSIS_RESULTS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_ANALYSIS_RESULTS_FILE)
+    except Exception:
+        logger.exception("Failed to save analysis result")
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -650,6 +680,8 @@ async def get_analysis_result(query_id: str):
     from core.chunk_analyzer import _analysis_results
     result = _analysis_results.get(query_id)
     if result is None:
+        result = _load_analysis_results().get(query_id)
+    if result is None:
         return {"status": "not_found"}
     if result["status"] == "done":
         _analysis_results.pop(query_id, None)
@@ -718,7 +750,7 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                     "chunk_count": len(chunks),
                     "analyses": step_analyses,
                 })
-            _analysis_results[query_id] = {
+            result = {
                 "status": "done",
                 "data": {
                     "query_id": query_id,
@@ -730,10 +762,14 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                     "steps": results,
                 },
             }
+            _analysis_results[query_id] = result
+            _save_analysis_result(query_id, result)
         except Exception as exc:
             logger.exception(f"Analysis failed for query {query_id}")
             error_msg = str(exc) or type(exc).__name__
-            _analysis_results[query_id] = {"status": "error", "error": error_msg}
+            result = {"status": "error", "error": error_msg}
+            _analysis_results[query_id] = result
+            _save_analysis_result(query_id, result)
         finally:
             _analysis_progress.pop(query_id, None)
 

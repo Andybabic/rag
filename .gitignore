@@ -1,5 +1,6 @@
 *.pyc
 /services/cleaning/logs
+/services/evaluation/data/analysis_results.json
 shared/.DS_Store
 .DS_Store
 .env

@@ -38,6 +38,20 @@
 
 	function toggle(id: string) {
 		expandedId = expandedId === id ? null : id;
+		if (expandedId === id) {
+			loadSavedAnalysis(id);
+		}
+	}
+
+	async function loadSavedAnalysis(queryId: string) {
+		try {
+			const resultResp = await fetch(`/api/admin/analyze-chunks/${queryId}/result`);
+			if (!resultResp.ok) return;
+			const result = await resultResp.json() as Record<string, unknown>;
+			if (result.status === "done") {
+				analysisData = result.data as Record<string, unknown>;
+			}
+		} catch { /* no saved analysis to show */ }
 	}
 
 	function toggleClaims(key: string) {
