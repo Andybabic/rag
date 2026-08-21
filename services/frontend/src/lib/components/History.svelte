@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { getQueries } from '$lib/api';
 	import { getUseCaseByApiId } from '$lib/use-cases';
+	import FeedbackModal from '$lib/components/FeedbackModal.svelte';
 
 	interface QueryRecord {
 		id: string;
@@ -21,6 +22,7 @@
 	let queries: QueryRecord[] = $state([]);
 	let loading = $state(false);
 	let expandedId: string | null = $state(null);
+	let feedbackFor: QueryRecord | null = $state(null);
 
 	async function load() {
 		loading = true;
@@ -35,6 +37,10 @@
 
 	function toggle(id: string) {
 		expandedId = expandedId === id ? null : id;
+	}
+
+	function openFeedback(q: QueryRecord) {
+		feedbackFor = q;
 	}
 
 	function reuse(queryText: string) {
@@ -137,6 +143,13 @@
 							</div>
 							<div class="flex shrink-0 gap-1.5">
 								<button
+									class="rounded border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700 hover:bg-indigo-100"
+									onclick={(e: MouseEvent) => { e.stopPropagation(); openFeedback(q); }}
+									title="Unbelegte Aussagen der Antwort prüfen"
+								>
+									Feedback
+								</button>
+								<button
 									class="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-100"
 									onclick={(e: MouseEvent) => { e.stopPropagation(); loadConversation(q); }}
 									title="Gesamte Unterhaltung inkl. Zwischenschritte in den Chat laden"
@@ -179,3 +192,11 @@
 		{/if}
 	</div>
 </main>
+
+{#if feedbackFor}
+	<FeedbackModal
+		queryId={feedbackFor.id}
+		answerText={feedbackFor.answer_text}
+		onclose={() => (feedbackFor = null)}
+	/>
+{/if}
