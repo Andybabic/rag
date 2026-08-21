@@ -14,11 +14,11 @@
 	let expandedId: string | null = $state(null);
 	let analyzingId: string | null = $state(null);
 	let analysisData: Record<string, unknown> | null = $state(null);
+	let feedbackData: Record<string, Record<string, unknown>> | null = $state(null);
 	let analysisError: string = $state("");
 	let analysisConcurrency: number = $state(8);
 	let analysisModel1: string = $state("qwen3.5:9b");
 	let analysisModel2: string = $state("");  // mapping model (empty = use same as extraction)
-	let nliModel: string = $state("deberta");  // NLI model: deberta (English/fast) or xlm-roberta (multilingual)
 		let availableModels: string[] = $state(["qwen3.5:9b", "gemma4:12b"]);
 
 	async function loadModels() {
@@ -52,6 +52,17 @@
 				analysisData = result.data as Record<string, unknown>;
 			}
 		} catch { /* no saved analysis to show */ }
+		await loadFeedback(queryId);
+	}
+
+	// Read-only: fetch saved user feedback for this query (display only, no verification changes).
+	async function loadFeedback(queryId: string) {
+		try {
+			const r = await fetch(`/api/admin/feedback/${queryId}`);
+			if (!r.ok) return;
+			const res = await r.json() as { feedback?: Record<string, Record<string, unknown>> };
+			feedbackData = res.feedback ?? {};
+		} catch { feedbackData = {}; }
 	}
 
 	function toggleClaims(key: string) {
@@ -73,6 +84,7 @@
 		analyzingId = queryId;
 		analysisError = "";
 		analysisData = null;
+		feedbackData = null;
 		analysisStartTime = Date.now();
 		analysisElapsed = 0;
 		if (analysisTimer) clearInterval(analysisTimer);
@@ -94,7 +106,7 @@
 			const startResp = await fetch(`/api/admin/analyze-chunks/${queryId}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1], mapping_model: analysisModel2 || null, nli_model: nliModel }),
+				body: JSON.stringify({ threshold, max_concurrent: analysisConcurrency, models: [analysisModel1], mapping_model: analysisModel2 || null }),
 			});
 			if (!startResp.ok) {
 				const err = await startResp.json().catch(() => ({}));
@@ -116,6 +128,7 @@
 				const result = await resultResp.json() as Record<string, unknown>;
 				if (result.status === "done") {
 					analysisData = result.data as Record<string, unknown>;
+					await loadFeedback(queryId);
 					break;
 				}
 				if (result.status === "error") {
@@ -225,6 +238,28 @@
 	function catClass(cat: unknown): string {
 		const c = (cat as string) || 'no_category';
 		return CATEGORY_CLASSES[c] || CATEGORY_CLASSES.no_category;
+	}
+
+	const VERDICT_LABELS: Record<string, string> = {
+		correct: 'Korrekt',
+		partially_correct: 'Teilweise korrekt',
+		incorrect: 'Inkorrekt',
+		cannot_judge: 'Nicht beurteilbar'
+	};
+
+	const VERDICT_CLASSES: Record<string, string> = {
+		correct: 'bg-green-100 text-green-700',
+		partially_correct: 'bg-amber-100 text-amber-700',
+		incorrect: 'bg-red-100 text-red-700',
+		cannot_judge: 'bg-gray-100 text-gray-500'
+	};
+
+	function verdictLabel(v: unknown): string {
+		return VERDICT_LABELS[(v as string) || ''] || 'Unbekannt';
+	}
+
+	function verdictClass(v: unknown): string {
+		return VERDICT_CLASSES[(v as string) || ''] || 'bg-gray-100 text-gray-500';
 	}
 
 	function catCounts(answerClaims: unknown[]): Record<string, number> {
@@ -700,10 +735,58 @@
 
 								<!-- Chunk Utilization Analysis (offline, per-query) -->
 								<div class="border-t border-gray-100 pt-4">
+									{#snippet analysisControls()}
+										<div class="mb-3 flex flex-wrap items-center gap-2">
+											<select
+												bind:value={analysisConcurrency}
+												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
+												title="Parallel requests"
+											>
+												<option value={1}>1 parallel</option>
+												<option value={2}>2 parallel</option>
+												<option value={4}>4 parallel</option>
+												<option value={8}>8 parallel</option>
+											</select>
+											<span class="text-[10px] text-gray-400">Extraction</span>
+											<select
+												bind:value={analysisModel1}
+												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
+												title="Answer + chunk claim extraction"
+											>
+												{#each availableModels as m}
+													<option value={m}>{m}</option>
+												{/each}
+											</select>
+											<span class="text-[10px] text-gray-400">Mapping</span>
+											<select
+												bind:value={analysisModel2}
+												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
+												title="Claim-to-answer text alignment (same as extraction if empty)"
+											>
+												<option value="">(same)</option>
+												{#each availableModels as m}
+													<option value={m}>{m}</option>
+												{/each}
+											</select>
+
+											<button
+												onclick={() => analyzeChunks(q.id)}
+												disabled={analyzingId === q.id}
+												class="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-[10px] font-semibold text-gray-500 hover:border-gray-400 hover:text-gray-700 disabled:opacity-50"
+											>
+												{#if analyzingId === q.id}
+													<span class="spinner"></span> Analysiere... ({analysisProgress ? analysisProgress + ", " : ""}{analysisElapsed}s)
+												{:else}
+													Chunk-Nutzung analysieren
+												{/if}
+											</button>
+										</div>
+									{/snippet}
+									<h4 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Chunk-Nutzungsanalyse</h4>
+									{@render analysisControls()}
 									{#if analysisData && (analysisData as Record<string,unknown>).query_id === q.id}
-										{@const ad = analysisData as Record<string,unknown>}
-										{@const adSteps = (ad.steps as unknown[]) || []}							<h4 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Chunk-Nutzungsanalyse</h4>
-											{@const adMode = (ad.mode as string) || "sentence"}
+										{@const ad = analysisData as Record<string,unknown>}										{@const adSteps = (ad.steps as unknown[]) || []}
+										{@const adMode = (ad.mode as string) || "sentence"}
 											{@const isClaim = adMode === "claim"}
 											{@const unitName = isClaim ? "Claims" : "S&auml;tze"}
 											<p class="mb-1 text-[10px] text-gray-400">
@@ -805,6 +888,32 @@
 												</details>
 											{/if}
 										{/if}
+
+											<!-- User Feedback (display only) -->
+											{#if feedbackData && Object.keys(feedbackData).length > 0}
+												{@const fbEntries = Object.entries(feedbackData)}
+												<details class="mb-3 rounded border border-gray-200 bg-gray-50/50 p-3" open>
+													<summary class="cursor-pointer text-[10px] font-semibold text-gray-600 hover:text-gray-800">
+														Nutzer-Feedback ({fbEntries.length})
+													</summary>
+													<div class="mt-2 max-h-48 overflow-y-auto space-y-1">
+														{#each fbEntries as [claimId, fb]}
+															{@const fbObj = fb as Record<string, unknown>}
+															<div class="rounded px-2 py-1 text-[10px] leading-relaxed bg-white border border-gray-100">
+																<div class="flex items-start gap-1.5">
+																	<span class="font-semibold text-gray-500 whitespace-nowrap mt-px">{claimId}</span>
+																	<span class="rounded px-1 py-px text-[8px] font-semibold {verdictClass(fbObj.verdict)}">{verdictLabel(fbObj.verdict)}</span>
+																	<span class="text-gray-600 break-words">{(fbObj.claim_text as string)?.substring(0, 180)}</span>
+																	<span class="ml-auto whitespace-nowrap text-gray-400">{new Date(fbObj.ts as string).toLocaleString()}</span>
+																</div>
+																{#if (fbObj.comment as string)}
+																	<div class="mt-0.5 italic text-gray-500">&ldquo;{fbObj.comment as string}&rdquo;</div>
+																{/if}
+															</div>
+														{/each}
+													</div>
+												</details>
+											{/if}
 
 											<!-- Per-step analysis -->
 											<div class="space-y-3">
@@ -917,62 +1026,6 @@
 								</div>
 									{:else if analysisError && !analysisData}
 										<p class="text-[10px] text-red-500">{analysisError}</p>
-									{:else}
-										<div class="flex items-center gap-2">
-											<select
-												bind:value={analysisConcurrency}
-												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Parallel requests"
-											>
-												<option value={1}>1 parallel</option>
-												<option value={2}>2 parallel</option>
-												<option value={4}>4 parallel</option>
-												<option value={8}>8 parallel</option>
-											</select>
-											<span class="text-[10px] text-gray-400">Extraction</span>
-											<select
-												bind:value={analysisModel1}
-												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Answer + chunk claim extraction"
-											>
-												{#each availableModels as m}
-													<option value={m}>{m}</option>
-												{/each}
-											</select>
-											<span class="text-[10px] text-gray-400">Mapping</span>
-											<select
-												bind:value={analysisModel2}
-												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="Claim-to-answer text alignment (same as extraction if empty)"
-											>
-												<option value="">(same)</option>
-												{#each availableModels as m}
-													<option value={m}>{m}</option>
-												{/each}
-											</select>
-
-											<span class="text-[10px] text-gray-400">NLI</span>
-											<select
-												bind:value={nliModel}
-												class="rounded border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-500"
-												title="NLI model: DeBERTa-v3 (English, fast) or XLM-RoBERTa (multilingual, slower)"
-											>
-												<option value="deberta">EN</option>
-												<option value="xlm-roberta">MULTI</option>
-											</select>
-
-											<button
-												onclick={() => analyzeChunks(q.id)}
-												disabled={analyzingId === q.id}
-												class="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-[10px] font-semibold text-gray-500 hover:border-gray-400 hover:text-gray-700 disabled:opacity-50"
-											>
-												{#if analyzingId === q.id}
-													<span class="spinner"></span> Analysiere... ({analysisProgress ? analysisProgress + ", " : ""}{analysisElapsed}s)
-												{:else}
-													Chunk-Nutzung analysieren
-												{/if}
-											</button>
-										</div>
 									{/if}
 								</div>
 							</div>

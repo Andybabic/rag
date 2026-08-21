@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.database import get_pool
@@ -76,6 +77,25 @@ def _save_analysis_result(query_id: str, result: dict) -> None:
             tmp.replace(_ANALYSIS_RESULTS_FILE)
     except Exception:
         logger.exception("Failed to save analysis result")
+
+
+def _save_feedback(query_id: str, claim_id: str, entry: dict) -> None:
+    """Persist one per-claim verdict under a top-level 'feedback' section.
+
+    Kept separate from the per-query analysis entries so re-running the chunk
+    analysis (which overwrites data[query_id]) never wipes user feedback.
+    """
+    try:
+        with _analysis_results_lock:
+            data = _load_analysis_results()
+            fb = data.setdefault("feedback", {}).setdefault(query_id, {})
+            fb[claim_id] = entry
+            _ANALYSIS_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _ANALYSIS_RESULTS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_ANALYSIS_RESULTS_FILE)
+    except Exception:
+        logger.exception("Failed to save feedback")
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -665,7 +685,17 @@ class ChunkAnalysisRequest(BaseModel):
     max_concurrent: int = 8
     models: list[str] = ["qwen3.5:9b"]
     mapping_model: str | None = None
-    nli_model: str = "deberta"
+    # nli_model: intentionally NOT a request field — NLI is always the multilingual
+    # model (mDeBERTa-v3-xnli). Keeping it out of the API prevents stale frontends
+    # from forcing the English-only model.
+
+
+class ClaimFeedbackRequest(BaseModel):
+    """One per-claim verdict from the 'Check this answer' feedback modal."""
+    claim_id: str
+    verdict: str  # correct | partially_correct | incorrect | cannot_judge
+    comment: str = ""
+    claim_text: str = ""
 
 
 
@@ -739,7 +769,7 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
                     max_concurrent=body.max_concurrent,
                     query_id=query_id,
                     mapping_model=body.mapping_model,
-                    nli_model=body.nli_model,
+                    nli_model="xlm-roberta",
                 )
                 step_analyses[gen_model] = gen_analysis
 
@@ -775,6 +805,50 @@ async def analyze_chunks(query_id: str, body: ChunkAnalysisRequest = ChunkAnalys
 
     asyncio.create_task(_run_analysis())
     return {"status": "started"}
+
+
+@router.post("/feedback/{query_id}")
+async def submit_claim_feedback(query_id: str, body: ClaimFeedbackRequest):
+    """Store a per-claim verdict from the feedback modal.
+
+    Saved under the top-level 'feedback' section of analysis_results.json,
+    keyed by query id then claim id, so it survives re-runs and restarts.
+    """
+    if body.verdict not in ("correct", "partially_correct", "incorrect", "cannot_judge"):
+        raise HTTPException(
+            status_code=400,
+            detail="verdict must be one of: correct, partially_correct, incorrect, cannot_judge",
+        )
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM queries WHERE id = $1",
+        uuid.UUID(query_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Query not found")
+    _save_feedback(
+        query_id,
+        body.claim_id,
+        {
+            "claim_id": body.claim_id,
+            "claim_text": body.claim_text,
+            "verdict": body.verdict,
+            "comment": body.comment,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return {"status": "ok"}
+
+
+@router.get("/feedback/{query_id}")
+async def get_claim_feedback(query_id: str):
+    """Return all saved per-claim verdicts for a query (display only).
+
+    Read-only: does not touch verification or the analysis results.
+    """
+    data = _load_analysis_results()
+    fb = data.get("feedback", {}).get(query_id, {})
+    return {"query_id": query_id, "feedback": fb}
 
 
 # ── Metrics Dashboard ────────────────────────────────────────

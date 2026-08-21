@@ -93,6 +93,7 @@ def _build_answer_claims(
     answer_matched_by: dict[int, set[int]],
     answer_best_sim: dict[int, float] | None = None,
     answer_best_nli: dict[int, str] | None = None,
+    answer_best_src: dict[int, str] | None = None,
     categories: list[str] | None = None,
     confidences: list[int] | None = None,
 ) -> list[dict]:
@@ -110,6 +111,8 @@ def _build_answer_claims(
             claim["category_confidence"] = confidences[j]
         if not matched_by and answer_best_sim and j in answer_best_sim:
             claim["best_similarity"] = round(answer_best_sim[j], 4)
+            if answer_best_src and j in answer_best_src and answer_best_src[j]:
+                claim["best_source_text"] = answer_best_src[j]
             if answer_best_nli and j in answer_best_nli:
                 claim["best_nli"] = answer_best_nli[j]
         answer_claims.append(claim)
@@ -279,6 +282,19 @@ async def _extract_claims_via_llamacpp(
 
     msg = data.get("choices", [{}])[0].get("message", {})
     content = msg.get("content", "") or msg.get("reasoning_content", "")
+
+    # Diagnostic: log why generation stopped so truncation cause can be identified.
+    choice0 = data.get("choices", [{}])[0] if data.get("choices") else {}
+    usage = data.get("usage") or {}
+    logger.info(
+        "LLAMACPP RESPONSE model=%s finish_reason=%s content_chars=%d prompt_tokens=%s completion_tokens=%s",
+        model,
+        choice0.get("finish_reason"),
+        len(content or ""),
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+    )
+
     if not content:
         return []
 
@@ -447,7 +463,7 @@ async def analyze_chunk_utilization_claim(
     max_concurrent: int = 8,
     query_id: str = "",
     mapping_model: str | None = None,
-    nli_model: str = "deberta",
+    nli_model: str = "xlm-roberta",
 ) -> dict:
     """
     Claim-level analysis using local Ollama for atomic fact extraction (JSON schema).
@@ -536,6 +552,7 @@ async def analyze_chunk_utilization_claim(
     chunk_results: dict[int, dict] = {}
     answer_matched_by: dict[int, set[int]] = {}
     answer_best_sim: dict[int, float] = {}
+    answer_best_src: dict[int, str] = {}  # answer claim idx -> chunk claim text that gave best_sim
     unit_matches: list[dict] = []
     chunk_best: dict[int, tuple[int, float]] = {}  # claim_map index -> (best_ans_idx, best_sim)
 
@@ -561,6 +578,7 @@ async def analyze_chunk_utilization_claim(
                 sim = _cosine(vec, ans_vec)
                 if j not in answer_best_sim or sim > answer_best_sim[j]:
                     answer_best_sim[j] = sim
+                    answer_best_src[j] = claim_text[:200]
                 if sim > best_sim_val:
                     best_sim_val = sim
                     best_ans = j
@@ -590,34 +608,34 @@ async def analyze_chunk_utilization_claim(
 
     # 5b. NLI entailment verification via local DeBERTa-v3 model (fast + deterministic)
     COSINE_AUTOPASS = 0.90
-    NLI_OVERRIDE_CONFIDENCE = 0.75  # NLI confidence threshold to override a sub-threshold cosine miss
-    ent_pairs_meta: list[tuple[int, str, int, str, str]] = []  # (ci, ct_full, ai, ct40, answer_text)
+    # NLI confidence needed to PROMOTE a sub-threshold pair (full-chunk premise is
+    # loose, so require a high bar to avoid matching everything).
+    NLI_OVERRIDE_CONFIDENCE = 0.90
+    ent_pairs_meta: list[tuple[int, str, int, str, str]] = []  # (ci, premise_text, ai, ct40_key, answer_text)
     autopass_pairs: set[tuple[int, str, int]] = set()
     for um in unit_matches:
         ci = um["chunk_idx"]
         ct = um.get("text", "")
+        # Bulk verification (cosine-matched pairs) uses the atomic claim fragment as
+        # premise — keeps granularity so we can tell WHICH claim supports what.
+        # The rescue path below uses the FULL chunk text: fragments lack the subject
+        # (e.g. "Self-supervised losses include self-distillation." has no "SigLIP 2"),
+        # which makes the model confidently NEUTRAL on genuine paraphrases.
+        chunk_premise = (chunks[ci].get("text") or ct)[:1000]
         for ai, sim in zip(um.get("matched_answer_indices", []), um.get("matched_answer_sims", [])):
             if ai < len(answer_claims_texts):
                 if sim >= COSINE_AUTOPASS:
                     autopass_pairs.add((ci, ct[:40], ai))
                 else:
                     ent_pairs_meta.append((ci, ct, ai, ct[:40], answer_claims_texts[ai]))
-        # Also run NLI on best sub-threshold pair for unmatched claims
+        # Rescue: NLI on the BEST sub-threshold pair of unmatched chunk claims only,
+        # with the full chunk as premise (a fragment premise would wrongly say NEUTRAL).
+        # Deliberately NOT the xlm-roberta >=0.35 candidate sweep — that flooded the
+        # result with hundreds of spurious matches when combined with the full chunk.
         if not um.get("matched_answer_indices"):
             ba = um.get("best_ans_idx", -1)
             if ba >= 0 and ba < len(answer_claims_texts):
-                ent_pairs_meta.append((ci, ct, ba, ct[:40], answer_claims_texts[ba]))
-            # When using multilingual NLI, also send other sub-threshold candidates
-            # (cosine misses cross-lingual pairs, but NLI can recover them)
-            if nli_model == "xlm-roberta":
-                claim_i = um.get("claim_idx", -1)
-                if claim_i >= 0 and claim_i < len(claim_vecs) and claim_vecs[claim_i]:
-                    for j, ans_vec in enumerate(answer_vecs):
-                        if not ans_vec or j == ba:
-                            continue
-                        sim = _cosine(claim_vecs[claim_i], ans_vec)
-                        if sim >= 0.35 and j < len(answer_claims_texts):
-                            ent_pairs_meta.append((ci, ct, j, ct[:40], answer_claims_texts[j]))
+                ent_pairs_meta.append((ci, chunk_premise, ba, ct[:40], answer_claims_texts[ba]))
 
     # Run local NLI model on all pairs (single call, batched internally)
     ent_pairs_text: list[tuple[str, str]] = [(ct, at) for (_, ct, _, _, at) in ent_pairs_meta]
@@ -724,7 +742,7 @@ async def analyze_chunk_utilization_claim(
                     answer_best_nli[ai] = f"{label_dict['label']} ({round(label_dict['conf']*100)}%)"
 
     # 6. Build output
-    answer_claims = _build_answer_claims(answer_claims_texts, answer_matched_by, answer_best_sim, answer_best_nli=answer_best_nli, categories=answer_claim_categories, confidences=answer_claim_confidences)
+    answer_claims = _build_answer_claims(answer_claims_texts, answer_matched_by, answer_best_sim, answer_best_nli=answer_best_nli, answer_best_src=answer_best_src, categories=answer_claim_categories, confidences=answer_claim_confidences)
 
     # 6b. Map claims to exact answer text spans via LLM (for reliable highlighting)
     try:
