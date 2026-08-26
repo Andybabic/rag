@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     AGENT_MAX_STEPS: int = 5
     MEMORY_MAX_CHARS: int = 4000
+    # Wall-clock budget (seconds) for one sub-agent inside the manager fan-out.
+    # The fan-out is a gather, so without a per-agent deadline the slowest
+    # specialist sets the phase duration even when it is stuck. Generous
+    # enough that a healthy multi-step agent is never cut off.
+    SUBAGENT_TIMEOUT_S: float = 150.0
     # A query with at most this many words is treated as vague/incomplete, so
     # the manager recalls relevant past Q&A from the memory RAG to plan more
     # specific sub-tasks.

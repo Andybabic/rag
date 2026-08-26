@@ -94,7 +94,7 @@ class OpenAIProvider(LLMProvider):
         body.update(openai_thinking_kwargs(self.config.enable_thinking))
 
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.chat_timeout) as client:
                 resp = await client.post(
                     self._url("/chat/completions"),
                     headers=self._headers(),

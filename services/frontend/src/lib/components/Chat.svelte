@@ -502,55 +502,38 @@
 	}
 </script>
 
-<main class="relative flex h-full flex-1 flex-col bg-gray-50">
-	<!-- Messages -->
-	<div class="flex-1 space-y-4 overflow-y-auto p-6" bind:this={chatContainer}>
-		{#if app.messages.length === 0}
-			<div class="flex h-full items-center justify-center text-gray-400">
-				<div class="text-center">
-					<p class="text-lg font-medium">Willkommen</p>
-					<p class="mt-1 text-sm">
-						Stellen Sie eine Frage oder laden Sie ein Dokument hoch.
-					</p>
+<main class="flex h-full min-h-0 flex-col bg-[#f6f7f9]">
+	<!-- Messages: only this pane scrolls -->
+	<div class="min-h-0 flex-1 overflow-y-auto px-4 py-6" bind:this={chatContainer}>
+		<div class="mx-auto w-full max-w-3xl space-y-5 pb-4">
+			{#if app.messages.length === 0}
+				<div class="flex min-h-[50vh] items-center justify-center">
+					<div class="text-center">
+						<p class="text-lg font-semibold tracking-tight text-gray-800">Womit kann ich helfen?</p>
+						<p class="mt-1.5 text-sm text-gray-500">
+							Stelle eine Frage oder lade ein Dokument in der Seitenleiste hoch.
+						</p>
+					</div>
 				</div>
-			</div>
-		{/if}
+			{/if}
 
-		{#each app.messages as msg}
-			<ChatMessage message={msg} />
-		{/each}
-
+			{#each app.messages as msg}
+				<ChatMessage message={msg} />
+			{/each}
+		</div>
 	</div>
 
-	<!-- Export button, bottom right of the chat area -->
-	{#if app.messages.length > 0}
-		<button
-			onclick={exportChat}
-			class="absolute bottom-24 right-6 z-10 flex items-center gap-2 rounded-full bg-gray-800 px-4 py-2.5 text-sm font-medium text-white shadow-lg transition-colors hover:bg-gray-900"
-			title="Gesamten Chat inkl. aller Schritte als JSON-Protokoll exportieren"
-		>
-			<svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-				<path
-					fill-rule="evenodd"
-					d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
-					clip-rule="evenodd"
-				/>
-			</svg>
-			Chat als JSON exportieren
-		</button>
-	{/if}
-
-	<!-- Input -->
-	<div class="border-t border-gray-200 bg-white p-4">
-		<div class="mx-auto flex max-w-3xl flex-col gap-2">
+	<!-- Input stays pinned to the viewport -->
+	<div class="shrink-0 border-t border-gray-200 bg-white px-4 py-3">
+		<div class="mx-auto w-full max-w-3xl">
 			{#if attachedImages.length > 0}
-				<div class="flex flex-wrap gap-2">
+				<div class="mb-2 flex flex-wrap gap-2">
 					{#each attachedImages as img, i}
 						<div class="relative">
 							<img
 								src={img}
 								alt="Anhang {i + 1}"
-								class="h-16 w-16 rounded-lg border border-gray-200 object-cover"
+								class="h-14 w-14 rounded-lg border border-gray-200 object-cover"
 							/>
 							<button
 								onclick={() => removeImage(i)}
@@ -564,45 +547,67 @@
 					{/each}
 				</div>
 			{/if}
-			<div class="flex gap-3">
-				<input
-					type="file"
-					accept="image/*"
-					multiple
-					bind:this={fileInput}
-					onchange={onFilesSelected}
-					class="hidden"
-				/>
-				<button
-					onclick={() => fileInput?.click()}
-					disabled={app.isLoading || attachedImages.length >= MAX_IMAGES}
-					class="shrink-0 rounded-xl border border-gray-300 px-4 py-3 text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
-					title="Bild anhängen (max. {MAX_IMAGES})"
-					aria-label="Bild anhängen"
-				>
-					<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-						<path
-							fill-rule="evenodd"
-							d="M8 4a3 3 0 00-3 3v6a2 2 0 104 0V7a1 1 0 10-2 0v6a.5.5 0 01-1 0V7a1.5 1.5 0 013 0v6a3 3 0 11-6 0V7a5 5 0 0110 0v6a1 1 0 11-2 0V7a3 3 0 00-3-3z"
-							clip-rule="evenodd"
-						/>
-					</svg>
-				</button>
+			<div
+				class="rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400"
+			>
 				<textarea
 					bind:value={input}
 					onkeydown={onKeyDown}
-					placeholder="Frage eingeben..."
+					placeholder="Frage eingeben …"
 					rows={1}
-					class="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+					class="w-full resize-none border-0 bg-transparent px-4 pt-3 text-[15px] text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0"
 					disabled={app.isLoading}
 				></textarea>
-				<button
-					onclick={send}
-					disabled={app.isLoading || (!input.trim() && attachedImages.length === 0)}
-					class="rounded-xl bg-blue-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
-				>
-					Senden
-				</button>
+				<div class="flex items-center justify-between px-2 pb-2">
+					<div class="flex items-center gap-0.5">
+						<input
+							type="file"
+							accept="image/*"
+							multiple
+							bind:this={fileInput}
+							onchange={onFilesSelected}
+							class="hidden"
+						/>
+						<button
+							onclick={() => fileInput?.click()}
+							disabled={app.isLoading || attachedImages.length >= MAX_IMAGES}
+							class="rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+							title="Bild anhängen (max. {MAX_IMAGES})"
+							aria-label="Bild anhängen"
+						>
+							<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+								<path
+									fill-rule="evenodd"
+									d="M8 4a3 3 0 00-3 3v6a2 2 0 104 0V7a1 1 0 10-2 0v6a.5.5 0 01-1 0V7a1.5 1.5 0 013 0v6a3 3 0 11-6 0V7a5 5 0 0110 0v6a1 1 0 11-2 0V7a3 3 0 00-3-3z"
+									clip-rule="evenodd"
+								/>
+							</svg>
+						</button>
+						{#if app.messages.length > 0}
+							<button
+								onclick={exportChat}
+								class="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+								title="Gesamten Chat inkl. aller Schritte als JSON-Protokoll exportieren"
+							>
+								<svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+									<path
+										fill-rule="evenodd"
+										d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"
+										clip-rule="evenodd"
+									/>
+								</svg>
+								JSON exportieren
+							</button>
+						{/if}
+					</div>
+					<button
+						onclick={send}
+						disabled={app.isLoading || (!input.trim() && attachedImages.length === 0)}
+						class="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+					>
+						Senden
+					</button>
+				</div>
 			</div>
 		</div>
 	</div>

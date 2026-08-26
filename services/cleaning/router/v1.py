@@ -251,15 +251,21 @@ async def image_status(use_case: str, file_hash: str):
 
 
 @router.post("/images/regenerate/{use_case}/{file_hash}")
-async def regenerate_images(use_case: str, file_hash: str):
-    """(Re-)generate alt-text for images of a document that have none yet.
+async def regenerate_images(use_case: str, file_hash: str, force: bool = False):
+    """(Re-)generate alt-text for a document's images.
 
     Lets the user recover missing descriptions (e.g. after fixing a vision
     config) WITHOUT re-uploading and re-parsing the whole PDF.
+
+    ``force=true`` re-describes images that already have a description. Needed
+    after the vision prompt itself changes: the old texts are not missing, they
+    are merely worse, so the pending-only default would skip every one of them.
     """
     imgs = list_document_images(use_case, file_hash)
-    pending = [i for i in imgs if not (i.get("alt_text") or "").strip()]
-    if not pending:
+    targets = imgs if force else [
+        i for i in imgs if not (i.get("alt_text") or "").strip()
+    ]
+    if not targets:
         return {"status": "nothing_to_do", "total": len(imgs), "pending": 0}
     items = [
         {
@@ -269,7 +275,7 @@ async def regenerate_images(use_case: str, file_hash: str):
             "text_after": i.get("text_after", ""),
             "context": "",
         }
-        for i in pending
+        for i in targets
     ]
     asyncio.create_task(run_alt_text_job(file_hash, use_case, use_case, items))
     return {"status": "started", "pending": len(items), "total": len(imgs)}

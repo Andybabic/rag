@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
 import { fetchError, responseError } from '$lib/server/ingest-errors';
+import { waitForImageDescriptions } from '$lib/server/image-descriptions';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async ({ request }) => {
@@ -41,15 +42,26 @@ export const POST: RequestHandler = async ({ request }) => {
 	// structuring service only needs the per-image metadata (id, page,
 	// alt_text, url) to bind chunks to images.
 	const rawImages = (cleanData.images ?? []) as Array<Record<string, unknown>>;
-	const images = rawImages
+	const baseImages = rawImages
 		.filter((img) => typeof img.image_id === 'string')
 		.map((img) => ({
-			image_id: img.image_id,
+			image_id: img.image_id as string,
 			page: img.page,
-			alt_text: img.alt_text ?? '',
-			url: img.url ?? '',
-			stored_path: img.stored_path ?? ''
+			alt_text: (img.alt_text as string) ?? '',
+			url: (img.url as string) ?? '',
+			stored_path: (img.stored_path as string) ?? ''
 		}));
+
+	// The alt-texts are generated in the background and are still empty here.
+	// Chunking now would freeze empty descriptions into the vector payload for
+	// good, leaving every image searchable-but-mute. Wait for them first.
+	const descriptions = await waitForImageDescriptions(
+		SERVICES.cleaning,
+		useCase,
+		fileHash,
+		baseImages
+	);
+	const images = descriptions.images;
 
 	// 2. Structure
 	let structureResp: Response;
@@ -191,6 +203,11 @@ export const POST: RequestHandler = async ({ request }) => {
 		stored_path: storedPath,
 		// For the upload UI to poll background alt-text progress.
 		file_hash: fileHash,
-		image_count: (cleanData.image_count as number) ?? 0
+		image_count: (cleanData.image_count as number) ?? 0,
+		// Chunking waits for the descriptions; when the budget ran out first,
+		// the affected images are indexed mute. Surfacing it beats a silent
+		// half-ingest — /v1/images/regenerate plus a re-ingest repairs it.
+		images_described: descriptions.described,
+		images_complete: descriptions.complete
 	});
 };

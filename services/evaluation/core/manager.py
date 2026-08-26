@@ -27,7 +27,12 @@ from typing import Awaitable, Callable, Optional
 from config import settings
 from core.agent import run_agent
 from core.citations import map_citations, strip_unresolved_refs
-from core.llm import call_llm
+from core.llm import (
+    TOKENS_COMPLIANCE,
+    TOKENS_PLAN,
+    TOKENS_SYNTHESIS,
+    call_llm,
+)
 from core.memory_rag import format_memory, recall, remember
 from shared.llm import vision_describe
 from shared.llm.pipeline import get_last_llm_timing, reset_llm_timing
@@ -46,6 +51,50 @@ logger = logging.getLogger(__name__)
 StepCallback = Optional[Callable[[dict], Awaitable[None]]]
 
 _MAX_SUBTASKS = 3
+
+# Citation markers inside a sub-agent fragment. Local to that sub-agent's own
+# observation list, so meaningless — and misleading — to the synthesizer.
+_LOCAL_REF_RE = re.compile(r"\s*\[\d+]")
+
+# A bibliography line: "[3] datei.pdf | 4.18. Wendeanlage". Recognised by the
+# marker opening the line AND the rest naming a source rather than stating
+# something — a file name, a page, or the breadcrumb separator. Position alone
+# is not enough: a body line may legitimately open with its own marker.
+_LEADING_REF_RE = re.compile(r"^\s*\[\d+]\s*(.+)$")
+_SOURCE_HINT_RE = re.compile(
+    r"\.(?:pdf|docx?|txt|md|html?|pptx?|xlsx?)\b|\||S\.\s*\d+", re.IGNORECASE
+)
+
+
+def _is_source_list_line(line: str) -> bool:
+    match = _LEADING_REF_RE.match(line)
+    return bool(match) and bool(_SOURCE_HINT_RE.search(match.group(1)))
+
+
+def _body_without_source_list(answer: str) -> str:
+    """Drop a trailing block of bibliography lines from *answer*.
+
+    Used to tell a genuine inline citation from a source list appended at the
+    end. Both contain ``[n]``, so a plain presence check reads a bibliography
+    as full citation coverage — which is how a completely uncited answer
+    passed compliance with eight "citations".
+    """
+    lines = answer.rstrip().split("\n")
+    while lines and (not lines[-1].strip() or _is_source_list_line(lines[-1])):
+        lines.pop()
+    return "\n".join(lines)
+
+
+def has_inline_citations(answer: str) -> bool:
+    """True when at least one ``[n]`` sits next to an actual statement."""
+    return bool(re.search(r"\[\d+]", _body_without_source_list(answer)))
+
+# How much of the use-case system prompt to hand the decomposer. Roomy enough
+# that a domain glossary appended to the prompt survives: the sub-queries are
+# what hit the index, so a term mapping silently cut off here would take the
+# retrieval down with it. Prompt processing is not this pipeline's bottleneck,
+# so the extra characters are cheap insurance.
+_DOMAIN_BRIEF_CHARS = 4000
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.DOTALL)
 
 
@@ -67,7 +116,14 @@ Merge-Strategien:
 - "fallback":      die Sub-Tasks beantworten dieselbe Frage auf zwei Wegen
 
 REGELN:
-- Bei einer einfachen Faktenfrage reicht EIN Sub-Task mit "facts".
+- Bei einer eng umrissenen Einzelfrage (ein Wert, ein Name, eine Zahl)
+  reicht EIN Sub-Task mit "facts".
+- Aufzählende Fragen ("Worauf ist zu achten?", "Was ist zu beachten?",
+  "Welche Angaben/Punkte/Schritte ...?") brauchen 2-3 Sub-Tasks, die
+  VERSCHIEDENE Facetten abdecken (z.B. Ablauf, Sicherheit/Risiken,
+  Sonderfälle/Störungen). Ein einzelner Sub-Task findet dafür zu wenig
+  Material: die gesamte Suchbreite ist Anzahl Sub-Tasks × Schrittbudget,
+  und aus dem gefundenen Material speist sich die ganze Antwort.
 - Bei Vergleichen pro Entität ein eigener Sub-Task (meist "facts").
 - "procedure" nur, wenn explizit nach Ablauf/Anleitung gefragt ist.
 - "context" nur, wenn Hintergrund/Definitionen wirklich helfen würden.
@@ -173,6 +229,25 @@ def _normalise_plan(raw: dict, fallback_query: str) -> dict:
     if not cleaned:
         return _fallback_plan(fallback_query)
 
+    # A plan made up purely of "context" sub-tasks cannot answer the question.
+    # The context role is defined as *supplementary* — its prompt forbids it
+    # from returning concrete facts ("kein konkretes Faktenwissen") — so such a
+    # plan retrieves background only and the synthesizer has no substance to
+    # cite. The decomposer produces this occasionally because its own rules
+    # allow a single sub-task. Restore a concrete-content contributor instead
+    # of letting the whole request degrade to ungrounded prose.
+    if all(st["role"] == "context" for st in cleaned):
+        logger.info(
+            "Plan contained only context sub-tasks — adding a facts sub-task "
+            "so the answer has a concrete-content contributor."
+        )
+        cleaned.insert(0, {
+            "role": DEFAULT_ROLE,
+            "sub_query": fallback_query,
+            "focus": "Konkrete, belegbare Angaben zur Originalfrage.",
+        })
+        del cleaned[_MAX_SUBTASKS:]
+
     merge = raw.get("merge_strategy")
     if merge not in ("complementary", "comparative", "fallback"):
         merge = "complementary"
@@ -250,6 +325,7 @@ async def plan_subtasks(
     history: list[dict] | None,
     image_context: str = "",
     memory: str = "",
+    domain_prompt: str = "",
 ) -> dict:
     """Ask the manager LLM to decompose the query.
 
@@ -257,6 +333,13 @@ async def plan_subtasks(
     LLM/parse failure. Never raises. When ``memory`` is provided (typically for
     a vague/incomplete query) it is offered to the decomposer so it can turn an
     underspecified request into concrete, well-scoped sub-queries.
+
+    ``domain_prompt`` is the use-case system prompt. Without it the decomposer
+    plans blind and resolves domain terms against general knowledge — a query
+    about a metro "Ersatzsignal" then yields sub-queries about road junctions,
+    which retrieve nothing and force every sub-agent into an extra REFINE_QUERY
+    round. The sub-queries are what actually hit the index, so their vocabulary
+    has to match the corpus.
     """
     user_msg_parts = [f"Nutzer-Anfrage: {query}"]
     if memory:
@@ -281,13 +364,42 @@ async def plan_subtasks(
             user_msg_parts.append("Vorherige Nutzer-Nachrichten:")
             user_msg_parts.extend(f"- {m}" for m in prior_user)
 
+    system = _DECOMPOSER_SYSTEM
+    if domain_prompt.strip():
+        if len(domain_prompt.strip()) > _DOMAIN_BRIEF_CHARS:
+            # Silence here would look like the planner ignoring the domain: a
+            # glossary usually sits at the end of a system prompt, so that is
+            # exactly the part a quiet cut removes.
+            logger.warning(
+                "Use-case prompt for %s is %d chars — the decomposer only sees "
+                "the first %d. Move domain terms/glossary to the top.",
+                use_case, len(domain_prompt.strip()), _DOMAIN_BRIEF_CHARS,
+            )
+        system += (
+            "\nFACHLICHER KONTEXT DES USE CASES (nur zur Einordnung der "
+            "Begriffe — er beschreibt, worum es in den durchsuchten Dokumenten "
+            "geht):\n"
+            f"{domain_prompt.strip()[:_DOMAIN_BRIEF_CHARS]}\n\n"
+            "Deute Fachbegriffe der Anfrage IMMER in diesem Kontext. Die "
+            "FACHBEGRIFFE der Anfrage (Eigennamen, Anlagen, Signale, "
+            "Vorschriften) müssen unverändert in den sub_queries vorkommen — "
+            "ersetze sie nicht durch Begriffe aus einer anderen Domäne und "
+            "erfinde keine Synonyme, die im Dokumentbestand nicht vorkommen.\n"
+            "Das gilt für die Begriffe, NICHT für den Fragesatz: eine "
+            "sub_query, die bloss die Nutzerfrage wiederholt, ist keine "
+            "Zerlegung. Jede sub_query deckt eine eigene Facette ab und "
+            "formuliert sie mit den Fachbegriffen dieser Domäne aus."
+        )
+
     messages = [
-        {"role": "system", "content": _DECOMPOSER_SYSTEM},
+        {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(user_msg_parts)},
     ]
 
     try:
-        raw_response = await call_llm(messages, use_case=use_case)
+        raw_response = await call_llm(
+            messages, use_case=use_case, max_tokens=TOKENS_PLAN
+        )
     except Exception as exc:
         logger.warning(f"Manager decomposer LLM failed: {exc}")
         return _fallback_plan(query)
@@ -372,21 +484,44 @@ async def _run_one_subagent(
         })
 
     try:
-        result = await run_agent(
-            query=sub_query,
-            use_case=use_case,
-            session_id=session_id,
-            system_prompt=sub_prompt,
-            available_actions=sub_actions,
-            collection=collection,
-            filters=filters,
-            max_steps=role.max_steps,
-            history=None,  # sub-agents work on the focused sub-query directly
-            images=images,
-            image_context=image_context,
-            persist_memory=False,  # the manager owns the moderated memory update
-            on_event=_wrap_event(on_event, sub_id=sub_id, role=role.name),
+        # Deadline per sub-agent: the fan-out below is a gather, so one agent
+        # stuck on an unresponsive LLM call would otherwise define the whole
+        # phase duration. Cutting it loose lets the healthy specialists' output
+        # reach the synthesizer instead of the request stalling on the slowest.
+        result = await asyncio.wait_for(
+            run_agent(
+                query=sub_query,
+                use_case=use_case,
+                session_id=session_id,
+                system_prompt=sub_prompt,
+                available_actions=sub_actions,
+                collection=collection,
+                filters=filters,
+                max_steps=role.max_steps,
+                history=None,  # sub-agents work on the focused sub-query directly
+                images=images,
+                image_context=image_context,
+                persist_memory=False,  # the manager owns the moderated memory update
+                on_event=_wrap_event(on_event, sub_id=sub_id, role=role.name),
+            ),
+            timeout=settings.SUBAGENT_TIMEOUT_S,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Sub-agent {sub_id} ({role.name}) exceeded "
+            f"{settings.SUBAGENT_TIMEOUT_S}s — dropped from the fan-out"
+        )
+        result = {
+            "answer": "",
+            "citations": [],
+            "agent_steps": [],
+            "chunks": [],
+            "sufficient": False,
+            "error": (
+                f"Zeitlimit von {settings.SUBAGENT_TIMEOUT_S:.0f}s überschritten – "
+                "dieser Spezialist hat nichts beigetragen."
+            ),
+        }
     except Exception as exc:
         logger.exception(f"Sub-agent {sub_id} ({role.name}) crashed: {exc}")
         result = {
@@ -444,6 +579,25 @@ PRÜFKRITERIEN:
 2. Quellenechtheit: Belegen die referenzierten Chunks die Aussage tatsächlich?
 3. Halluzination: Enthält die Antwort Fakten, die in keinem Chunk stehen?
 4. Use-Case-Policy: Wenn der System-Prompt Regeln nennt, werden sie eingehalten?
+
+VORGEHEN (verbindlich):
+- Lies den zitierten Chunk VOLLSTÄNDIG, bis zum letzten Zeichen, bevor du
+  eine Aussage beanstandest. Der Beleg steht oft im letzten Satz.
+- Bevor du etwas als unbelegt oder halluziniert meldest, zitiere in "issues"
+  die Stelle des Chunks, an der du den Beleg erwartet hättest. Findest du ihn
+  dort nicht, schreibe das ausdrücklich. Eine Beanstandung ohne diesen
+  Nachweis ist unzulässig.
+- Ein Beleg muss nicht wörtlich übereinstimmen — sinngleiche Formulierung
+  genügt. Eine Antwort, die einen Chunk nahezu wörtlich wiedergibt, ist der
+  Idealfall und nicht verdächtig.
+- Chunks sind Ausschnitte. Sie enden regelmässig mitten im Satz oder Wort,
+  und Überschriften-Artefakte des PDF-Layouts ("# wird zu") stehen mitten
+  darin. Beides trennt keine Quellen und ist KEIN Grund, den vorhandenen
+  Text anzuzweifeln.
+- Im Zweifel "OK". Ein REWRITE kostet einen kompletten zweiten Synthese-Lauf,
+  bei dem der Synthesizer die Quellennummern neu vergeben muss — ein
+  unnötiges REWRITE hat dabei schon eine korrekte Aussage an eine falsche
+  Quelle gehängt. Beanstande nur, was du konkret benennen kannst.
 
 URTEIL (genau eines):
 - "OK"      → Antwort darf raus.
@@ -521,12 +675,55 @@ REGELN (hart):
   Vorschläge — prüfe gegen den Pool.
 - Jede Tatsachenbehauptung muss mit [n] belegt sein, wobei n die globale
   Chunk-Nummer ist (nicht die lokale Nummerierung der Spezialisten).
+- Der GLOBAL_CHUNK_POOL nennt dir den gültigen Nummernbereich. Zitiere
+  AUSSCHLIESSLICH Nummern aus diesem Bereich; eine Nummer ausserhalb wird
+  nachträglich entfernt. Das ist KEIN Grund, seltener zu zitieren: eine
+  Antwort ganz ohne [n] ist immer falsch. Im Zweifel nimm die Nummer des
+  Chunks, aus dem die Aussage stammt.
+- PLATZIERUNG: Das [n] steht DIREKT bei der Aussage, die es belegt — am
+  Ende des jeweiligen Satzes oder Listenpunkts, mitten im Text. So sieht
+  der Leser bei jeder einzelnen Aussage, worauf sie sich stützt.
+- Eine gesammelte Quellenliste am Ende der Antwort ist VERBOTEN. Also
+  keine Zeilen der Form "[1] datei.pdf | Abschnitt", kein
+  Literaturverzeichnis, keine "Quellen:"-Sektion. Die Oberfläche zeigt
+  die Fundstellen ohnehin separat an; ein [n], das nur in so einer Liste
+  steht und neben keiner Aussage, belegt nichts.
+
+BEISPIEL (Platzierung):
+  richtig: "Der Zug wird in der Wendeanlage umgerüstet [4]. Vor der
+           Einfahrt ist eine Durchsage zu tätigen [2]."
+  falsch:  "Der Zug wird in der Wendeanlage umgerüstet. Vor der Einfahrt
+           ist eine Durchsage zu tätigen.\n\n[2] datei.pdf\n[4] datei.pdf"
+- Der Pool ist nach Relevanz sortiert: [1] ist der Chunk, der am besten
+  zur Frage passt.
+- SCHÖPFE DIE TRAGENDEN CHUNKS AUS. Geh die vordersten Chunks durch und
+  prüfe für jede einzelne Aussage darin, ob sie zur Frage gehört. Alles,
+  was zur Frage gehört, kommt in die Antwort — auch Nebenbedingungen,
+  Rückmeldungen des Systems, Einschränkungen und Folgen ("… dadurch
+  ändert sich auch …", "… gilt nur, wenn …"). Ein Fragment eines
+  Spezialisten ist eine Zusammenfassung; deine Antwort ist es nicht.
+  Kürze den tragenden Chunk NICHT auf seinen Kernsatz ein.
+- Das ist KEINE Aufforderung zur Länge. Ein Chunk, der eine ANDERE
+  Funktion oder ein anderes Gerät beschreibt, gehört nicht in die
+  Antwort — auch nicht als zusätzlicher Schritt, auch nicht "der
+  Vollständigkeit halber". Übertrage niemals eine Eigenschaft von einem
+  Chunk auf den Gegenstand eines anderen (z.B. eine Bestätigungsregel,
+  die für Element A gilt, auf Element B). Vollständig heisst: alles zur
+  gestellten Frage, nichts darüber hinaus.
 - Widersprüche zwischen Quellen NICHT überdecken — markiere sie
   ("Quelle [3] gibt X an, Quelle [5] dagegen Y").
 - Wenn ein Teil der Originalfrage durch keinen Chunk gedeckt ist, sage
   das wörtlich.
+- Ist ein Fragment mit "(Fehler: …)" markiert, hat dieser Spezialist
+  nichts geliefert. Antworte dann nur aus den vorhandenen Chunks und
+  weise am Ende in einem Satz darauf hin, welcher Aspekt deshalb
+  ungeprüft blieb. Diesen Ausfall NICHT stillschweigend übergehen.
 - KEINE eigenen Ergänzungen, kein Allgemeinwissen, keine Trainings-Daten.
 - Antworte ohne Vor- oder Nachspann, ohne Meta-Kommentare.
+- Die interne Arbeitsteilung bleibt unsichtbar: keine Rollennamen
+  ("Procedure", "Facts", "Kontext"), keine Erwähnung von Spezialisten,
+  Fragmenten oder Chunk-Pool in Überschriften oder Fliesstext. Der Nutzer
+  sieht eine Antwort, nicht deren Entstehung.
 
 BILDER:
 - Im AVAILABLE_IMAGES-Block stehen Bilder, die zu zitierten Chunks gehören
@@ -544,6 +741,15 @@ def _merge_chunks(subagents: list[dict]) -> list[dict]:
 
     Dedup key is the first 200 characters of the chunk text (matches the
     dedup heuristic already used in actions.action_search).
+
+    The pool is returned sorted by retrieval score, best first. Its order *is*
+    the citation numbering (``map_citations`` resolves ``[n]`` to
+    ``chunks[n-1]``), so sorting here — not in the renderer — keeps the numbers
+    the synthesizer sees and the sources they resolve to in sync. Sub-agent
+    order carries no meaning for the reader, whereas relevance does: it lets
+    the prompt name the leading sources without exposing raw scores, whose
+    scale differs by an order of magnitude between a live cross-encoder and
+    the RRF fallback.
     """
     seen: dict[str, dict] = {}
     order: list[str] = []
@@ -561,17 +767,39 @@ def _merge_chunks(subagents: list[dict]) -> list[dict]:
                 # Keep the higher-scored copy
                 if (chunk.get("score") or 0) > (existing.get("score") or 0):
                     seen[key] = dict(chunk)
-    return [seen[k] for k in order]
+    return sorted(
+        (seen[k] for k in order),
+        key=lambda c: c.get("score") or 0.0,
+        reverse=True,
+    )
+
+
+# Per-chunk character budget for the synthesizer's chunk pool.
+#
+# This pool is the synthesizer's ONLY permitted source of fact, so whatever is
+# cut here cannot appear in the answer no matter how the prompt is worded. The
+# previous 400 truncated every single retrieved chunk — the chunker emits
+# ~500-character chunks, so the cut consistently removed the tail, which is
+# where a section's consequence sentence tends to sit ("Ändert das Fahrpersonal
+# die Ausstiegsseite, ändert sich ebenfalls das Aussehen der Pfeile"). The
+# answer then read as an accurate but oddly incomplete summary of a source the
+# synthesizer had never seen whole. Sized to pass a normal chunk intact with
+# headroom for oversized ones (tables, appended image descriptions).
+_POOL_CHUNK_CHARS = 1200
 
 
 def _format_global_chunks(chunks: list[dict]) -> str:
-    """Render the global chunk pool for the synthesizer prompt."""
+    """Render the global chunk pool for the synthesizer prompt.
+
+    ``chunks`` arrives sorted by relevance (see ``_merge_chunks``), so the
+    numbering the synthesizer cites against runs best-first.
+    """
     if not chunks:
         return "(Keine Chunks – die Spezialisten haben nichts gefunden.)"
     lines = []
     for i, c in enumerate(chunks, 1):
         meta = c.get("metadata") or {}
-        text = (c.get("text") or "")[:400]
+        text = (c.get("text") or "")[:_POOL_CHUNK_CHARS]
         file_name = meta.get("file_name", "")
         page = meta.get("page")
         ref = f"{file_name}, S. {page}" if page else file_name
@@ -594,7 +822,11 @@ def _collect_available_images(chunks: list[dict]) -> list[dict]:
             seen[img_id] = {
                 "id": img_id,
                 "page": img.get("page"),
-                "alt_text": (img.get("alt_text") or "")[:300],
+                # Not truncated: for a labelled graphic the description is a
+                # transcription of the very values the answer needs (key
+                # assignments, table cells). A 300-char cut lands in the middle
+                # of that list and silently drops the answer.
+                "alt_text": (img.get("alt_text") or "").strip(),
                 "url": img.get("url", ""),
             }
     return list(seen.values())
@@ -640,13 +872,23 @@ def select_used_images(answer: str, catalog: list[dict]) -> list[dict]:
 
 
 def _format_fragments(subagents: list[dict]) -> str:
-    """Render the sub-agent answer fragments for the synthesizer prompt."""
+    """Render the sub-agent answer fragments for the synthesizer prompt.
+
+    Local ``[n]`` markers are stripped. Every sub-agent numbers its own
+    observations from 1, so ``[1]`` means a different chunk in each fragment —
+    and neither matches the global pool the synthesizer must cite against.
+    Left in, those numbers are worse than absent: faced with three conflicting
+    numbering schemes the synthesizer has produced answers with no citations at
+    all. The pool is the single source of citation numbers.
+    """
     lines = []
     for sub in subagents:
         header = f"--- {sub['role_label']} (Sub-Query: {sub['sub_query']}) ---"
         body = (sub.get("answer") or "(leer)").strip()
         if sub.get("error"):
             body = f"(Fehler: {sub['error']})"
+        else:
+            body = _LOCAL_REF_RE.sub("", body).strip()
         lines.append(f"{header}\n{body}")
     return "\n\n".join(lines)
 
@@ -699,18 +941,36 @@ async def synthesize(
     user = (
         f"ORIGINALFRAGE:\n{query}\n\n"
         f"PLAN-RATIONALE (Manager):\n{plan.get('rationale', '')}\n\n"
-        f"ANTWORT-FRAGMENTE DER SPEZIALISTEN:\n{_format_fragments(subagents)}\n\n"
-        f"GLOBAL_CHUNK_POOL (für [n]-Verweise):\n{_format_global_chunks(global_chunks)}\n\n"
+        f"ANTWORT-FRAGMENTE DER SPEZIALISTEN (ohne Quellennummern — die "
+        f"Nummern vergibst du selbst aus dem GLOBAL_CHUNK_POOL):\n"
+        f"{_format_fragments(subagents)}\n\n"
+        f"GLOBAL_CHUNK_POOL (für [n]-Verweise — gültig sind ausschliesslich "
+        f"[1] bis [{len(global_chunks)}]):\n"
+        f"{_format_global_chunks(global_chunks)}\n\n"
         f"AVAILABLE_IMAGES (für [BILD: <id>]-Verweise):\n"
         f"{_format_available_images(available_images)}\n"
         f"{guidance_block}\n"
-        "Formuliere jetzt die finale Antwort."
+        # Citation anchor in the highest-recency position. The rule also
+        # stands in the system prompt, but the chunk pool now sits between the
+        # two and is by far the longest block in the request: twice in a row
+        # the synthesizer returned an answer without a single [n], which the
+        # deterministic check caught and repaired with a second synthesis call
+        # — and that repair, having to invent numbers after the fact, attached
+        # a statement from page 72 to the cover page of an unrelated document.
+        # Cheaper and more reliable to state the requirement where the model
+        # starts generating than to correct it afterwards.
+        + "Formuliere jetzt die finale Antwort. Setze hinter JEDE einzelne "
+        f"Tatsachenbehauptung die Nummer [n] des Chunks aus dem "
+        f"GLOBAL_CHUNK_POOL, aus dem sie stammt (gültig: [1] bis "
+        f"[{len(global_chunks)}]). Eine Antwort ohne [n] im Fliesstext ist "
+        "ungültig und wird verworfen."
     )
 
     try:
         final = await call_llm(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             use_case=use_case,
+            max_tokens=TOKENS_SYNTHESIS,
         )
     except Exception as exc:
         logger.warning(f"Synthesizer LLM failed: {exc} — falling back to concatenation")
@@ -904,6 +1164,33 @@ async def check_compliance(
     if on_event:
         await on_event({"type": "compliance", "phase": "started"})
 
+    # Deterministic pre-check. "Citation-Coverage" is the checker's own first
+    # criterion, but it has passed answers whose only [n] sat in a trailing
+    # source list — form satisfied, purpose missed. A citation belongs next to
+    # the statement it supports; collected at the end it tells the reader
+    # nothing about which claim rests on what. No judgement needed, so this is
+    # decided in code rather than asked of the model.
+    if global_chunks and not has_inline_citations(answer):
+        issue = (
+            "Die Antwort belegt keine einzige Aussage im Fliesstext mit [n] "
+            f"(Chunk-Pool: {len(global_chunks)} Chunks). Verweise stehen "
+            "gar nicht oder nur in einer Quellenliste am Ende."
+        )
+        logger.warning("Compliance short-circuit: %s", issue)
+        result = {
+            "verdict": "REWRITE",
+            "issues": [issue],
+            "classified_issues": [],
+            "guidance": (
+                "Setze die Quellennummer [1] bis "
+                f"[{len(global_chunks)}] direkt hinter die jeweilige Aussage "
+                "im Fliesstext. Keine gesammelte Quellenliste am Ende."
+            ),
+        }
+        if on_event:
+            await on_event({"type": "compliance", "phase": "done", **result})
+        return result
+
     user = (
         f"USE-CASE-POLICY (aus dem System-Prompt):\n{use_case_prompt}\n\n"
         f"GLOBAL_CHUNK_POOL:\n{_format_global_chunks(global_chunks)}\n\n"
@@ -915,6 +1202,7 @@ async def check_compliance(
             [{"role": "system", "content": _COMPLIANCE_SYSTEM},
              {"role": "user", "content": user}],
             use_case=use_case,
+            max_tokens=TOKENS_COMPLIANCE,
         )
     except Exception as exc:
         logger.warning(f"Compliance LLM failed: {exc} — passing through")
@@ -933,6 +1221,20 @@ async def check_compliance(
     issues = parsed.get("issues") if isinstance(parsed.get("issues"), list) else []
     guidance = parsed.get("guidance") if isinstance(parsed.get("guidance"), str) else ""
 
+    issues, unfounded = _drop_unfounded_issues(issues, global_chunks, answer)
+    if unfounded:
+        logger.warning(
+            "Compliance flagged %d claim(s) that stand verbatim in the chunk "
+            "pool — dropped: %s",
+            len(unfounded),
+            " | ".join(i[:120] for i in unfounded),
+        )
+        # Nothing left to act on: rewriting would reassign every citation
+        # number for no correction.
+        if not issues:
+            verdict = "OK" if verdict != "REFUSE" else verdict
+            guidance = ""
+
     # Classify issues via NLI if any
     # Classify issues via NLI if any (with fallback — don't crash compliance on NLI failure)
     classified_issues = await _classify_compliance_issues(issues) if issues else []
@@ -941,6 +1243,139 @@ async def check_compliance(
     if on_event:
         await on_event({"type": "compliance", "phase": "done", **result})
     return result
+
+
+# --- Deterministic guard against a compliance false positive ----------------
+#
+# The compliance model flagged as a hallucination a sentence standing verbatim
+# in the chunk it cited ("Ändert das Fahrpersonal manuell die Ausstiegsseite,
+# ändert sich ebenfalls das Aussehen der Pfeile"). It sees the full pool, so it
+# had the text in front of it. A wrong REWRITE is not free: it spends a second
+# synthesis pass during which the synthesizer reassigns every citation number,
+# and one such pass has already moved a correct statement onto an unrelated
+# document's cover page.
+#
+# Whether a run of words appears in the pool needs no judgement, so — like the
+# inline-citation check above — it is decided in code.
+
+_ISSUE_QUOTE_RE = re.compile(r"[\'\"„“”‚‘’«»]([^\'\"„“”‚‘’«»]{20,400})[\'\"„“”‚‘’«»]")
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+# Consecutive words of a flagged claim that must stand in the pool for the
+# claim to count as grounded. Long enough that ordinary German connective
+# phrasing cannot reach it by chance, short enough to survive the real
+# mismatches: a chunk cut mid-word at its boundary ("Pfeil" for "Pfeile"), a
+# dropped article, an inserted citation marker.
+_VERBATIM_RUN_WORDS = 8
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in _WORD_RE.findall(text or "")]
+
+
+def _longest_shared_run(claim: list[str], pool: list[str]) -> int:
+    """Longest run of consecutive *claim* words occurring in order in *pool*."""
+    if not claim or not pool:
+        return 0
+    best = 0
+    positions: dict[str, list[int]] = {}
+    for i, w in enumerate(pool):
+        positions.setdefault(w, []).append(i)
+    for start in range(len(claim)):
+        if len(claim) - start <= best:
+            break  # no remaining window can beat the best run
+        for pos in positions.get(claim[start], ()):
+            run = 0
+            while (start + run < len(claim) and pos + run < len(pool)
+                   and claim[start + run] == pool[pos + run]):
+                run += 1
+            best = max(best, run)
+    return best
+
+
+def _issue_is_contradicted_by_the_pool(issue: str, pool_words: list[str]) -> bool:
+    """True if a claim the issue quotes stands verbatim in the chunk pool."""
+    for quoted in _ISSUE_QUOTE_RE.findall(issue):
+        # Citation markers are the answer's, not the source's.
+        claim = _words(re.sub(r"\[\d+]", " ", quoted))
+        if len(claim) >= _VERBATIM_RUN_WORDS and (
+            _longest_shared_run(claim, pool_words) >= _VERBATIM_RUN_WORDS
+        ):
+            return True
+    return False
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Issue wordings that assert the answer contains something the sources do not.
+# Only these are refutable by showing the content is in fact there; a
+# citation-coverage or policy complaint is about form and stands regardless.
+_CONTENT_CLAIM_MARKERS = (
+    "halluzin", "erfunden", "fiktiv", "stammt nicht", "steht in keinem",
+    "nicht im chunk", "nicht aus dem pool", "kein chunk", "nicht belegt",
+    "belegt nicht", "bestätigt nicht", "bestaetigt nicht", "stützt nicht",
+    "stuetzt nicht", "aber nicht", "nicht vorhanden", "nicht gedeckt",
+)
+
+
+def _ungrounded_sentences(answer: str, global_chunks: list[dict]) -> list[str]:
+    """Answer sentences whose wording is not verbatim in the chunk THEY cite.
+
+    Checking against the cited chunk rather than the whole pool is what keeps
+    this from excusing a real mis-citation: an answer that attaches a true
+    statement to the wrong source has its content in the pool but not in the
+    chunk it names, and stays flagged.
+
+    Sentences without a citation are skipped — that is the inline-citation
+    check's job — as are sentences too short for a run of this length to be
+    meaningful.
+    """
+    ungrounded: list[str] = []
+    for sentence in _SENTENCE_SPLIT_RE.split(answer or ""):
+        refs = [int(n) for n in re.findall(r"\[(\d+)]", sentence)]
+        cited = [global_chunks[n - 1] for n in refs if 1 <= n <= len(global_chunks)]
+        if not cited:
+            continue
+        claim = _words(re.sub(r"\[\d+]", " ", sentence))
+        if len(claim) < _VERBATIM_RUN_WORDS:
+            continue
+        source = _words(" ".join((c.get("text") or "") for c in cited))
+        if _longest_shared_run(claim, source) < _VERBATIM_RUN_WORDS:
+            ungrounded.append(sentence.strip())
+    return ungrounded
+
+
+def _drop_unfounded_issues(
+    issues: list[str], global_chunks: list[dict], answer: str = ""
+) -> tuple[list[str], list[str]]:
+    """Split *issues* into (kept, dropped-as-contradicted-by-the-sources).
+
+    Two passes, because the model states the same false finding in several
+    ways. The first drops an issue that quotes a claim standing verbatim in the
+    pool. The second is what actually settles it: when no sentence of the
+    answer is ungrounded against its own citation, an issue asserting the
+    answer contains something the sources do not is false by construction —
+    including the restatements that quote nothing and would otherwise survive.
+    """
+    if not issues or not global_chunks:
+        return issues, []
+
+    pool_words = _words(" ".join((c.get("text") or "") for c in global_chunks))
+    kept, dropped = [], []
+    for issue in issues:
+        (dropped if _issue_is_contradicted_by_the_pool(issue, pool_words) else kept).append(issue)
+
+    if kept and answer and not _ungrounded_sentences(answer, global_chunks):
+        still_kept = []
+        for issue in kept:
+            low = issue.lower()
+            if any(marker in low for marker in _CONTENT_CLAIM_MARKERS):
+                dropped.append(issue)
+            else:
+                still_kept.append(issue)
+        kept = still_kept
+
+    return kept, dropped
 
 
 _SYNTH_CLEANUP_RE = re.compile(
@@ -1137,6 +1572,7 @@ async def run_manager(
     plan = await plan_subtasks(
         query, use_case=use_case, history=history,
         image_context=image_context, memory=memory,
+        domain_prompt=use_case_prompt,
     )
     _plan_llm_timing = get_last_llm_timing()
     _plan_dur = round((time.perf_counter() - _plan_t) * 1000)
@@ -1263,6 +1699,16 @@ async def run_manager(
 
     _post_t = time.perf_counter()
     citations = map_citations(final_answer, global_chunks)
+    # Losing *every* reference while the pool is populated means the
+    # synthesizer numbered its citations outside the valid range, not that the
+    # sources were fake. Stripping then produces a fully unsourced answer and
+    # an empty QUELLEN section — visually indistinguishable from "nothing was
+    # found". Log it so this failure mode is diagnosable from the trace.
+    if global_chunks and not citations and re.search(r"\[\d+]", final_answer):
+        logger.warning(
+            "Synthesizer cited only out-of-range chunk numbers over a pool of "
+            f"{len(global_chunks)} — the answer will render without sources."
+        )
     # Drop any [n] the synthesizer invented beyond the chunk pool so every
     # citation number shown in the answer actually opens a document.
     final_answer = strip_unresolved_refs(final_answer, citations)
@@ -1305,11 +1751,11 @@ async def run_manager(
     for sub in subagents:
         searched.update(sub.get("searched_collections") or [])
 
-    # Enrich chunks with similarity metrics (uses embedding service)
-    await _enrich_chunk_similarities(list(subagents), global_chunks, final_answer)
+    # Citation mapping and image attachment only — the similarity enrichment
+    # that used to dominate this phase now runs after the answer is sent.
     phases.append({
         "id": "post",
-        "label": "Zitate & Anreicherung",
+        "label": "Zitate",
         "ms": round((time.perf_counter() - _post_t) * 1000),
     })
 
@@ -1413,7 +1859,63 @@ async def run_manager(
     }
     if on_event:
         await on_event({"type": "final", **result})
+
+    # Diagnostic enrichment runs AFTER the answer is on the wire.
+    #
+    # similarity_to_rank_1 and answer_similarity are read in exactly one place:
+    # the Eval page, which loads them from the database. Nothing in the chat
+    # view renders them. Computing them requires embedding every chunk plus the
+    # answer, which measured 5.3 s of a 28.4 s request — 19 % of the user's
+    # wait for numbers nobody is waiting for. Blocking on it also meant a slow
+    # or failing embedding service could delay or sink an answer that was
+    # already finished.
+    #
+    # The chunk dicts are shared by reference with ``result``, so enriching
+    # them here still populates what run_manager returns — the caller's DB
+    # insert, and with it the Eval page, is unaffected.
+    _enrich_start = time.perf_counter()
+    try:
+        await _enrich_chunk_similarities(list(subagents), global_chunks, final_answer)
+    except Exception as exc:  # noqa: BLE001
+        # Past the point where this can cost the user anything: log and move on.
+        logger.warning(f"Chunk similarity enrichment failed: {exc}")
+    _post_ms = round((time.perf_counter() - _enrich_start) * 1000)
+
+    # Recorded separately from ``timing``: that tree measures what the user
+    # waited for, and this no longer belongs to it.
+    _audit["post_response_ms"] = _post_ms
+
+    if on_event:
+        await on_event({
+            "type": "chunk_metrics",
+            "post_response_ms": _post_ms,
+            "by_text_prefix": _chunk_metrics_by_text(subagents, global_chunks),
+        })
     return result
+
+
+def _chunk_metrics_by_text(
+    subagents: list[dict], global_chunks: list[dict]
+) -> dict[str, dict]:
+    """Map chunk-text prefix → the similarity metrics just computed.
+
+    Keyed the way the enrichment itself deduplicates (chunk text), truncated so
+    the follow-up event stays small. The client holds the same chunks and can
+    patch them without either side tracking positions — which matters because
+    the chat export is built from the client's state, not from the database.
+    """
+    out: dict[str, dict] = {}
+    pools = [c for sub in subagents for st in sub.get("agent_steps", [])
+             for c in (st.get("chunks") or [])] + list(global_chunks)
+    for chunk in pools:
+        text = (chunk.get("text") or "").strip()
+        if not text or "similarity_to_rank_1" not in chunk:
+            continue
+        out[text[:200]] = {
+            "similarity_to_rank_1": chunk.get("similarity_to_rank_1"),
+            "answer_similarity": chunk.get("answer_similarity"),
+        }
+    return out
 
 
 __all__ = ["run_manager", "plan_subtasks", "synthesize", "check_compliance"]

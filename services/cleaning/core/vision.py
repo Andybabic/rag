@@ -18,11 +18,25 @@ logger = logging.getLogger(__name__)
 
 PROMPT_KEY_VISION = "vision.alt_text"
 
+# Transcribe, don't summarise. In technical manuals the answer often exists
+# ONLY inside the graphic — a key assignment, a switch position, a table value.
+# A two-sentence summary ("ein Bedienfeld mit Tasten A bis F") loses exactly
+# that, and since this text is all the retrieval layer ever sees of an image,
+# what is not transcribed here is unanswerable later.
 _DEFAULT_PROMPT = (
-    "Beschreibe was auf dem Bild zu sehen ist: konkrete Formen, "
-    "Beschriftungen, Symbole, Tabellenwerte, Logos. Schreibe 1-2 kurze "
-    "deutsche Sätze. Erfinde nichts. Wenn das Bild ein Logo, Stempel oder "
-    "reines Deko-Element ist, sage das (z.B. \"Firmenlogo Wiener Linien\"). "
+    "Lies das Bild aus. Übertrage JEDE lesbare Beschriftung wörtlich: "
+    "Tastenbeschriftungen und ihre Belegung, Schalterstellungen, "
+    "Anzeigetexte, Achsen- und Feldnamen, Tabellenzellen mit ihren Werten, "
+    "Legenden, Symbole mit ihrer Bedeutung. Nenne dabei ausdrücklich, "
+    "welche Taste bzw. welches Element welcher Funktion oder Seite "
+    "zugeordnet ist (z.B. \"Taste 5 = links, Taste 0 = rechts\"). "
+    "Beschreibe danach in einem Satz, was das Bild insgesamt zeigt. "
+    "Länge richtet sich nach dem Bildinhalt — bei beschriftungsreichen "
+    "Grafiken lieber vollständig als kurz. "
+    "Erfinde nichts und rate nicht: was du nicht sicher lesen kannst, "
+    "lässt du weg. Wenn das Bild ein Logo, Stempel oder reines "
+    "Deko-Element ohne Informationsgehalt ist, sage nur das "
+    "(z.B. \"Firmenlogo Wiener Linien\"). "
     "Antworte als reiner Text — keine Markdown-Syntax, keine ![]() Wrapper, "
     "keine Anführungszeichen, kein Rahmentext."
 )

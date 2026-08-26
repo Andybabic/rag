@@ -68,6 +68,13 @@ export async function streamQuery(
 			try {
 				const event = JSON.parse(line);
 				if (event.type === 'final') final = event;
+				// Diagnostic metrics arrive after 'final': the server sends the
+				// answer first and embeds the chunks afterwards, so the user is
+				// not kept waiting for numbers only the Eval page reads. Merge
+				// them into the final payload rather than handling them in the
+				// caller — the caller applies `final` wholesale once the stream
+				// ends, and would overwrite anything patched in before that.
+				if (event.type === 'chunk_metrics' && final) applyChunkMetrics(final, event);
 				if (event.type === 'error') throw new Error(String(event.detail ?? 'stream error'));
 				onEvent?.(event);
 			} catch (e) {
@@ -77,6 +84,47 @@ export async function streamQuery(
 		}
 	}
 	return final;
+}
+
+/**
+ * Write the post-response similarity metrics onto every chunk of `final`.
+ *
+ * Chunks are matched on the first 200 characters of their text, the same key
+ * the server deduplicates them by. Position would be the obvious alternative
+ * and the wrong one: the chunks live in several nested places at once
+ * (per sub-agent step and in the global pool), and nothing guarantees the two
+ * sides enumerate them alike.
+ *
+ * Without this the chat export loses the metrics, because the export is built
+ * from client state while the Eval page reads them from the database.
+ */
+function applyChunkMetrics(final: Record<string, unknown>, event: Record<string, unknown>) {
+	const byPrefix = event.by_text_prefix as Record<string, Record<string, number>> | undefined;
+	if (!byPrefix) return;
+
+	const patch = (chunks: unknown) => {
+		if (!Array.isArray(chunks)) return;
+		for (const chunk of chunks) {
+			if (!chunk || typeof chunk !== 'object') continue;
+			const text = (chunk as { text?: string }).text;
+			if (typeof text !== 'string') continue;
+			const metrics = byPrefix[text.trim().slice(0, 200)];
+			if (metrics) Object.assign(chunk, metrics);
+		}
+	};
+
+	for (const sub of (final.subagents as { agent_steps?: unknown[] }[] | undefined) ?? []) {
+		for (const step of sub.agent_steps ?? []) {
+			patch((step as { chunks?: unknown }).chunks);
+		}
+	}
+	for (const step of (final.agent_steps as { chunks?: unknown }[] | undefined) ?? []) {
+		patch(step.chunks);
+	}
+	patch(final.global_chunks);
+
+	const audit = final.audit as Record<string, unknown> | undefined;
+	if (audit) audit.post_response_ms = event.post_response_ms;
 }
 
 export async function sendFeedback(queryId: string, rating: string, comment = '') {
@@ -139,14 +187,70 @@ export async function getImageStatus(useCase: string, fileHash: string): Promise
 	return resp.json();
 }
 
-/** (Re-)generate alt-text for a document's images that have none yet. */
+/**
+ * (Re-)generate alt-text for a document's images.
+ *
+ * Default: only images that have no description yet. With `force`, every image
+ * is described again — what you want after the vision prompt changed, since the
+ * existing texts are outdated rather than missing.
+ *
+ * Note this refreshes the gallery only. The descriptions the retrieval layer
+ * uses live in the chunk payload, so making them searchable needs
+ * `reindexDocument`.
+ */
 export async function regenerateImages(
 	useCase: string,
-	fileHash: string
+	fileHash: string,
+	force = false
 ): Promise<{ status: string; pending?: number; total?: number }> {
+	const query = force ? '?force=true' : '';
 	const resp = await fetch(
-		`${BASE}/cleaning/image-regenerate/${encodeURIComponent(useCase)}/${encodeURIComponent(fileHash)}`,
+		`${BASE}/cleaning/image-regenerate/${encodeURIComponent(useCase)}/${encodeURIComponent(fileHash)}${query}`,
 		{ method: 'POST' }
+	);
+	return resp.json();
+}
+
+export interface ReindexResult {
+	status?: string;
+	error?: string;
+	detail?: string;
+	chunks?: number;
+	points_deleted?: number;
+	image_count?: number;
+	images_described?: number;
+	images_complete?: boolean;
+}
+
+/**
+ * Re-run the whole ingest for a stored document: re-extract, transcribe the
+ * images again, re-chunk and replace the vectors.
+ *
+ * This is the action that makes improved image descriptions actually reachable
+ * — chunk payloads are written once at ingest time and never updated in place.
+ * Long-running: it waits for every image to be described before chunking.
+ */
+export async function reindexDocument(doc: {
+	id: string;
+	use_case: string;
+	file_hash?: string;
+	file_name: string;
+	stored_path?: string;
+	collection: string;
+}): Promise<ReindexResult> {
+	const resp = await fetch(
+		`${BASE}/admin/documents/${encodeURIComponent(doc.id)}/reindex`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				use_case: doc.use_case,
+				file_hash: doc.file_hash,
+				file_name: doc.file_name,
+				stored_path: doc.stored_path,
+				collection: doc.collection
+			})
+		}
 	);
 	return resp.json();
 }

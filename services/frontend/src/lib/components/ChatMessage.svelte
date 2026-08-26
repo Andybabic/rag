@@ -11,7 +11,8 @@
 	let showSteps = $state(false);
 	let showManager = $state(false);
 	let showCitations = $state(false);
-	let showTiming = $state(true);
+	let showTiming = $state(false);
+	let openTimingIds = $state(new Set<string>());
 	let openSteps = $state<Set<number>>(new Set());
 	let openSubAgents = $state<Set<string>>(new Set());
 	// Panels stay collapsed by default – the user expands what they
@@ -43,6 +44,21 @@
 		if (!phase || !neckId) return false;
 		if (phase.id === neckId) return true;
 		return (phase.children ?? []).some((child) => containsNeck(child, neckId));
+	}
+
+	function toggleTimingNode(id: string) {
+		if (openTimingIds.has(id)) {
+			openTimingIds.delete(id);
+		} else {
+			openTimingIds.add(id);
+		}
+		openTimingIds = new Set(openTimingIds);
+	}
+
+	function chipClass(active: boolean): string {
+		return active
+			? 'inline-flex items-center gap-1.5 rounded-full bg-gray-900 px-2.5 py-1 text-xs font-medium text-white'
+			: 'inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-200';
 	}
 
 	const roleColors: Record<string, string> = {
@@ -295,27 +311,51 @@
 	};
 </script>
 
+{#snippet chevron(open: boolean)}
+	<svg
+		class="h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform {open ? 'rotate-90' : ''}"
+		viewBox="0 0 20 20"
+		fill="currentColor"
+		aria-hidden="true"
+	>
+		<path
+			fill-rule="evenodd"
+			d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z"
+			clip-rule="evenodd"
+		/>
+	</svg>
+{/snippet}
+
 {#snippet timingPhase(phase: TimingPhase, totalMs: number, neckId: string | undefined, depth: number)}
 	{@const isNeck = phase.id === neckId}
 	{@const inPath = containsNeck(phase, neckId)}
-	<div class={depth > 0 ? 'mt-1 pl-2' : ''}>
-		<div class="mb-0.5 flex items-center justify-between gap-2 text-[10px]">
-			<span class="{isNeck ? 'font-semibold text-amber-800' : depth ? 'text-gray-500' : 'text-gray-600'}">
-				{phase.label}
+	{@const hasKids = (phase.children?.length ?? 0) > 0}
+	{@const expanded = depth < 1 || inPath || openTimingIds.has(phase.id)}
+	<div class={depth > 0 ? 'mt-1.5 border-l border-gray-200 pl-3' : ''}>
+		<button
+			type="button"
+			class="mb-1 flex w-full items-center justify-between gap-2 text-left {hasKids ? 'cursor-pointer' : 'cursor-default'}"
+			onclick={() => hasKids && toggleTimingNode(phase.id)}
+		>
+			<span class="flex min-w-0 items-center gap-1.5 text-[13px] {isNeck ? 'font-semibold text-amber-800' : depth ? 'text-gray-500' : 'font-medium text-gray-700'}">
+				{#if hasKids}
+					{@render chevron(expanded)}
+				{/if}
+				<span class="truncate">{phase.label}</span>
 			</span>
-			<span class="shrink-0 font-mono text-gray-500">
-				{fmtMs(phase.ms)}{#if phase.llm_ms} · LLM {fmtMs(phase.llm_ms)}{/if}
+			<span class="shrink-0 font-mono text-[11px] tabular-nums text-gray-500">
+				{fmtMs(phase.ms)}{#if phase.llm_ms}<span class="text-gray-400"> · LLM {fmtMs(phase.llm_ms)}</span>{/if}
 			</span>
-		</div>
-		<div class="h-1.5 overflow-hidden rounded-full bg-gray-100">
+		</button>
+		<div class="h-1.5 overflow-hidden rounded-full {depth ? 'bg-gray-100' : 'bg-gray-100'}">
 			<div
-				class="h-full rounded-full {isNeck || (inPath && depth === 0) ? 'bg-amber-500' : depth ? 'bg-gray-300' : 'bg-blue-400'}"
+				class="h-full rounded-full {isNeck ? 'bg-amber-500' : inPath && depth === 0 ? 'bg-amber-400' : depth ? 'bg-gray-300' : 'bg-blue-500'}"
 				style="width: {barPct(phase.ms, totalMs)}%"
 			></div>
 		</div>
-		{#if phase.children && phase.children.length > 0}
-			<div class="mt-0.5">
-				{#each phase.children as child}
+		{#if hasKids && expanded}
+			<div class="mt-1">
+				{#each phase.children ?? [] as child}
 					{@render timingPhase(child, totalMs, neckId, depth + 1)}
 				{/each}
 			</div>
@@ -327,7 +367,7 @@
 	<!-- User message -->
 	<div class="flex justify-end">
 		<div
-			class="max-w-2xl rounded-2xl rounded-tr-sm bg-blue-600 px-4 py-3 text-white shadow-sm"
+			class="max-w-[min(100%,42rem)] rounded-2xl rounded-tr-md bg-blue-600 px-4 py-3 text-[15px] leading-relaxed text-white shadow-sm"
 		>
 			{#if message.images && message.images.length > 0}
 				<div class="mb-2 flex flex-wrap justify-end gap-2">
@@ -341,7 +381,7 @@
 				</div>
 			{/if}
 			{#if message.text}
-				<p class="whitespace-pre-wrap text-sm">{message.text}</p>
+				<p class="whitespace-pre-wrap">{message.text}</p>
 			{/if}
 		</div>
 	</div>
@@ -349,8 +389,8 @@
 	<!-- Assistant message -->
 	<div class="flex gap-3">
 		<div
-			class="max-w-2xl rounded-2xl rounded-tl-sm border bg-white px-4 py-3 shadow-sm
-			{message.error ? 'border-red-200' : 'border-gray-200'}"
+			class="w-full max-w-3xl rounded-2xl rounded-tl-md border bg-white px-5 py-4 shadow-sm
+			{message.error ? 'border-red-200' : 'border-gray-200/80'}"
 		>
 			<!-- Live status while streaming -->
 			{#if message.streaming}
@@ -368,146 +408,106 @@
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
-					class="prose prose-sm max-w-none text-sm prose-headings:text-sm prose-headings:font-semibold prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0"
+					class="prose prose-sm max-w-none text-[15px] leading-relaxed text-gray-800 prose-headings:text-base prose-headings:font-semibold prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5"
 					onclick={handleAnswerClick}
 				>
 					{@html formatAnswer(message.text)}
 				</div>
-
-				{#if message.imagesUsed && message.imagesUsed.length > 0 && !/\[BILD:/i.test(message.text)}
-					<!-- Auto-attached image gallery: the synthesizer didn't place
-					     [BILD:] markers in the answer, but cited chunks carry
-					     images. Show them here so the visual source isn't lost. -->
-					<div class="mt-3 border-t border-gray-100 pt-3">
-						<p class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-							Bilder zu den Quellen
-						</p>
-						<div class="grid gap-3 sm:grid-cols-2">
-							{#each message.imagesUsed.filter((i) => i.id && i.url) as img}
-								<figure class="rounded-md border border-gray-200 bg-white p-2">
-									<img
-										src={img.url}
-										alt={img.alt_text ?? ''}
-										class="max-h-72 w-full rounded object-contain"
-										loading="lazy"
-									/>
-									{#if img.alt_text}
-										<figcaption class="mt-1 text-[10px] leading-snug text-gray-600">
-											{img.alt_text}
-											{#if img.page}<span class="text-gray-400"> · S. {img.page}</span>{/if}
-										</figcaption>
-									{:else if img.page}
-										<figcaption class="mt-1 text-[10px] text-gray-400">S. {img.page}</figcaption>
-									{/if}
-								</figure>
-							{/each}
-						</div>
-					</div>
-				{/if}
 			{/if}
 
-			{#if message.timing && message.timing.total_ms > 0}
+			{#if !message.streaming && (message.timing || (message.citations && message.citations.length > 0) || (message.searchedCollections && message.searchedCollections.length > 0))}
 				{@const t = message.timing}
-				{@const neck = t.bottleneck}
-				<div class="mt-3 border-t border-gray-100 pt-3">
-					<button
-						class="mb-2 flex w-full items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-600"
-						onclick={() => (showTiming = !showTiming)}
-					>
-						<span class="transform transition-transform {showTiming ? 'rotate-90' : ''}">&#9654;</span>
-						Laufzeit
-						<span class="ml-auto font-mono text-[11px] font-medium normal-case text-gray-600">
-							{fmtMs(t.total_ms)}
-						</span>
-					</button>
-					{#if showTiming}
+				{@const neck = t?.bottleneck}
+				<div class="mt-4 border-t border-gray-100 pt-3">
+					<div class="flex flex-wrap items-center gap-1.5">
+						{#if t && t.total_ms > 0}
+							<button
+								type="button"
+								class={chipClass(showTiming)}
+								onclick={() => (showTiming = !showTiming)}
+							>
+								<svg class="h-3.5 w-3.5 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+									<path
+										fill-rule="evenodd"
+										d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-13a.75.75 0 00-1.5 0v5c0 .192.078.376.216.512l3.25 3.25a.75.75 0 101.06-1.06L10.75 9.69V5z"
+										clip-rule="evenodd"
+									/>
+								</svg>
+								{fmtMs(t.total_ms)}
+							</button>
+						{/if}
 						{#if neck}
-							<p class="mb-2 text-[11px] text-amber-800">
-								Flaschenhals: <span class="font-semibold">{neck.label}</span>
-								({fmtMs(neck.ms)}, {neck.share_pct} %)
-							</p>
+							<span class="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
+								{neck.label}
+								<span class="ml-1 tabular-nums text-amber-700/70">{neck.share_pct} %</span>
+							</span>
 						{/if}
-						<div class="space-y-1.5">
-							{#each t.phases as phase}
-								{@render timingPhase(phase, t.total_ms, neck?.id, 0)}
-							{/each}
+						{#if message.citations && message.citations.length > 0}
+							<button
+								type="button"
+								class={chipClass(showCitations)}
+								onclick={() => (showCitations = !showCitations)}
+							>
+								{message.citations.length}
+								{message.citations.length === 1 ? 'Quelle' : 'Quellen'}
+							</button>
+						{/if}
+						{#each message.searchedCollections ?? [] as col}
+							<span class="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+								<span class="h-1.5 w-1.5 rounded-full bg-indigo-400"></span>
+								{col}
+							</span>
+						{/each}
+					</div>
+
+					{#if showTiming && t && t.total_ms > 0}
+						<div class="mt-3 rounded-xl bg-gray-50 px-3 py-3">
+							<div class="space-y-2.5">
+								{#each t.phases as phase}
+									{@render timingPhase(phase, t.total_ms, neck?.id, 0)}
+								{/each}
+							</div>
+							{#if message.durationMs}
+								<p class="mt-3 text-[11px] text-gray-400">
+									Client inkl. Netzwerk: {fmtMs(message.durationMs)}
+								</p>
+							{/if}
 						</div>
-						{#if message.durationMs}
-							<p class="mt-2 text-[10px] text-gray-400">
-								Client inkl. Netzwerk: {fmtMs(message.durationMs)}
-							</p>
-						{/if}
 					{/if}
-				</div>
-			{/if}
 
-			<!-- Searched Collections -->
-			{#if message.searchedCollections && message.searchedCollections.length > 0}
-				<div class="mt-2 flex flex-wrap items-center gap-1.5">
-					<span class="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-						Durchsucht:
-					</span>
-					{#each message.searchedCollections as col}
-						<span
-							class="inline-flex items-center gap-1 rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-600"
-						>
-							<span class="h-1 w-1 rounded-full bg-indigo-400"></span>
-							{col}
-						</span>
-					{/each}
-				</div>
-			{/if}
-
-			<!-- Citations / Sources -->
-			{#if message.citations && message.citations.length > 0}
-				<div class="mt-3 border-t border-gray-100 pt-3">
-					<button
-						class="mb-2 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-600"
-						onclick={() => (showCitations = !showCitations)}
-					>
-						<span class="transform transition-transform {showCitations ? 'rotate-90' : ''}">&#9654;</span>
-						Quellen
-						<span class="ml-1 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700 normal-case">
-							{message.citations.length}
-						</span>
-					</button>
-					{#if showCitations}
-					<div class="space-y-2">
+					{#if showCitations && message.citations && message.citations.length > 0}
+					<div class="mt-3 space-y-2">
 						{#each message.citations as cite, i}
 							<div
 								id="citation-{i + 1}"
-								class="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs transition-all"
+								class="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2.5 text-xs transition-all"
 							>
-								<div class="flex items-start gap-2">
+								<div class="flex items-start gap-2.5">
 									<span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-100 text-[10px] font-bold text-blue-700">{cite.ref?.replace(/[\[\]]/g, '')}</span>
 									<div class="min-w-0 flex-1">
-										<div class="flex items-center gap-2">
+										<div class="flex flex-wrap items-center gap-2">
 											{#if cite.file_name}
 												{#if cite.stored_path}
 													<button
 														onclick={() => openPreview(cite.stored_path ?? '', cite.file_name ?? '', cite.page ?? undefined)}
-														class="font-semibold text-blue-600 hover:underline text-left"
-														title="Vorschau oeffnen"
+														class="font-medium text-blue-700 hover:underline text-left"
+														title="Vorschau öffnen"
 													>
 														{cite.file_name}
-														<svg class="inline h-3 w-3 -mt-0.5 ml-0.5" viewBox="0 0 20 20" fill="currentColor">
-															<path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
-															<path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd" />
-														</svg>
 													</button>
 												{:else}
-													<span class="font-semibold text-gray-700">{cite.file_name}</span>
+													<span class="font-medium text-gray-800">{cite.file_name}</span>
 												{/if}
 											{/if}
 											{#if cite.page}
-												<span class="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">Seite {cite.page}</span>
+												<span class="rounded-md bg-white px-1.5 py-0.5 text-[11px] text-gray-500">S. {cite.page}</span>
 											{/if}
 											{#if cite.score}
-												<span class="text-[10px] text-gray-400">Score: {(cite.score * 100).toFixed(0)}%</span>
+												<span class="text-[11px] text-gray-400">Score: {(cite.score * 100).toFixed(0)}%</span>
 											{/if}
 										</div>
 										{#if cite.excerpt}
-											<p class="mt-1 whitespace-pre-wrap text-gray-500">{cite.excerpt}</p>
+											<p class="mt-1 leading-relaxed text-gray-500">{cite.excerpt}</p>
 										{/if}
 									</div>
 								</div>
@@ -518,18 +518,45 @@
 				</div>
 			{/if}
 
+			{#if message.imagesUsed && message.imagesUsed.length > 0 && !/\[BILD:/i.test(message.text ?? '')}
+				<div class="mt-3 border-t border-gray-100 pt-3">
+					<p class="mb-2 text-xs font-medium text-gray-500">Bilder zu den Quellen</p>
+					<div class="grid gap-3 sm:grid-cols-2">
+						{#each message.imagesUsed.filter((i) => i.id && i.url) as img}
+							<figure class="rounded-xl border border-gray-100 bg-gray-50 p-2">
+								<img
+									src={img.url}
+									alt={img.alt_text ?? ''}
+									class="max-h-56 w-full rounded-lg object-contain"
+									loading="lazy"
+								/>
+								{#if img.alt_text}
+									<figcaption class="mt-1.5 line-clamp-3 text-[11px] leading-snug text-gray-500" title={img.alt_text}>
+										{img.alt_text}
+										{#if img.page}<span class="text-gray-400"> · S. {img.page}</span>{/if}
+									</figcaption>
+								{:else if img.page}
+									<figcaption class="mt-1.5 text-[11px] text-gray-400">S. {img.page}</figcaption>
+								{/if}
+							</figure>
+						{/each}
+					</div>
+				</div>
+			{/if}
+
 			<!-- Manager Plan + Sub-Agents (hierarchical trace) -->
 			{#if message.managerPlan || (message.subAgents && message.subAgents.length > 0)}
-				<div class="mt-3 border-t border-gray-100 pt-3">
+				<div class="mt-2">
 					<button
-						class="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700"
+						type="button"
+						class="flex items-center gap-1.5 rounded-lg px-1 py-1 text-[13px] font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700"
 						onclick={() => (showManager = !showManager)}
 					>
-						<span class="transform transition-transform {showManager ? 'rotate-90' : ''}">&#9654;</span>
-						Manager-Trace
+						{@render chevron(showManager)}
+						Ablauf
 						{#if message.subAgents && message.subAgents.length > 0}
-							<span class="ml-1 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
-								{message.subAgents.length}× parallel
+							<span class="text-gray-400">
+								{message.subAgents.length} Agent{message.subAgents.length === 1 ? '' : 'en'}
 							</span>
 						{/if}
 					</button>
@@ -538,14 +565,14 @@
 						<div class="mt-2 space-y-2">
 							<!-- Manager plan card -->
 							{#if message.managerPlan}
-								<div class="rounded-lg border border-indigo-200 bg-indigo-50/50 px-3 py-2">
+								<div class="rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2.5">
 									<div class="flex items-center gap-2">
-										<span class="rounded-md border border-indigo-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-indigo-700">
-											MANAGER
+										<span class="text-[11px] font-semibold text-indigo-700">
+											Plan
 										</span>
 										{#if message.managerPlan.merge_strategy}
-											<span class="text-[10px] uppercase tracking-wider text-indigo-500">
-												Merge: {mergeLabels[message.managerPlan.merge_strategy] ?? message.managerPlan.merge_strategy}
+											<span class="text-[11px] text-indigo-500">
+												{mergeLabels[message.managerPlan.merge_strategy] ?? message.managerPlan.merge_strategy}
 											</span>
 										{/if}
 									</div>
@@ -683,12 +710,12 @@
 									: verdict === 'REWRITE'
 										? 'border-amber-200 bg-amber-50/50 text-amber-700'
 										: 'border-red-200 bg-red-50/50 text-red-700'}
-								<div class="rounded-lg border {vColor} px-3 py-2">
+								<div class="rounded-xl border {vColor} px-3 py-2.5">
 									<div class="flex items-center gap-2">
-										<span class="rounded-md border bg-white px-1.5 py-0.5 text-[10px] font-bold">
-											COMPLIANCE
+										<span class="text-[11px] font-semibold">
+											Compliance
 										</span>
-										<span class="text-[10px] font-bold uppercase tracking-wider">
+										<span class="text-[11px] font-medium">
 											{verdict}
 										</span>
 									</div>
@@ -720,12 +747,12 @@
 
 							<!-- Synthesizer status -->
 							{#if message.synthesizer}
-								<div class="rounded-lg border border-fuchsia-200 bg-fuchsia-50/50 px-3 py-2">
+								<div class="rounded-xl border border-fuchsia-100 bg-fuchsia-50/50 px-3 py-2.5">
 									<div class="flex items-center gap-2">
-										<span class="rounded-md border border-fuchsia-200 bg-white px-1.5 py-0.5 text-[10px] font-bold text-fuchsia-700">
-											SYNTHESIZER
+										<span class="text-[11px] font-semibold text-fuchsia-700">
+											Synthese
 										</span>
-										<span class="text-[10px] uppercase tracking-wider text-fuchsia-500">
+										<span class="text-[11px] text-fuchsia-500">
 											{message.synthesizer.phase}
 										</span>
 										{#if message.synthesizer.merge_strategy}
@@ -754,15 +781,14 @@
 
 			<!-- Agent Steps (Pipeline Tracing) -->
 			{#if message.agentSteps && message.agentSteps.length > 0}
-				<div class="mt-3 border-t border-gray-100 pt-3">
+				<div class="mt-2">
 					<button
-						class="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+						type="button"
+						class="flex items-center gap-1.5 rounded-lg px-1 py-1 text-[13px] font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700"
 						onclick={() => (showSteps = !showSteps)}
 					>
-						<span class="transform transition-transform {showSteps ? 'rotate-90' : ''}"
-							>&#9654;</span
-						>
-						{message.agentSteps.length} Schritte anzeigen
+						{@render chevron(showSteps)}
+						{message.agentSteps.length} Schritte
 					</button>
 
 					{#if showSteps}
@@ -927,13 +953,14 @@
 
 			<!-- System-Prompt + enriched Query (Eingang an das LLM) -->
 			{#if message.systemPrompt || message.enrichedQuery}
-				<div class="mt-3 border-t border-gray-100 pt-3">
+				<div class="mt-1">
 					<button
-						class="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600"
+						type="button"
+						class="flex items-center gap-1.5 rounded-lg px-1 py-1 text-[13px] font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-700"
 						onclick={() => (showSystemPrompt = !showSystemPrompt)}
 					>
-						<span class="transform transition-transform {showSystemPrompt ? 'rotate-90' : ''}">&#9654;</span>
-						System-Prompt &amp; Query anzeigen
+						{@render chevron(showSystemPrompt)}
+						Prompt
 					</button>
 					{#if showSystemPrompt}
 						<div class="mt-2 space-y-2">
@@ -956,32 +983,32 @@
 
 			<!-- Feedback Buttons -->
 			{#if !readonly && !message.error && !message.streaming}
-				<div class="mt-3 border-t border-gray-100 pt-2">
-					<div class="flex items-center gap-2">
+				<div class="mt-3">
+					<div class="flex items-center gap-1">
 						<button
-							class="text-lg transition-transform hover:scale-110
-							{feedbackSent === 'positive' || feedbackDraft === 'positive'
-								? 'opacity-100'
-								: 'opacity-40 hover:opacity-70'}"
+							class="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700
+							{feedbackSent === 'positive' || feedbackDraft === 'positive' ? 'bg-emerald-50 text-emerald-600' : ''}"
 							onclick={() => onFeedback('positive')}
 							title="Hilfreich"
 							disabled={feedbackSent !== null}
 						>
-							&#128077;
+							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M6.633 10.25c.806 0 1.533-.446 2.031-1.08a9.04 9.04 0 012.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.5 4.5 0 00.322-1.672V2.75a.75.75 0 01.75-.75 2.25 2.25 0 012.25 2.25c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 01-2.649 7.521c-.388.482-.987.729-1.605.729H13.89a4.72 4.72 0 01-1.634-.8 3.74 3.74 0 00-1.443-.8h-.845M6.633 10.25H.75m5.883 0v3.75m0-3.75h.375" />
+							</svg>
 						</button>
 						<button
-							class="text-lg transition-transform hover:scale-110
-							{feedbackSent === 'negative' || feedbackDraft === 'negative'
-								? 'opacity-100'
-								: 'opacity-40 hover:opacity-70'}"
+							class="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700
+							{feedbackSent === 'negative' || feedbackDraft === 'negative' ? 'bg-red-50 text-red-600' : ''}"
 							onclick={() => onFeedback('negative')}
 							title="Nicht hilfreich"
 							disabled={feedbackSent !== null}
 						>
-							&#128078;
+							<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M7.498 15.25c.806 0 1.533.446 2.031 1.08a9.04 9.04 0 002.861 2.4c.723.384 1.35.956 1.653 1.715a4.5 4.5 0 00.322 1.672v.633a.75.75 0 00.75.75 2.25 2.25 0 002.25-2.25c0-1.152-.26-2.243-.723-3.218-.266-.558.107-1.282.725-1.282h3.126c1.026 0 1.945-.694 2.054-1.715.045-.422.068-.85.068-1.285a11.95 11.95 0 00-2.649-7.521C19.612 5.268 19.013 5.02 18.395 5.02h-2.34a4.72 4.72 0 00-1.634.8 3.74 3.74 0 01-1.443.8h-.845M7.498 15.25H1.75m5.748 0v-3.75m0 3.75h.375" />
+							</svg>
 						</button>
 						{#if feedbackSent}
-							<span class="text-xs text-gray-400">Danke für dein Feedback!</span>
+							<span class="ml-1 text-xs text-gray-400">Danke für das Feedback</span>
 						{/if}
 					</div>
 

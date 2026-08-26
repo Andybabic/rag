@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -169,7 +170,12 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     fused = hybrid_fuse(query, results)
 
     # 3b. Cross-encoder rerank on the top of the fused list (keeps things cheap)
-    above = rerank_chunks(query, fused[:25], top_n=15)
+    #     Off the event loop: the cross-encoder is several seconds of CPU work
+    #     per call, and running it inline froze the whole service for that
+    #     window — parallel sub-agents serialised on it and unrelated requests
+    #     stalled. torch releases the GIL during inference, so a thread lets
+    #     concurrent reranks genuinely overlap.
+    above = await asyncio.to_thread(rerank_chunks, query, fused[:25], top_n=15)
     if not above:
         above = fused[:5]
     _rerank_ms = round((time.perf_counter() - _rerank_start) * 1000)
@@ -188,11 +194,11 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     chunks = []
     for i, r in enumerate(unique[:7], 1):
         meta = r.get("metadata", {})
-        text = meta.get("text", "")[:300]
+        text = meta.get("text", "")[:_OBSERVATION_CHARS]
         file_name = meta.get("file_name", "")
         page = meta.get("page")
         source = f"{file_name}, S. {page}" if page else file_name
-        lines.append(f"[{i}] ({source}) {text}")
+        lines.append(f"[{i}] ({source}) {text}{_image_block(meta)}")
         chunks.append({
             "text": meta.get("text", ""),
             "score": r.get("rerank_score", 0.0),
@@ -206,6 +212,44 @@ async def action_search(args: dict, *, use_case: str) -> dict:
         "search_ms": _search_ms,
         "rerank_ms": _rerank_ms,
     }
+
+
+# Characters of chunk text shown per observation entry.
+#
+# This is what the agent reasons over, so it decides not just what the agent
+# can report but whether it thinks it has enough to answer at all. The chunker
+# emits ~500-character chunks; at 300 the agent saw roughly the first half of
+# every source and regularly judged a complete answer incomplete, spending a
+# further REFINE_QUERY round on material it already had — a step costing an LLM
+# call plus a full retrieval, measured at 17.6 s against roughly 500 extra
+# prompt tokens for the whole observation block. Truncating here to save
+# latency buys the opposite.
+#
+# Deliberately not unbounded: an oversized chunk (a wide table, a page with
+# many appended image descriptions) must not crowd the other six out of the
+# agent's context.
+_OBSERVATION_CHARS = 550
+
+
+def _image_block(meta: dict) -> str:
+    """Render the descriptions of images belonging to this chunk's page.
+
+    In technical manuals the answer regularly exists only inside a graphic — a
+    key assignment, a switch position, a table value. The chunk text around it
+    says nothing about it, so an agent reading text alone cannot answer and
+    reports "not in the documents" while the answer sits one layer down. The
+    description is the only searchable representation of that content, so it
+    travels with the chunk instead of waiting for the synthesis step.
+    """
+    images = ((meta.get("extra") or {}).get("images")) or []
+    parts = []
+    for img in images:
+        alt = (img.get("alt_text") or "").strip()
+        if not alt:
+            continue
+        img_id = img.get("id") or img.get("image_id") or ""
+        parts.append(f"\n    [BILD {img_id}] {alt}")
+    return "".join(parts)
 
 
 def _op_facet(meta: dict, key: str):

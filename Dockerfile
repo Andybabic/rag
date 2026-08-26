@@ -5,9 +5,15 @@ WORKDIR /app
 
 # Create the non-root user up front so the later COPY --chown is cheap and we
 # avoid a recursive chown pass over the whole app dir.
+# The cache dir is created here, owned by appuser, because a named volume
+# mounted onto a path that does not exist in the image is initialised by Docker
+# as root — and the container runs as appuser, which then cannot write it. The
+# evaluation service mounts its model cache here; without this the reranker
+# dies at startup with EACCES and the whole system runs in degraded retrieval
+# with no symptom beyond worse answers.
 RUN useradd -m -u 1000 appuser \
-    && mkdir -p /data/documents \
-    && chown -R appuser /data
+    && mkdir -p /data/documents /home/appuser/.cache \
+    && chown -R appuser /data /home/appuser/.cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*

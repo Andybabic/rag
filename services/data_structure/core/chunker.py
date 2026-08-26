@@ -167,15 +167,27 @@ def chunk_markdown(
     # attach the full {id, page, alt_text, url} payload (not just the id)
     # to every chunk that mentions the image.
     images_by_id: dict[str, dict] = {}
+    # Same payloads grouped by page. A page is split into several chunks, but
+    # the image anchor sits in exactly one of them — so a hit on any other
+    # chunk of that page used to come back without the graphic, even though
+    # the graphic belongs to the same page of the same manual. Binding at page
+    # level means retrieving anywhere on the page brings its images along.
+    images_by_page: dict[int, list[dict]] = {}
     for img in images or []:
         img_id = img.get("image_id") or img.get("id")
         if img_id:
-            images_by_id[img_id] = {
+            payload = {
                 "id": img_id,
                 "page": img.get("page"),
                 "alt_text": img.get("alt_text", ""),
                 "url": img.get("url", ""),
             }
+            images_by_id[img_id] = payload
+            try:
+                page_key = int(img.get("page"))
+            except (TypeError, ValueError):
+                continue
+            images_by_page.setdefault(page_key, []).append(payload)
 
     # Heading index is built once on the full markdown so breadcrumbs
     # carry across pages even when a section continues onto the next page.
@@ -218,12 +230,28 @@ def chunk_markdown(
                 embed_text = clean_text
 
             chunk_id = str(uuid4())
-            chunk_images = [
-                images_by_id[i] for i in chunk_image_ids if i in images_by_id
-            ]
-            meta_extra = {**(extra or {}), "breadcrumb": breadcrumb}
+            # Anchored images first — those sit in this very chunk — then the
+            # rest of the page's images. Order matters downstream: the answer
+            # side offers them to the model in this sequence, so the most
+            # directly related graphic leads.
+            chunk_images: list[dict] = []
+            seen_image_ids: set[str] = set()
+            for img_id in chunk_image_ids:
+                payload = images_by_id.get(img_id)
+                if payload and img_id not in seen_image_ids:
+                    seen_image_ids.add(img_id)
+                    chunk_images.append(payload)
+            for payload in images_by_page.get(page_num, []):
+                img_id = payload["id"]
+                if img_id not in seen_image_ids:
+                    seen_image_ids.add(img_id)
+                    chunk_images.append(payload)
+            # Keys derived from *this chunk's* position in the document. No
+            # plugin can reconstruct them — they only exist here.
+            chunk_owned: dict = {"breadcrumb": breadcrumb}
             if chunk_images:
-                meta_extra["images"] = chunk_images
+                chunk_owned["images"] = chunk_images
+            meta_extra = {**(extra or {}), **chunk_owned}
             meta = ChunkMetadata(
                 chunk_id=chunk_id,
                 file_name=file_name,
@@ -237,6 +265,13 @@ def chunk_markdown(
 
             if plugin is not None:
                 meta = plugin.enrich_metadata(meta, clean_text, extra or {})
+                # Every plugin rebuilds extra as {**raw_meta, ...} and thereby
+                # drops whatever the chunker put there — raw_meta is the
+                # document-level dict, not this chunk's. That silently deleted
+                # the image bindings and breadcrumbs on the way to the index.
+                # Re-applying here keeps the invariant regardless of what a
+                # plugin does, instead of relying on every plugin to remember.
+                meta.extra = {**(meta.extra or {}), **chunk_owned}
 
             chunks.append(Chunk(id=chunk_id, text=embed_text, metadata=meta))
 

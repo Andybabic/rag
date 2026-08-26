@@ -93,6 +93,12 @@ class LLMConfig:
     # timeout aborts a whole document ingest on one image.
     vision_timeout: float = 180.0
 
+    # Read timeout (seconds) for chat calls. A model that falls into a
+    # degenerate repetition loop generates until it is cut off, so this value
+    # is the worst case a single LLM call can cost. Keep it comfortably above
+    # a normal generation but far below "the user gave up".
+    chat_timeout: float = 120.0
+
     # Chain-of-thought / thinking tokens (Nemotron, Qwen3, …). Off unless
     # ``THINKING=true`` is set in the environment.
     enable_thinking: bool = False
@@ -120,6 +126,7 @@ class LLMConfig:
             agent_max_steps=_env_int("AGENT_MAX_STEPS"),
             memory_max_chars=_env_int("MEMORY_MAX_CHARS"),
             vision_timeout=_env_float("VISION_TIMEOUT", 180.0) or 180.0,
+            chat_timeout=_env_float("CHAT_TIMEOUT", 120.0) or 120.0,
             enable_thinking=_env_bool("THINKING", False),
         )
 

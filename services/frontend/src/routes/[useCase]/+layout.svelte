@@ -54,12 +54,12 @@
 	});
 
 	const tabs = [
-		{ id: 'chat' as const, label: 'Chat', icon: '&#128172;', href: '' },
-		{ id: 'tabelle' as const, label: 'Tabelle', icon: '&#128196;', href: '/tabelle' },
-		{ id: 'documents' as const, label: 'Dokumente', icon: '&#128196;', href: '/documents' },
-		{ id: 'history' as const, label: 'Verlauf', icon: '&#128337;', href: '/history' },
-		{ id: 'eval' as const, label: 'Eval', icon: '&#128202;', href: '/eval' },
-		{ id: 'settings' as const, label: 'Einstellungen', icon: '&#9881;', href: '/settings' }
+		{ id: 'chat' as const, label: 'Chat', href: '' },
+		{ id: 'tabelle' as const, label: 'Tabelle', href: '/tabelle' },
+		{ id: 'documents' as const, label: 'Dokumente', href: '/documents' },
+		{ id: 'history' as const, label: 'Verlauf', href: '/history' },
+		{ id: 'eval' as const, label: 'Eval', href: '/eval' },
+		{ id: 'settings' as const, label: 'Einstellungen', href: '/settings' }
 	];
 
 	const currentPath = $derived($page.url.pathname);
@@ -72,16 +72,16 @@
 </script>
 
 <svelte:head>
-	<title>{uc.label} – RAG Platform</title>
+	<title>{uc.label} – Kermit</title>
 </svelte:head>
 
-<div class="flex h-full">
+<div class="flex h-full min-h-0 overflow-hidden">
 	<!-- Sidebar -->
-	<aside class="flex h-full w-80 shrink-0 flex-col bg-gray-900 text-white">
+	<aside class="flex h-full w-80 shrink-0 flex-col overflow-y-auto bg-gray-900 text-white">
 		<!-- Header -->
-		<div class="border-b border-gray-700 p-5">
-			<h1 class="text-lg font-bold tracking-tight">RAG Platform</h1>
-			<p class="mt-1 text-xs text-gray-400">Prototyp v0.1</p>
+		<div class="border-b border-white/10 px-5 py-5">
+			<p class="text-[11px] font-medium uppercase tracking-[0.14em] text-gray-500">Kermit</p>
+			<h1 class="mt-1 text-lg font-semibold tracking-tight">Wissensassistent</h1>
 		</div>
 
 		<!-- Use Case Navigation -->
@@ -115,12 +115,12 @@
 				</svg>
 				<div class="min-w-0 flex-1">
 					<div class="truncate text-xs font-semibold text-white">{uc.label}</div>
-					<div class="text-[10px] text-gray-400">Use Case fixiert</div>
+					<div class="text-[11px] text-gray-500">Use Case fixiert</div>
 				</div>
 				<span
-					class="shrink-0 rounded bg-red-600/80 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
+					class="shrink-0 rounded bg-red-600/80 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-white"
 				>
-					locked
+					fixiert
 				</span>
 			</div>
 		</div>
@@ -213,26 +213,26 @@
 	</aside>
 
 	<!-- Main content area -->
-	<div class="flex flex-1 flex-col">
+	<div class="flex min-h-0 flex-1 flex-col overflow-hidden">
 		<!-- Tab Bar -->
-		<div class="flex border-b border-gray-200 bg-white px-4">
+		<div class="flex shrink-0 items-center gap-1 border-b border-gray-200 bg-white px-4">
 			{#each tabs as tab}
 				{@const active = isActiveTab(tab.href)}
 				<a
 					href="/{uc.slug}{tab.href}"
-					class="relative px-4 py-3 text-sm font-medium transition-colors
-						{active ? 'text-blue-600' : 'text-gray-500 hover:text-gray-700'}"
+					class="relative px-3.5 py-3 text-sm transition-colors
+						{active ? 'font-medium text-gray-900' : 'font-medium text-gray-500 hover:text-gray-800'}"
 				>
-					<span class="mr-1.5">{@html tab.icon}</span>
 					{tab.label}
 					{#if active}
-						<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600"></span>
+						<span class="absolute bottom-0 left-3 right-3 h-0.5 rounded-full bg-blue-600"></span>
 					{/if}
 				</a>
 			{/each}
 		</div>
 
-		<!-- Tab Content -->
-		{@render children()}
+		<div class="min-h-0 flex-1 overflow-y-auto">
+			{@render children()}
+		</div>
 	</div>
 </div>
