@@ -48,7 +48,7 @@ class OllamaProvider(LLMProvider):
         if "max_tokens" in options and "num_predict" not in options:
             options["num_predict"] = options.pop("max_tokens")
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=self.config.chat_timeout) as client:
                 resp = await client.post(
                     self._url("/api/chat"),
                     headers=self._headers(),

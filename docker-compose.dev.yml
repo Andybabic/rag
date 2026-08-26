@@ -129,8 +129,19 @@ services:
     volumes:
       - ./services/evaluation:/app
       - ./shared:/shared
+      # The cross-encoder (~2.2 GB) otherwise lives only in the container
+      # layer and is re-downloaded on every rebuild. Until it is loaded,
+      # retrieval silently falls back to fusion-only ranking, which looks like
+      # a working system returning worse answers. --reload compounds it: every
+      # edit under ./services/evaluation restarts the process and reloads the
+      # model, so without a cache each save costs another download window.
+      - kermit_hf_cache:/home/appuser/.cache
     ports:
       - "8005:8005"
+    environment:
+      HF_HOME: /home/appuser/.cache/huggingface
+      TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
     env_file: .env
     depends_on:
       postgres:
@@ -219,3 +230,6 @@ volumes:
   pgdata:
   qdrant_data:
   ollama_data:
+  # Same name as in docker-compose.wrnlinien.yml so a machine that has run
+  # either stack already holds the model.
+  kermit_hf_cache:

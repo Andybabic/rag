@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Awaitable, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 StepCallback = Optional[Callable[[dict], Awaitable[None]]]
 
@@ -19,7 +22,7 @@ from core.actions import (
     action_search_cnc,
 )
 from core.citations import map_citations, strip_unresolved_refs
-from core.llm import call_llm
+from core.llm import TOKENS_AGENT_STEP, call_llm
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
 from core.use_cases import get_react_suffix
@@ -57,6 +60,24 @@ def _is_no_info_answer(text: str) -> bool:
     if not t:
         return True
     return bool(_NO_INFO_RE.search(t))
+
+
+# An "answer" that is really an action call the model failed to emit as one.
+# The ReAct parser falls back to FINAL_ANSWER when it cannot find a valid
+# action, so a malformed SEARCH does not surface as a parse error — it becomes
+# the specialist's answer, is marked sufficient, and travels to the synthesizer
+# as if the specialist had contributed. Observed verbatim as a whole sub-agent
+# answer: 'SEARCH({"query": "…", "collection": "OBSERVATION", "filters": {}'.
+#
+# Anchored, and requires the opening brace of the argument object: a German
+# answer legitimately opening with an acronym and a parenthesis ("USTP (Use
+# Case) …") must not be discarded as a failed step.
+_ACTION_CALL_ANSWER_RE = re.compile(r"^\s*(?:[A-Z][A-Z_]{2,}\s*\(\s*\{|\{\s*\"action\"\s*:)")
+
+
+def _is_action_call_answer(text: str) -> bool:
+    """True if *text* is an action invocation rather than a prose answer."""
+    return bool(_ACTION_CALL_ANSWER_RE.match(text or ""))
 
 
 def _broaden_query(original: str, narrowed: str) -> str:
@@ -312,6 +333,50 @@ def _enrich_query(query: str, history: list[dict] | None) -> str:
     )
 
 
+_CLOSING_DEMAND = (
+    "Der Schrittvorrat ist aufgebraucht. Formuliere JETZT die Antwort auf die "
+    "ursprüngliche Frage, ausschliesslich aus den OBSERVATION-Chunks oben.\n"
+    "- Belege jede Aussage mit der Chunk-Nummer [n] aus den Beobachtungen.\n"
+    "- Bildbeschreibungen ([BILD …]) sind dabei eine gültige Quelle.\n"
+    "- Decken die Chunks die Frage nicht ab, sage genau das.\n"
+    "Antworte als reiner Fliesstext — KEIN THOUGHT, KEIN ACTION, kein JSON."
+)
+
+
+async def _closing_answer(
+    messages: list[dict], *, use_case: str
+) -> tuple[str, bool]:
+    """Force an answer out of a loop that ran out of steps without one.
+
+    Returns ``(answer, sufficient)``; ``("", False)`` when the call fails, so
+    the caller falls through to its raw-chunk fallback. That fallback is what
+    this exists to avoid: it dumps observations under a local [1..n] numbering
+    which, as a manager fragment, is unusable to the synthesizer.
+    """
+    try:
+        raw = await call_llm(
+            messages + [{"role": "user", "content": _CLOSING_DEMAND}],
+            use_case=use_case,
+            max_tokens=TOKENS_AGENT_STEP,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Closing answer call failed: {exc}")
+        return "", False
+
+    # The model may still wrap the reply in the ReAct format out of habit, so
+    # unwrap a FINAL_ANSWER argument when there is one. Note _parse_action
+    # falls back to FINAL_ANSWER carrying the *entire* response when it finds
+    # no ACTION, so this branch also covers plain prose. Leftover framework
+    # artefacts are stripped by run_agent's cleanup on the way out — kept in
+    # one place rather than duplicated here.
+    _, action_name, action_args = _parse_action(raw)
+    if action_name == "FINAL_ANSWER":
+        raw = str(action_args.get("answer") or raw)
+
+    text = raw.strip()
+    return (text, True) if text else ("", False)
+
+
 async def run_agent(
     query: str,
     *,
@@ -397,9 +462,30 @@ async def run_agent(
         if on_event:
             await on_event({"type": "thinking", "step": step_num})
 
+        # Spending the last step on another SEARCH leaves the loop with no
+        # answer, and the fallback below then dumps raw chunks under its own
+        # local [1..n] numbering. As a manager fragment that dump is worse than
+        # useless: the synthesizer cannot map those numbers onto the global
+        # pool and responds by dropping citations from the final answer
+        # altogether. Demand the answer while the model can still write one.
+        if step_num == max_steps and has_searched:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "LETZTER SCHRITT: Weitere Suchen sind nicht mehr möglich. "
+                    "Antworte JETZT mit FINAL_ANSWER auf Basis der bisherigen "
+                    "OBSERVATION-Chunks. Belege jede Aussage mit der "
+                    "Chunk-Nummer [n] aus den Beobachtungen. Wenn die Chunks "
+                    "die Frage nicht abdecken, sage das ausdrücklich — auch "
+                    "das ist eine gültige FINAL_ANSWER."
+                ),
+            })
+
         # 1. Call LLM (use_case threads provider/model overrides through resolver)
         _step_start = time.perf_counter()
-        llm_response = await call_llm(messages, use_case=use_case)
+        llm_response = await call_llm(
+            messages, use_case=use_case, max_tokens=TOKENS_AGENT_STEP
+        )
         _llm_timing_data = get_last_llm_timing()
         _llm_ms = round((time.perf_counter() - _step_start) * 1000)
         thought, action_name, action_args = _parse_action(llm_response)
@@ -516,11 +602,23 @@ async def run_agent(
         if action_name == "FINAL_ANSWER":
             answer = action_args.get("answer", observation)
             use_case_extras = action_args.get("extras", {})
-            # Honest signal: a "not in the documents" answer is NOT a
-            # sufficient RAG result. This propagates to the manager,
-            # synthesizer, compliance and the UI/audit instead of looking
-            # like a confident answer.
-            sufficient = not _is_no_info_answer(answer)
+            if _is_action_call_answer(answer):
+                # Drop it rather than pass it on. Emptying the answer hands the
+                # step to the closing call below, which sees the same
+                # observations and can do nothing but answer — one generation
+                # instead of a fragment that is neither an answer nor an error.
+                logger.warning(
+                    "Sub-agent returned an action call as its FINAL_ANSWER "
+                    "(%.80s…) — discarding and forcing a closing answer.",
+                    answer.replace("\n", " "),
+                )
+                answer = ""
+            else:
+                # Honest signal: a "not in the documents" answer is NOT a
+                # sufficient RAG result. This propagates to the manager,
+                # synthesizer, compliance and the UI/audit instead of looking
+                # like a confident answer.
+                sufficient = not _is_no_info_answer(answer)
             break
 
         if action_name == "CLARIFY":
@@ -533,6 +631,14 @@ async def run_agent(
         # 5. Add to message history for next iteration
         messages.append({"role": "assistant", "content": llm_response})
         messages.append({"role": "user", "content": f"OBSERVATION: {observation}"})
+
+    # The step budget is gone and the model never answered. Asking for the
+    # answer inside the loop is only a prompt, and this model ignores it often
+    # enough that we cannot rely on it — so spend one closing call that can do
+    # nothing *but* answer. It sees every observation already collected, so it
+    # costs one generation and no further retrieval.
+    if not answer and chunks_for_citations:
+        answer, sufficient = await _closing_answer(messages, use_case=use_case)
 
     # If max_steps reached without FINAL_ANSWER – try to use whatever we found
     if not answer:

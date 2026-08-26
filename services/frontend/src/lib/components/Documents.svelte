@@ -5,6 +5,7 @@
 		getDocuments,
 		getImageStatus,
 		regenerateImages,
+		reindexDocument,
 		uploadFile,
 		uploadFolder,
 		type FolderUploadResult,
@@ -145,17 +146,65 @@
 		}
 	}
 
-	async function regenerate(doc: { use_case: string; file_hash?: string }) {
+	async function regenerate(doc: { use_case: string; file_hash?: string }, force = false) {
 		if (!doc.file_hash) return;
 		const fh = doc.file_hash;
 		regenerating.add(fh);
 		regenerating = new Set(regenerating);
 		try {
-			await regenerateImages(doc.use_case, fh);
+			await regenerateImages(doc.use_case, fh, force);
 			await pollImageStatus(doc.use_case, fh);
 		} finally {
 			regenerating.delete(fh);
 			regenerating = new Set(regenerating);
+		}
+	}
+
+	let reindexingId = $state<string | null>(null);
+	let reindexNotice = $state<string | null>(null);
+
+	async function handleReindex(doc: {
+		id: string;
+		use_case: string;
+		file_hash?: string;
+		file_name: string;
+		stored_path?: string;
+		collection: string;
+		chunk_count: number;
+	}) {
+		const msg =
+			`„${doc.file_name}" neu transkribieren und einlesen?\n\n` +
+			`Alle Bilder werden erneut vom Vision-Modell ausgelesen, das Dokument ` +
+			`neu zerlegt und die ${doc.chunk_count.toLocaleString('de-AT')} bestehenden ` +
+			`Chunks ersetzt.\n\n` +
+			`Das dauert bei bildreichen PDFs mehrere Minuten — bitte die Seite ` +
+			`währenddessen offen lassen.`;
+		if (!confirm(msg)) return;
+
+		reindexNotice = null;
+		reindexingId = doc.id;
+		try {
+			const result = await reindexDocument(doc);
+			if (result.error) {
+				reindexNotice = `„${doc.file_name}": ${result.detail ?? result.error}`;
+			} else if (result.images_complete === false) {
+				// Indexed anyway, but some images stayed mute — say so rather than
+				// reporting a success that quietly lost image content.
+				reindexNotice =
+					`„${doc.file_name}" neu eingelesen (${result.chunks ?? 0} Chunks), aber nur ` +
+					`${result.images_described ?? 0} von ${result.image_count ?? 0} Bildern ` +
+					`konnten beschrieben werden. Erneut ausführen ergänzt die fehlenden.`;
+			} else {
+				reindexNotice =
+					`„${doc.file_name}": ${result.chunks ?? 0} Chunks neu indexiert, ` +
+					`${result.images_described ?? 0} Bilder beschrieben.`;
+			}
+			await load();
+			await loadImageStatuses();
+		} catch (err) {
+			reindexNotice = `„${doc.file_name}": ${(err as Error).message}`;
+		} finally {
+			reindexingId = null;
 		}
 	}
 
@@ -226,6 +275,20 @@
 		{#if deleteError}
 			<div class="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">
 				{deleteError}
+			</div>
+		{/if}
+
+		{#if reindexingId}
+			<div class="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-700">
+				Dokument wird neu eingelesen. Jedes Bild wird dabei erneut vom
+				Vision-Modell ausgelesen — das dauert bei bildreichen PDFs mehrere
+				Minuten. Bitte die Seite offen lassen.
+			</div>
+		{/if}
+
+		{#if reindexNotice}
+			<div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2 text-xs text-gray-700">
+				{reindexNotice}
 			</div>
 		{/if}
 
@@ -423,6 +486,17 @@
 											title="Fehlende Bildbeschreibungen im Hintergrund erzeugen"
 										>
 											{regenerating.has(doc.file_hash) ? 'Läuft…' : 'Beschreibungen erzeugen'}
+										</button>
+									{/if}
+									{#if doc.file_hash && doc.stored_path}
+										<button
+											type="button"
+											onclick={() => handleReindex(doc)}
+											disabled={reindexingId !== null}
+											class="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 hover:border-blue-400 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+											title="Bilder erneut auslesen, Dokument neu zerlegen und die bestehenden Chunks ersetzen"
+										>
+											{reindexingId === doc.id ? 'Liest neu ein…' : 'Neu einlesen'}
 										</button>
 									{/if}
 									<span class="rounded-full px-2 py-0.5 text-[10px] font-semibold
