@@ -51,6 +51,14 @@ class GWStPoeltenPlugin(BasePlugin):
         text: str,
         raw_meta: dict,
     ) -> ChunkMetadata:
+        # Ein ausdrücklich als Einstellblatt oder Foto eingelesenes Dokument ist
+        # Rüstdaten – auch wenn es Werkzeugnummern („T12") und Maße („X 100")
+        # nennt, die die CNC-Heuristik unten für G-Code hielte.
+        if raw_meta.get("doc_kind") in ("einstellblatt", "foto"):
+            base.collection = "gw_ruest_data"
+            base.extra = {**raw_meta, "is_cnc_block": False}
+            return base
+
         is_cnc = len(CNC_PATTERN.findall(text)) >= 3
 
         extra: dict = {

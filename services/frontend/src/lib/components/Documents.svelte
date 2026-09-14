@@ -12,6 +12,7 @@
 		type ImageStatus
 	} from '$lib/api';
 	import TablePreviewModal from './TablePreviewModal.svelte';
+	import GwFolderUpload from './GwFolderUpload.svelte';
 	import ImageGalleryModal from './ImageGalleryModal.svelte';
 
 	const TABLE_EXTS = new Set(['csv', 'xlsx', 'xls']);
@@ -75,16 +76,27 @@
 
 	async function handleZipFile(files: FileList | null) {
 		if (!files || files.length === 0) return;
-		const file = files[0];
+		const list = Array.from(files);
 		zipUploading = true;
 		zipResult = null;
 		zipError = null;
-		zipName = file.name;
-		try {
-			zipResult = await uploadFolder(file, app.useCase);
-		} catch (err) {
-			zipError = err instanceof Error ? err.message : 'Upload fehlgeschlagen';
+		// Several ZIPs one after another; each product in them replaces its
+		// earlier upload, so re-selecting the same ZIPs is safe.
+		const merged: FolderUploadResult = { status: 'ok', chunks: 0, products: [], skipped_noncanonical: [] };
+		const failures: string[] = [];
+		for (const [i, file] of list.entries()) {
+			zipName = list.length > 1 ? `${file.name} (${i + 1}/${list.length})` : file.name;
+			try {
+				const result = await uploadFolder(file, app.useCase);
+				merged.chunks += result.chunks ?? 0;
+				merged.products!.push(...(result.products ?? []));
+				merged.skipped_noncanonical!.push(...(result.skipped_noncanonical ?? []));
+			} catch (err) {
+				failures.push(`${file.name}: ${err instanceof Error ? err.message : 'Upload fehlgeschlagen'}`);
+			}
 		}
+		zipResult = merged.products!.length || !failures.length ? merged : null;
+		zipError = failures.length ? failures.join(' · ') : null;
 		zipUploading = false;
 		await load();
 	}
@@ -331,7 +343,10 @@
 					{/if}
 				</div>
 
-				<!-- ZIP / Ordner-Upload -->
+				<!-- ZIP / Ordner-Upload: GW St. Pölten only. The ZIP path writes into the
+				     GW CNC collections – offered to any other use case it would put that
+				     use case's data into GW St. Pölten. -->
+				{#if app.useCase === 'gw_stpoelten'}
 				<div class="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
 					<p class="mb-2 text-sm font-medium text-gray-700">Produkt-Ordner (ZIP)</p>
 					<label
@@ -340,12 +355,13 @@
 						{#if zipUploading}
 							<span class="text-sm text-gray-500">Verarbeite {zipName} …</span>
 						{:else}
-							<span class="text-sm text-gray-500">ZIP des Produkt-Ordners wählen</span>
+							<span class="text-sm text-gray-500">ZIP-Dateien der Produkt-Ordner wählen</span>
 							<span class="mt-1 text-xs text-blue-600">CNC-Code, Stückliste, Einstellblätter</span>
 						{/if}
 						<input
 							type="file"
 							accept=".zip"
+							multiple
 							class="hidden"
 							disabled={zipUploading}
 							onchange={onZipInput}
@@ -375,6 +391,11 @@
 						</div>
 					{/if}
 				</div>
+
+					<div class="sm:col-span-2">
+						<GwFolderUpload onDone={load} />
+					</div>
+				{/if}
 			</div>
 		</section>
 

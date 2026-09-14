@@ -7,10 +7,12 @@ async parse(file_bytes, filename) -> ParsedDocument.
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import io
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any
@@ -789,12 +791,43 @@ class PDFHandler(BaseHandler):
         return count
 
 
+class ImageHandler(BaseHandler):
+    """A photo as a one-page document whose only content is the picture.
+
+    The clean route stores it, anchors it on page 1 and hands it to the
+    background vision job like any image extracted from a PDF – so a photo gets
+    the same gallery entry, description and answer-side display without a
+    parallel pipeline. The file name travels along as context: in the GW data
+    set it says what the photo shows ("4BEAR_1", "Rohteil", "Tisch_1_Fertig")
+    and, once renamed on upload, which product and machine it belongs to.
+    """
+
+    supported_extensions = [".jpg", ".jpeg", ".png"]
+
+    async def parse(self, file_bytes: bytes, filename: str) -> ParsedDocument:
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        return ParsedDocument(
+            # The page marker is where the clean route anchors the image.
+            text="<!-- Page 1 -->\n\n",
+            pages=[{"page": 1, "text": ""}],
+            images=[{
+                "page": 1,
+                "base64": base64.b64encode(file_bytes).decode("ascii"),
+                "caption": "",
+                "text_before": f"Foto „{stem}“",
+                "text_after": "",
+            }],
+            metadata={"format": "image", "total_pages": 1},
+        )
+
+
 def supported_formats() -> list[str]:
     """Return sorted list of all supported file extensions."""
     return sorted(HANDLER_REGISTRY.keys())
 
 
 _GCODE_HANDLER = GCodeHandler()
+_IMAGE_HANDLER = ImageHandler()
 
 HANDLER_REGISTRY: dict[str, BaseHandler] = {
     ".pdf": PDFHandler(),
@@ -806,4 +839,7 @@ HANDLER_REGISTRY: dict[str, BaseHandler] = {
     ".spf": _GCODE_HANDLER,
     ".nc": _GCODE_HANDLER,
     ".cnc": _GCODE_HANDLER,
+    ".jpg": _IMAGE_HANDLER,
+    ".jpeg": _IMAGE_HANDLER,
+    ".png": _IMAGE_HANDLER,
 }

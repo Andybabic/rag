@@ -10,7 +10,9 @@ from __future__ import annotations
 from core.cnc_parser import (
     build_cnc_chunks,
     classify_operation,
+    classify_tool,
     decode_cnc_bytes,
+    extract_tool_type,
     is_template_file,
     looks_like_cnc,
     normalize_umlauts,
@@ -242,3 +244,225 @@ def test_build_cnc_chunks_without_material():
     assert len(chunks) == len(prog.operations)
     assert all(c.metadata.extra["material_class"] is None for c in chunks)
     assert all(c.metadata.extra["product_id"] == "11221.7238" for c in chunks)
+
+
+# ── Maschinen-Varianten ───────────────────────────────────────────────────────
+# Nachgebaut nach den echten Programmen der jeweiligen Maschine (keine
+# Kundendaten). Jede schreibt den Werkzeugwechsel anders; vor dieser
+# Erweiterung lieferten alle vier 0 Operationen.
+
+# Matec 1: Beschreibung am T-Wort, Wechsel per Unterprogramm L6, danach ein
+# nacktes T als Vorwahl des nächsten Werkzeugs.
+MATEC1_MPF = r"""%_N_112215805_1BEAR_MPF
+;VERTEILERBLOCK
+;1. BEARBEITUNG
+;Z-NR.:9001-003999-A
+;GRUBER
+
+STARTPOS
+T12;DM=63/45GRAD MESSERKOPF
+L6
+T8
+G0 G54 X10 Y20 S2500 F1800 M3
+;PLAN VORSCHRUPPEN
+T8;DM=7 VHMI-BOHRER 12XD
+L6(1)
+T9
+;DM=7 TIEFLOCHBOHREN + NUT VORBOHREN
+;NCG#CYC82#\CST.DIR\bohren.com#NC2#2#*NCG;*RO*;*HD*
+G0 X5 Y5 S9000 F900 M3
+MCALL CYCLE83(3,0,3,-40)
+M30
+"""
+
+# Matec 2: Beschreibung in der Zeile VOR dem Wechsel, Wechsel mit Index.
+MATEC2_MPF = """;11221.5990
+;PPS7429/190/W/FB
+;Z-NR.: B7429-A
+;05.06.2024
+
+N100 (DM=2.5 VHM-STUFENBOHRER)
+T78 M6
+T79
+G0 G54 X-52.8 Y-9.8 S16000 F1200 M42 M3 M8
+G83[-10.900,3.000,15.000,1.000,0.000,3.000]
+MCALL CYCLE83(3,0,3,-10.9,,-3,,2,0,,1,0,3,2,2,0.1,)
+G80
+N200 (DM=3.3 VHMI-BOHRER)
+T79 M6[1]
+T80
+G0 G55 X81.2 Y26.1 S13000 F1000 M42 M3 M8
+M30
+"""
+
+# Chiron 233: nackter Wechsel, Beschreibung als Bedienermeldung DANACH;
+# die Operationen stehen im eingebetteten Unterprogramm.
+CHIRON233_MPF = """%_N_112213680_MPF
+;KUEHLKOERPER ACP P3 KK 1-ACHS
+;11221.3680
+;Z-NR.: C0039871-01
+;GRUBER
+L3680
+M30
+%_N_L3680_SPF
+T5 M6
+MSG("DM=80/90 GRAD MESSERKOPF SANDVIK 6 SCHNEIDEN SCHRUPPEN")
+G0 G55 X-45 Y46 S9500 F8000 M3 M8
+;PLAN VORSCHRUPPEN
+G0 G53 D0 Z0 M95
+T8 M6
+MSG("DM=3 VHMI-BOHRER DETAIL A VORBOHREN")
+G0 G54 X182.5 Y51 S12000 F1500 M3 M7
+G4 F0.5
+MCALL CYCLE81(3,,3,-7.2,7.2)
+T0 M6
+G0 X0 Y0 S100 F99
+"""
+
+# Chiron 239 (ISO/Fanuc): keine Leerzeichen, Klammerkommentare, derselbe
+# Block je Spannstelle wiederholt.
+ISO_PROGRAM = "\n".join([
+    "% ",                                   # echte Dateien: Leerzeichen nach %
+    ":4442(KLEMMLASCHE PGE94110)",
+    "N01(11221.4442)",
+    "N02(Z-NR.O B32159-A) ",
+    "N03(GRUBER)",
+    "N10G0G53G90G80G49X0Y0Z0M95 ",
+    "N20T1M6(D.8.5/15.5/18/45 VHM-STUFENBOHRER) ",
+    "N25G0G54X0Y0S8000M3",
+    "N35G73Z-11.05R5Q1F1000 ",
+    "N75G0G80Z50M95 ",
+    "N76T0M6",
+    "N100T1M6(D.8.5/15.5/18/45 VHM-STUFENBOHRER)",
+    "N105G0G55X0Y0S8000M3 ",
+    "N115G73Z-11.05R5Q1F1000",
+    "N156T0M6 ",
+    "N160T3M6(DM.3.7 VHM-BOHRER)",
+    "N165G0G54.1P01X-6.3Y15.8A0S3800M3",
+    "N170G81Z-5R2F400",
+    "N175M99",
+    "%",
+    "",
+])
+
+
+def test_matec1_description_on_tool_word_and_preselect_ignored():
+    prog = parse_cnc(MATEC1_MPF)
+    assert prog.dialect == "simple"
+    # Die nackten Vorwahlen T8/T9 sind keine Operationen.
+    assert [op.tool_id for op in prog.operations] == ["T12", "T8"]
+
+    face, drill = prog.operations
+    assert face.tool_type == "MESSERKOPF"
+    assert face.tool_class == "Fräser"
+    assert face.diameter == 63.0
+    assert (face.spindle_speed, face.feed) == (2500, 1800)
+    assert face.operation_type == "Planfräsen"      # aus der Notiz „PLAN VORSCHRUPPEN"
+
+    assert drill.tool_type == "VHMI-BOHRER"
+    assert drill.diameter == 7.0
+    assert drill.cycle == "CYCLE83"
+    assert drill.operation_type == "Tieflochbohren"
+    assert (drill.spindle_speed, drill.feed) == (9000, 900)
+    # CAM-Steuerkommentare landen nicht in der Beschreibung
+    assert "#" not in drill.operation_label
+
+
+def test_matec1_header():
+    prog = parse_cnc(MATEC1_MPF)
+    assert prog.part_name == "VERTEILERBLOCK"
+    assert prog.bearbeitung == "1.BEARBEITUNG"
+    assert prog.drawing_no == "9001-003999-A"
+
+
+def test_matec2_description_in_line_before_change():
+    prog = parse_cnc(MATEC2_MPF)
+    assert [op.tool_id for op in prog.operations] == ["T78", "T79"]
+    step, drill = prog.operations
+    assert step.tool_type == "VHM-STUFENBOHRER"
+    assert step.diameter == 2.5
+    assert step.cycle == "G83"
+    assert step.operation_type == "Tieflochbohren"
+    assert (step.spindle_speed, step.feed) == (16000, 1200)
+    assert drill.tool_type == "VHMI-BOHRER"
+    assert drill.diameter == 3.3
+    assert prog.product_id == "11221.5990"
+    assert prog.drawing_no == "B7429-A"
+
+
+def test_chiron233_description_from_message_after_change():
+    prog = parse_cnc(CHIRON233_MPF)
+    assert [op.tool_id for op in prog.operations] == ["T5", "T8"]
+    face, drill = prog.operations
+    assert face.tool_type == "MESSERKOPF"
+    assert face.diameter == 80.0
+    assert face.strategy == "Schruppen"
+    assert face.operation_type == "Planfräsen"
+    # Die Beschreibung aus MSG und die Notiz danach stehen beide im Label.
+    assert "PLAN VORSCHRUPPEN" in face.operation_label
+    assert drill.tool_type == "VHMI-BOHRER"
+    assert drill.cycle == "CYCLE81"
+    assert drill.operation_type == "Bohren"
+    # G4 F0.5 ist Verweilzeit, kein Vorschub; nach T0 zählt nichts mehr.
+    assert (drill.spindle_speed, drill.feed) == (12000, 1500)
+    assert prog.part_name == "KUEHLKOERPER ACP P3 KK 1-ACHS"
+
+
+def test_iso_program_is_recognised_and_parsed():
+    assert looks_like_cnc(ISO_PROGRAM)
+    prog = parse_cnc(ISO_PROGRAM)
+    assert prog.dialect == "iso"
+    assert prog.program_name == "4442"
+    assert prog.product_id == "11221.4442"
+    assert prog.drawing_no == "B32159-A"
+    assert prog.part_name == "KLEMMLASCHE PGE94110"
+
+    # Der je Spannstelle wiederholte T1-Block zählt einmal.
+    assert [op.tool_id for op in prog.operations] == ["T1", "T3"]
+    step, drill = prog.operations
+    assert step.tool_type == "VHM-STUFENBOHRER"
+    assert step.diameter == 8.5                     # „D.8.5/15.5/…": erstes Maß
+    assert step.cycle == "G73"
+    assert step.operation_type == "Tieflochbohren"
+    assert (step.spindle_speed, step.feed) == (8000, 1000)
+    assert drill.diameter == 3.7                    # „DM.3.7"
+    assert (drill.spindle_speed, drill.feed) == (3800, 400)
+    assert drill.operation_type == "Bohren"
+
+
+def test_preselect_with_comment_is_not_a_tool_change():
+    prog = parse_cnc(
+        "%_N_1_MPF\nT1 M16 ;DM=9 VHMI-BOHRER\nG0 S9000 F900\n"
+        "T3 ; NAECHSTES WERKZEUG\nG1 X10\nM30\n"
+    )
+    assert [op.tool_id for op in prog.operations] == ["T1"]
+
+
+def test_tool_spelling_is_unified():
+    # Hypermill schreibt „VHMI BOHRER", handgeschriebene Programme
+    # „VHMI-BOHRER" – dasselbe Werkzeug, eine Bezeichnung.
+    assert extract_tool_type("GUE VHMI BOHRER D4.9") == "VHMI-BOHRER"
+    assert extract_tool_type("DM=9 VHMI-BOHRER") == "VHMI-BOHRER"
+    assert extract_tool_type("VHM FF 90 4Z D12") == "VHM FF"
+    assert extract_tool_type(normalize_umlauts("Schaftfrdser")) == "SCHAFTFRAESER"
+
+
+def test_new_tool_classes():
+    assert classify_tool("HSS-GEWINDEFORMER") == "Gewindewerkzeug"
+    assert classify_tool("VHM-ZENTRIERER") == "Anbohrer"
+    assert classify_tool("MESSERKOPF") == "Fräser"
+    assert classify_tool("VHM-STUFENBOHRER") == "Bohrer"
+
+
+def test_iso_tokens_count_without_word_boundaries():
+    packed = "N10G0G53G90G80G49X0Y0Z0M95\nN15M31\nN20T1M6\nN25G0G54X0Y0S8000M3\n"
+    assert looks_like_cnc(packed)
+
+
+def test_chunk_text_names_the_machine():
+    # 11221.6102 läuft auf Matec 1 und Chiron 233-2 – der Text muss sie trennen.
+    prog = parse_cnc(SIMPLE_MPF)
+    [first, *_] = build_cnc_chunks(prog, file_name="x", extra={"machine": "Matec 1"})
+    assert "Maschine: Matec 1." in first.text
+    [no_machine, *_] = build_cnc_chunks(prog, file_name="x")
+    assert "Maschine" not in no_machine.text

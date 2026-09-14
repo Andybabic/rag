@@ -269,3 +269,120 @@ async def test_use_cases_endpoint(client):
     assert "default_collection" in body["neumann"]
     assert "collections" in body["neumann"]
     assert "agent_actions" in body["neumann"]
+
+
+# ── GW: Upload-Plan und Produkt-Upload ────────────────────────────────────────
+def _b64_file(path: str, data: bytes) -> dict:
+    import base64
+
+    return {"path": path, "content_b64": base64.b64encode(data).decode()}
+
+
+@pytest.mark.anyio
+async def test_structure_plan_endpoint(client):
+    resp = await client.post("/v1/structure/plan", json={"paths": [
+        "GW/FrÑsen gro·/Chiron 243/11221.7199/112217199_1BEAR",
+        "GW/FrÑsen gro·/Chiron 243/11221.7199/Einstellblatt 1.pdf",
+    ]})
+    assert resp.status_code == 200
+    [product] = resp.json()["products"]
+    assert product["machine"] == "Chiron 243"
+    assert product["category"] == "Fräsen groß"
+
+
+@pytest.mark.anyio
+async def test_structure_product_tags_location_and_role(client):
+    cnc = b"%_N_112216102_2BEAR_MPF\r\n;11221.6102\r\nT1 M16 ;DM=9 VHMI-BOHRER\r\nG0 S9000 F900\r\n"
+    fixture = cnc.replace(b"2BEAR", b"VORR").replace(b"DM=9", b"DM=12")
+    base = "GW/FrÑsen mittel/Chiron 233-2/11221.6102"
+    resp = await client.post("/v1/structure/product", json={"files": [
+        _b64_file(f"{base}/112216102_2BEAR", cnc),
+        _b64_file(f"{base}/Vorrichtung_6102/112216102_VORR", fixture),
+    ]})
+    assert resp.status_code == 200
+    body = resp.json()
+    [product] = body["products"]
+    assert (product["machine"], product["category"]) == ("Chiron 233-2", "Fräsen mittel")
+    assert product["operations"] == 2
+    assert product["warnings"] == []
+
+    extras = [c["metadata"]["extra"] for c in body["chunks"]]
+    assert {e["source_path"]: e["program_role"] for e in extras} == {
+        "11221.6102/112216102_2BEAR": "produktion",
+        "11221.6102/Vorrichtung_6102/112216102_VORR": "vorrichtung",
+    }
+    assert all(e["machine"] == "Chiron 233-2" for e in extras)
+    assert all(e["product_id"] == "11221.6102" for e in extras)
+
+
+@pytest.mark.anyio
+async def test_structure_product_warns_about_unparsed_program(client):
+    # Ein Programm ohne erkennbaren Werkzeugwechsel: sichtbar melden.
+    odd = b"%_N_112219999_MPF\r\n;11221.9999\r\nG0 G90 G54 X0 Y0 M3 M8 G1 G2 G3 G17\r\n"
+    resp = await client.post("/v1/structure/product", json={"files": [
+        _b64_file("GW/K/Matec 1/11221.9999/112219999", odd),
+    ]})
+    [product] = resp.json()["products"]
+    assert product["operations"] == 0
+    assert product["warnings"] == ["Keine Operation erkannt: 11221.9999/112219999"]
+
+
+@pytest.mark.anyio
+async def test_structure_product_rejects_bad_base64(client):
+    resp = await client.post("/v1/structure/product", json={"files": [
+        {"path": "GW/K/M/11221.1111/1", "content_b64": "!!! kein base64 !!!"},
+    ]})
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "bad_encoding"
+
+
+@pytest.mark.anyio
+async def test_structure_product_takes_machine_override(client):
+    # Ein Produktordner ohne Maschinenordner darüber: die Maschine kommt aus
+    # dem Bestand (vom Frontend ermittelt) und muss in Metadaten UND Text landen.
+    cnc = b"%_N_112217199_1BEAR_MPF\r\n;11221.7199\r\nT1 M16 ;DM=9 VHMI-BOHRER\r\nG0 S9000 F900\r\n"
+    resp = await client.post("/v1/structure/product", json={
+        "files": [_b64_file("11221.7199/112217199_1BEAR", cnc)],
+        "machine": "Chiron 243",
+        "category": "Fräsen groß",
+    })
+    [product] = resp.json()["products"]
+    assert (product["machine"], product["category"]) == ("Chiron 243", "Fräsen groß")
+    [chunk] = resp.json()["chunks"]
+    assert chunk["metadata"]["extra"]["machine"] == "Chiron 243"
+    assert "Maschine: Chiron 243." in chunk["text"]
+
+
+# ── Use Cases aus dem Dashboard ───────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_structure_accepts_dashboard_use_case(client):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    uc = SimpleNamespace(id="kunde_x", default_collection="kunde_x_handbuecher")
+    with patch("plugins.get_use_case", new=AsyncMock(return_value=uc)):
+        resp = await client.post("/v1/structure", json={
+            "markdown": "# Wartung\\n\\nDie Pumpe wird monatlich geprüft und bei Bedarf gereinigt.",
+            "metadata": {"file_name": "handbuch.pdf", "doc_type": "pdf"},
+            "use_case": "kunde_x",
+        })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["use_case"] == "kunde_x"
+    # Chunks gehen in die Default-Collection des Use Case – nur dort sucht der Agent.
+    assert body["routing"]["collection"] == "kunde_x_handbuecher"
+
+
+@pytest.mark.anyio
+async def test_structure_rejects_use_case_unknown_everywhere(client):
+    from unittest.mock import AsyncMock, patch
+
+    with patch("plugins.get_use_case", new=AsyncMock(return_value=None)):
+        resp = await client.post("/v1/structure", json={
+            "markdown": "x", "metadata": {}, "use_case": "tippfehler",
+        })
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "unknown_use_case"
+    assert "dashboard" in resp.json()["detail"]

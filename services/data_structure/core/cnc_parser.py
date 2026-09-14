@@ -6,13 +6,26 @@ für ``gw_cnc_steps`` und beantwortet die Kernfrage des Use Cases:
 „Mit welchem Werkzeug (+ Parametern) wurde Operation X auf Material Y
 historisch gefertigt?"
 
-Zwei Dialekte kommen in der Praxis vor (beide werden unterstützt):
+Drei Dialekte kommen in der Praxis vor (alle werden unterstützt):
 
-* **simple** – handgeschrieben, ein Werkzeugaufruf je Block::
+* **simple** – handgeschriebene Sinumerik-Programme. Jede Maschine schreibt
+  den Werkzeugwechsel etwas anders; die Beschreibung steht mal in derselben
+  Zeile, mal davor, mal danach::
 
-      T1 M16 ;DM=9 VHMI-BOHRER
-      G0 G54 X1155 Y28 S10900 F3000 M3 M7 M8
-      MCALL CYCLE82(5,0,5,-9.5,,0.1)
+      T1 M16 ;DM=9 VHMI-BOHRER                  (Chiron 243/233)
+      T12;DM=63/45GRAD MESSERKOPF               (Matec 1 – Wechsel via L6)
+      N100 (DM=2.5 VHM-STUFENBOHRER)            (Matec 2 – Beschreibung davor)
+      T78 M6
+      T5 M6                                     (Chiron 233 – Beschreibung danach)
+      MSG("DM=80/90 GRAD MESSERKOPF")
+
+* **iso** – ISO/Fanuc-Programme (Chiron 239) ohne Leerzeichen zwischen den
+  Wörtern und mit Klammerkommentaren::
+
+      %
+      :4442(KLEMMLASCHE PGE94110)
+      N20T1M6(D.8.5/15.5/18/45 VHM-STUFENBOHRER)
+      N35G73Z-11.05R5Q1F1000
 
 * **structured** – CAM/Hypermill-Export mit Werkzeugliste + Operations-Index::
 
@@ -67,6 +80,7 @@ def decode_cnc_bytes(raw: bytes) -> str:
 _UMLAUT_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"C\$"), "ä"),                # FrC$sen→Fräsen (charset-Roundtrip-Artefakt)
     (re.compile(r"rdsen", re.I), "räsen"),    # Frdsen→Fräsen, Fasenfrdsen→Fasenfräsen
+    (re.compile(r"frdser", re.I), "fräser"),  # Schaftfrdser→Schaftfräser (Hypermill-Werkzeugliste)
     (re.compile(r"ldngen", re.I), "längen"),  # Abldngen→Ablängen
 )
 
@@ -78,6 +92,11 @@ def normalize_umlauts(text: str) -> str:
     return text
 
 
+# ISO/Fanuc-Kopf: "%" allein in der ersten Zeile, dann die Programmnummer
+# (":4442(…)" oder "O4442").
+_ISO_HEADER_RE = re.compile(r"\A\s*%\s*\n\s*[:O]\d+")
+
+
 def looks_like_cnc(text: str) -> bool:
     """Content-Sniffing: ist dieser Text ein CNC-Programm?
 
@@ -87,7 +106,12 @@ def looks_like_cnc(text: str) -> bool:
     head = text[:2000]
     if re.search(r"%_N_.*_MPF", head):
         return True
-    tokens = len(re.findall(r"\b[GMT]\d+\b|CYCLE\d+|MCALL", head))
+    if _ISO_HEADER_RE.match(head.replace("\r", "")):
+        return True
+    # Lookbehind statt \b: ISO-Programme schreiben die Wörter ohne Leerzeichen
+    # ("N10G0G53G90"). Zwischen zwei Befehlen gibt es dort keine Wortgrenze,
+    # mit \b zählte ein Chiron-239-Programm deshalb kaum Tokens.
+    tokens = len(re.findall(r"(?<![A-Z])[GMT]\d+(?!\d)|CYCLE\d+|MCALL", head))
     return tokens >= 8
 
 
@@ -103,14 +127,23 @@ _OP_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"kreistasche", re.I), "Kreistaschenfräsen"),
     (re.compile(r"taschen?\s*fr[äa]e?sen", re.I), "Taschenfräsen"),
     (re.compile(r"nut\s*fr[äa]e?sen", re.I), "Nutfräsen"),
+    # Gewinde-Regeln verlangen das Verb direkt hinter „Gewinde": „G1/2 ZOLL
+    # GEWINDE … VORBOHREN" ist ein Bohrschritt, kein Gewindeschritt.
+    (re.compile(r"gewinde\s*-?\s*form", re.I), "Gewindeformen"),
+    (re.compile(r"gewinde\s*-?\s*fr[äa]e?s", re.I), "Gewindefräsen"),
+    (re.compile(r"gewinde\s*-?\s*bohr", re.I), "Gewindebohren"),
     (re.compile(r"fasen", re.I), "Fasenfräsen"),
     (re.compile(r"zentrier", re.I), "Zentrieren"),
     (re.compile(r"abl[äa]ngen", re.I), "Ablängen"),
     (re.compile(r"ansenk", re.I), "Ansenken"),
     (re.compile(r"anbohr", re.I), "Anbohren"),
     (re.compile(r"tiefloch", re.I), "Tieflochbohren"),
+    (re.compile(r"\bplan|messerkopf", re.I), "Planfräsen"),
+    (re.compile(r"b[üu]e?rste|entgrat", re.I), "Entgraten"),
+    (re.compile(r"stichel|gravier", re.I), "Gravieren"),
     (re.compile(r"bohren", re.I), "Bohren"),
-    (re.compile(r"fr[äa]e?sen|fr[äa]ser", re.I), "Fräsen"),
+    # „FRAESER" (ASCII-Schreibweise der Maschinen) fiel früher durch.
+    (re.compile(r"fr[äa]e?sen|fr[äa]e?ser", re.I), "Fräsen"),
 )
 
 # Zyklus → Operationsfamilie (Fallback, wenn kein Klartext vorhanden).
@@ -120,6 +153,12 @@ _CYCLE_OP: dict[str, str] = {
     "CYCLE83": "Tieflochbohren",
     "CYCLE84": "Gewindebohren",
     "CYCLE840": "Gewindebohren",
+    # ISO-Festzyklen (Chiron 239, Matec 2 schreibt zusätzlich G83[…]).
+    "G81": "Bohren",
+    "G82": "Bohren",
+    "G73": "Tieflochbohren",
+    "G83": "Tieflochbohren",
+    "G84": "Gewindebohren",
 }
 
 # Bearbeitungsstrategie (orthogonal zum Operationstyp).
@@ -155,12 +194,23 @@ def detect_strategy(text: str) -> str | None:
 
 # ── Werkzeugtyp/-klasse + Durchmesser ─────────────────────────────────────────
 _TOOL_TYPE_PATTERNS: tuple[str, ...] = (
-    r"VHMI?-?\s*BOHRER", r"VHM-?\s*NC-?\s*ANBOHRER", r"VHM-?\s*SONDERFR[ÄA]E?SER",
-    r"VHM-?\s*FR[ÄA]E?SER", r"VHM\s*FF", r"HB\s*SF", r"MAYKESTAG",
+    r"VHMI?-?\s*STUFENBOHRER", r"VHMI?-?\s*BOHRER", r"VHM-?\s*NC-?\s*ANBOHRER",
+    r"VHM-?\s*ZENTRIERER", r"VHM-?\s*SONDERFR[ÄA]E?SER",
+    r"(?:VHM|WPL)-?\s*GEWINDEFR[ÄA]E?SER", r"VHM-?\s*FR[ÄA]E?SER",
+    r"WPL-?\s*BOHRER", r"HSS-?\s*GEWINDE(?:FORMER|BOHRER)", r"MESSERKOPF",
+    r"VHM\s*FF", r"HB\s*SF", r"MAYKESTAG",
 )
 _TOOL_TYPE_RE = re.compile("|".join(_TOOL_TYPE_PATTERNS), re.I)
+# Letzter Anker, wenn keine bekannte Bezeichnung passt: das Werkzeug-Hauptwort.
+_TOOL_NOUN_RE = re.compile(
+    r"[\w-]*(?:BOHRER|FR[ÄA]E?SER|SENKER|REIBAHLE|FORMER|ZENTRIERER|MESSERKOPF"
+    r"|BUERSTE|BÜRSTE|STICHEL)\b|\bH?M-NC\b",
+    re.I,
+)
 
-_DIA_RE = re.compile(r"D[M]?\s*=?\s*(\d+[.,]?\d*)", re.I)   # DM=9 / D4.9
+# DM=9 / D4.9 / DM.3.7 (ISO) / D.8.5/15.5 (Stufenbohrer, erstes Maß zählt).
+# Der Lookbehind verhindert Treffer mitten im Wort („GRAD 5", „RUND 5").
+_DIA_RE = re.compile(r"(?<![A-Z])DM?\s*[=.]?\s*(\d+(?:[.,]\d+)?)", re.I)
 _OEDIA_RE = re.compile(r"[ØX]\s*(\d+[.,]?\d*)")             # Ø4,9 / X10
 
 
@@ -174,10 +224,16 @@ def _to_float(s: str | None) -> float | None:
 
 
 def extract_tool_type(text: str) -> str | None:
-    m = _TOOL_TYPE_RE.search(text)
+    m = _TOOL_TYPE_RE.search(text) or _TOOL_NOUN_RE.search(text)
     if not m:
         return None
-    return re.sub(r"\s+", " ", m.group(0).strip()).upper()
+    tool = re.sub(r"\s+", " ", m.group(0).strip()).upper()
+    # Eine Schreibweise je Werkzeug, sonst zerfällt die „in N Bauteilen"-
+    # Zählung: „VHMI BOHRER" (Hypermill) und „VHMI-BOHRER" (handgeschrieben)
+    # sind dasselbe. Kurze Kürzel wie „VHM FF" / „HB SF" bleiben unberührt.
+    tool = re.sub(r"\b(VHMI?|WPL|HSS)[\s-]+(?=NC|[A-ZÄÖÜ]{4,})", r"\1-", tool)
+    tool = re.sub(r"\bNC[\s-]+", "NC-", tool)
+    return tool.replace("Ä", "AE")
 
 
 def classify_tool(tool_type: str | None) -> str:
@@ -185,12 +241,20 @@ def classify_tool(tool_type: str | None) -> str:
     if not tool_type:
         return "unbekannt"
     t = tool_type.upper()
-    if "ANBOHRER" in t:
+    if "GEWINDE" in t:
+        return "Gewindewerkzeug"
+    if "ANBOHRER" in t or "ZENTRIER" in t or re.fullmatch(r"H?M-NC", t):
         return "Anbohrer"
     if "BOHRER" in t:
         return "Bohrer"
     if "SONDER" in t or "MAYKESTAG" in t:
         return "Sonderwerkzeug"
+    if "MESSERKOPF" in t:
+        return "Fräser"
+    if "SENKER" in t:
+        return "Senker"
+    if "REIBAHLE" in t:
+        return "Reibahle"
     if "FR" in t and ("SER" in t or "FF" in t) or "SF" in t:
         return "Fräser"
     return "unbekannt"
@@ -221,67 +285,272 @@ class CNCProgram:
     part_name: str | None = None
     drawing_no: str | None = None
     program_name: str | None = None
-    dialect: str = "?"                  # "simple" | "structured"
+    dialect: str = "?"                  # "simple" | "iso" | "structured"
     tool_catalog: dict = field(default_factory=dict)
     operations: list[Operation] = field(default_factory=list)
 
 
-# ── Header (beide Dialekte) ───────────────────────────────────────────────────
+# ── Header (alle Dialekte) ────────────────────────────────────────────────────
 _PROG_RE = re.compile(r"%_N_(\S+?)_MPF")
-_PROD_RE = re.compile(r";\s*(\d{5}\.\d{3,4})\b")
-_ZNR_RE = re.compile(r";\s*Z-NR\.?:\s*(\S+)", re.I)
-_BEAR_RE = re.compile(r";\s*(\d+\.\s*BEARBEITUNG)", re.I)
+# ISO-Programmnummer, optional mit Klammertext: ":4442(KLEMMLASCHE PGE94110)"
+_ISO_PROG_RE = re.compile(r"^[:O](\d+)\s*(?:\((.*)\))?")
+_PROD_RE = re.compile(r"(?<![\d.])(\d{5}\.\d{3,4})(?!\d)")
+# „Z-NR.: 6AAE…", „Z-NR.O B32159-A" (Ø verstümmelt), „ZNR:Z11221…",
+# „ZEICHNR. 211043" – nur am Anfang eines Kommentars ausgewertet.
+_ZNR_START_RE = re.compile(r"^Z(?:EICH)?-?\s*NR", re.I)
+_ZNR_RE = re.compile(r"Z(?:EICH)?-?\s*NR\.?\s*[:.O]?\s*([A-Z0-9][\w./-]*)", re.I)
+_BEAR_RE = re.compile(r"(\d+)\.\s*BEARBEITUNG", re.I)
+_DATE_RE = re.compile(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$")
+_ISO_COMMENT_RE = re.compile(r"^(?:N\d+\s*)?\((.*)\)\s*$")
+
+
+def _header_comments(lines: list[str]) -> list[str]:
+    """Kommentartexte der Kopfzeilen, dialektunabhängig.
+
+    Sinumerik kommentiert mit ``;``, ISO mit Klammern (``N01(11221.4442)``);
+    der ISO-Programmkopf ``:4225(PROFIL 5967/11221.4225/ZEICHNR. 211043/)``
+    bündelt mehrere Angaben, durch ``/`` getrennt.
+    """
+    out: list[str] = []
+    for ln in lines[:16]:
+        s = ln.strip()
+        if m := _ISO_PROG_RE.match(s):
+            out.extend(p.strip() for p in (m.group(2) or "").split("/") if p.strip())
+        elif s.startswith(";"):
+            out.append(s.lstrip("; ").strip())
+        elif m := _ISO_COMMENT_RE.match(s):
+            out.append(m.group(1).strip())
+    return out
+
+
+def _is_part_name(text: str) -> bool:
+    if len(re.findall(r"[A-ZÄÖÜ]", text, re.I)) < 3 or len(text) > 80:
+        return False
+    upper = text.upper()
+    return not (
+        upper.startswith("$PATH") or _DATE_RE.match(text) or "NULLPUNKT" in upper
+        or set(text) <= set("=*#-_ ")
+    )
 
 
 def _parse_header(lines: list[str], prog: CNCProgram) -> None:
     if lines and (m := _PROG_RE.search(lines[0])):
         prog.program_name = m.group(1)
-    for ln in lines[:14]:
-        s = ln.strip()
-        if not prog.product_id and (m := _PROD_RE.match(s)):
+    elif m := next((m for ln in lines[:3] if (m := _ISO_PROG_RE.match(ln.strip()))), None):
+        prog.program_name = m.group(1)
+
+    # Die Bauteilbezeichnung steht vor der Zeichnungsnummer; danach folgen
+    # Programmierer und Datum („GRUBER", „15.06.2023"). Deshalb gilt ein
+    # Kandidat nach der Z-NR nur, wenn davor keiner zu finden war.
+    before_znr: str | None = None
+    after_znr: str | None = None
+    seen_znr = False
+    for c in _header_comments(lines):
+        if not prog.product_id and (m := _PROD_RE.search(c)):
             prog.product_id = m.group(1)
-        elif not prog.drawing_no and (m := _ZNR_RE.match(s)):
-            prog.drawing_no = m.group(1)
-        elif not prog.bearbeitung and (m := _BEAR_RE.match(s)):
-            prog.bearbeitung = m.group(1).strip()
-        elif not prog.part_name and s.startswith(";") and "PROFILE" in s.upper():
-            prog.part_name = s.lstrip("; ").strip()
+            c = _PROD_RE.sub("", c).strip(" /,")
+            if not c:
+                continue
+        if _ZNR_START_RE.match(c):
+            seen_znr = True
+            if not prog.drawing_no and (m := _ZNR_RE.match(c)):
+                prog.drawing_no = m.group(1)
+            continue
+        if not prog.bearbeitung and (m := _BEAR_RE.search(c)):
+            prog.bearbeitung = f"{int(m.group(1))}.BEARBEITUNG"
+            continue
+        if not _is_part_name(c):
+            continue
+        if not seen_znr:
+            before_znr = before_znr or c
+        elif after_znr is None and len(re.sub(r"\W", "", c)) >= 8:
+            after_znr = c
+    prog.part_name = before_znr or after_znr
 
 
-# ── Dialekt: simple ───────────────────────────────────────────────────────────
-_TOOLCALL_SIMPLE = re.compile(r"^T(\d+)\s+M\d+\s*;(.*)$")
-_SF_RE = re.compile(r"\bS(\d+)\b.*?\bF(\d+)\b")
-_CYCLE_RE = re.compile(r"(CYCLE\d+)")
+# ── Dialekt: simple / iso ─────────────────────────────────────────────────────
+# Ein Werkzeugwechsel ist T<n> zusammen mit M6/M06/M16 – mit oder ohne
+# Leerzeichen („N20T3M6"), mit Satznummer und Kommentar (;… oder (…)).
+_TOOLCHANGE_RE = re.compile(r"^(?:N\d+\s*)?T(\d+)\s*(?:M0?6|M16)(?!\d)(?:\[\d+\])?(.*)$")
+# T<n> mit Beschreibung, der Wechsel selbst folgt (M16-Zeile, Matec-L6).
+_TOOL_DESC_RE = re.compile(r"^(?:N\d+\s*)?T(\d+)\s*(;.+|\(.+\))\s*$")
+# Nacktes T<n>: nur eine Vorwahl – außer die nächste Zeile wechselt.
+_BARE_TOOL_RE = re.compile(r"^(?:N\d+\s*)?T(\d+)\s*$")
+_CHANGE_ONLY_RE = re.compile(r"^(?:N\d+\s*)?(?:M0?6|M16)(?!\d)")
+_PAREN_NOTE_RE = re.compile(r"^(?:N\d+\s*)?\((.*[A-ZÄÖÜ].*)\)\s*$", re.I)
+_MSG_RE = re.compile(r'^MSG\s*\(\s*"(.*?)"')
+_SEPARATOR_RE = re.compile(r"^[=*#\-_\s]{3,}$")
+_PRESELECT_NOTE_RE = re.compile(r"N(?:AE|Ä)CHSTES\s+WERKZEUG", re.I)
+# CAM-Steuerkommentare („NCG#CYC82#\\CST.DIR\\bohren.com#…") sind keine
+# Beschreibung für Menschen.
+_CAM_META_RE = re.compile(r"#|\\|\*[A-Z]{2}\*")
+
+# Parameter stehen in ISO-Programmen ohne Wortgrenze („Y0S8000M3") – daher
+# Lookbehind auf Buchstaben statt \b. Drehzahl ≥3-stellig, Vorschub ≥2.
+_S_RE = re.compile(r"(?<![A-Z_])S(\d{3,})(?!\d)")
+_F_RE = re.compile(r"(?<![A-Z_])F(\d{2,})(?:\.\d+)?(?!\d)")
+_DWELL_RE = re.compile(r"(?<![A-Z\d])G0?4(?!\d)")   # G4 F0.5 ist Verweilzeit
+_CYCLE_RE = re.compile(r"(CYCLE\d+)|(?<![A-Z])G(73|8[1-4])(?!\d)")
+_NOTE_WINDOW = 6   # Beschreibungskommentar nur direkt am Werkzeugwechsel
+
+
+def _inline_desc(rest: str) -> str:
+    rest = rest.strip()
+    if m := re.search(r";\s*(.*)$", rest):
+        return m.group(1).strip()
+    if m := re.search(r"\((.*)\)", rest):
+        return m.group(1).strip()
+    return ""
+
+
+def _nonempty(lines: list[str], start: int, step: int, limit: int) -> list[str]:
+    out: list[str] = []
+    i = start
+    while 0 <= i < len(lines) and len(out) < limit:
+        if lines[i]:
+            out.append(lines[i])
+        i += step
+    return out
+
+
+def _neighbour_desc(lines: list[str], i: int) -> str:
+    """Beschreibung eines Wechsels, der selbst keine trägt.
+
+    Matec 2 schreibt sie davor („N100 (DM=2.5 VHM-STUFENBOHRER)"),
+    Chiron 233 danach („MSG("DM=80/90 GRAD MESSERKOPF")").
+    """
+    for prev in _nonempty(lines, i - 1, -1, 2):
+        if m := _PAREN_NOTE_RE.match(prev):
+            return m.group(1).strip()
+    for nxt in _nonempty(lines, i + 1, 1, 3):
+        if m := _MSG_RE.match(nxt):
+            return m.group(1).strip()
+    return ""
+
+
+def _next_is_change(lines: list[str], i: int) -> bool:
+    for nxt in _nonempty(lines, i + 1, 1, 2):
+        if _CHANGE_ONLY_RE.match(nxt):
+            return True
+        if nxt.lstrip("N0123456789 ").startswith("T"):
+            return False
+    return False
+
+
+def _tool_change_at(lines: list[str], i: int) -> tuple[str | None, str]:
+    """(Werkzeugnummer, Beschreibung), wenn Zeile ``i`` ein Werkzeug einwechselt."""
+    s = lines[i]
+    if m := _TOOLCHANGE_RE.match(s):
+        return m.group(1), _inline_desc(m.group(2)) or _neighbour_desc(lines, i)
+    if (m := _TOOL_DESC_RE.match(s)) and not _PRESELECT_NOTE_RE.search(m.group(2)):
+        return m.group(1), _inline_desc(m.group(2))
+    if (m := _BARE_TOOL_RE.match(s)) and _next_is_change(lines, i):
+        return m.group(1), _neighbour_desc(lines, i)
+    return None, ""
+
+
+def _body_note(s: str) -> str:
+    """Erster erklärender Kommentar im Operationskörper („PLAN VORSCHRUPPEN")."""
+    if m := _MSG_RE.match(s):
+        text = m.group(1)
+    elif s.startswith(";"):
+        text = s.lstrip("; ")
+    else:
+        return ""
+    text = text.strip()
+    if (
+        _SEPARATOR_RE.match(text)
+        or _CAM_META_RE.search(text)
+        or _PRESELECT_NOTE_RE.search(text)
+        or len(re.findall(r"[A-ZÄÖÜ]", text, re.I)) < 4
+    ):
+        return ""
+    return text
+
+
+def _new_operation(tool_no: str, desc: str, line: int) -> Operation:
+    tool_type = extract_tool_type(desc)
+    return Operation(
+        tool_id=f"T{tool_no}",
+        tool_type=tool_type,
+        tool_class=classify_tool(tool_type),
+        diameter=_to_float(d.group(1)) if (d := _DIA_RE.search(desc)) else None,
+        operation_label=desc,
+        source_line=line,
+        raw_comment=desc,
+    )
 
 
 def _parse_simple(lines: list[str], prog: CNCProgram) -> None:
     prog.dialect = "simple"
+    stripped = [ln.strip() for ln in lines]
     cur: Operation | None = None
-    for i, ln in enumerate(lines, 1):
-        if m := _TOOLCALL_SIMPLE.match(ln.strip()):
-            comment = m.group(2).strip()
-            tool_type = extract_tool_type(comment)
-            cur = Operation(
-                tool_id=f"T{m.group(1)}",
-                tool_type=tool_type,
-                tool_class=classify_tool(tool_type),
-                diameter=_to_float(d.group(1)) if (d := _DIA_RE.search(comment)) else None,
-                operation_label=comment,
-                source_line=i,
-                raw_comment=comment,
-            )
+    notes: dict[int, str] = {}
+    body_seen = 0
+
+    for i, s in enumerate(stripped):
+        tool_no, desc = _tool_change_at(stripped, i)
+        if tool_no is not None:
+            # T0 leert die Spindel: keine Operation, und nachfolgende S/F
+            # gehören zu keinem Werkzeug.
+            if int(tool_no) == 0:
+                cur = None
+                continue
+            cur = _new_operation(tool_no, desc, i + 1)
             prog.operations.append(cur)
-        elif cur is not None:
-            if (sf := _SF_RE.search(ln)) and cur.spindle_speed is None:
-                cur.spindle_speed = int(sf.group(1))
-                cur.feed = int(sf.group(2))
-            if (cy := _CYCLE_RE.search(ln)) and cur.cycle is None:
-                cur.cycle = cy.group(1)
-    # Operationstyp final aus Werkzeugtyp + Zyklus ableiten
+            body_seen = 0
+            continue
+        if cur is None or not s:
+            continue
+
+        body_seen += 1
+        # Die MSG-Zeile, die schon die Beschreibung lieferte, ist keine Notiz –
+        # sonst verdrängt sie den eigentlichen Hinweis („PLAN VORSCHRUPPEN").
+        if (
+            id(cur) not in notes
+            and body_seen <= _NOTE_WINDOW
+            and (note := _body_note(s))
+            and note.lower() not in cur.operation_label.lower()
+        ):
+            notes[id(cur)] = note
+        # Parameter nur aus dem Code, nicht aus Kommentaren/Meldungen.
+        code = re.sub(r"\(.*?\)", "", s.split(";", 1)[0])
+        if not code or code.startswith("MSG"):
+            continue
+        if cur.spindle_speed is None and (m := _S_RE.search(code)):
+            cur.spindle_speed = int(m.group(1))
+        if cur.feed is None and not _DWELL_RE.search(code) and (m := _F_RE.search(code)):
+            cur.feed = int(m.group(1))
+        if cur.cycle is None and (m := _CYCLE_RE.search(code)):
+            cur.cycle = m.group(1) or f"G{m.group(2)}"
+
     for op in prog.operations:
+        note = notes.get(id(op), "")
+        if note and note.lower() not in op.operation_label.lower():
+            op.operation_label = f"{op.operation_label} – {note}" if op.operation_label else note
+        op.strategy = detect_strategy(op.operation_label)
         op.operation_type = classify_operation(
             f"{op.tool_type or ''} {op.operation_label}", op.cycle, op.tool_class
         )
+    prog.operations = _dedupe_operations(prog.operations)
+
+
+def _dedupe_operations(ops: list[Operation]) -> list[Operation]:
+    """Identische Operationen nur einmal zählen.
+
+    ISO-Programme wiederholen denselben Block je Spannstelle (G54, G55 …).
+    Das ist ein Arbeitsschritt, keine zwei – doppelte Chunks würden nur
+    Suchplätze belegen.
+    """
+    seen: set[tuple] = set()
+    out: list[Operation] = []
+    for op in ops:
+        key = (op.tool_id, op.operation_label, op.spindle_speed, op.feed, op.cycle)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(op)
+    return out
 
 
 # ── Dialekt: structured ───────────────────────────────────────────────────────
@@ -375,6 +644,8 @@ def parse_cnc(text: str) -> CNCProgram:
         _parse_structured(lines, prog)
     else:
         _parse_simple(lines, prog)
+        if _ISO_HEADER_RE.match(text.replace("\r", "")[:200]):
+            prog.dialect = "iso"
     return prog
 
 
@@ -394,7 +665,10 @@ def _fmt_dia(d: float | None) -> str:
 
 
 def operation_to_text(
-    op: Operation, prog: CNCProgram, material_class: str | None = None
+    op: Operation,
+    prog: CNCProgram,
+    material_class: str | None = None,
+    machine: str | None = None,
 ) -> str:
     """Natürlichsprachiger Embedding-Text einer Operation.
 
@@ -421,6 +695,10 @@ def operation_to_text(
     )
     if ctx:
         lines.append(f"Bauteil {ctx}.")
+    # Dasselbe Bauteil läuft teils auf mehreren Maschinen mit eigenen
+    # Programmen; ohne Maschine im Text wären ihre Operationen ununterscheidbar.
+    if machine:
+        lines.append(f"Maschine: {machine}.")
     if op.spindle_speed or op.feed:
         params = []
         if op.spindle_speed:
@@ -486,7 +764,7 @@ def build_cnc_chunks(
         )
         chunks.append(Chunk(
             id=chunk_id,
-            text=operation_to_text(op, prog, material_class),
+            text=operation_to_text(op, prog, material_class, (extra or {}).get("machine")),
             metadata=meta,
         ))
     return chunks

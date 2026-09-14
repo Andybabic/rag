@@ -157,6 +157,51 @@ CREATE TABLE user_use_cases (
 );
 CREATE INDEX idx_user_use_cases_user ON user_use_cases(user_id);
 
+-- ══════════════════════════════════════════════════════════════
+-- Öffentliche Pipeline-API (Bearer-Token + asynchrone Jobs)
+-- ══════════════════════════════════════════════════════════════
+
+-- Bearer-Tokens für die externe API. Gespeichert wird nur der SHA-256-Hash;
+-- der Klartext ist genau einmal (beim Anlegen) sichtbar. `use_cases` schränkt
+-- ein Token auf bestimmte Use Cases ein — leere Liste = alle.
+CREATE TABLE api_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL,
+    token_prefix VARCHAR(24) NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    use_cases JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_by VARCHAR(100),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_used_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    revoked_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Eine Zeile pro API-Anfrage. Bewusst dauerhaft: der Aufrufer pollt mit der
+-- Request-ID, der Zustand muss also einen Neustart überleben. Die `id` ist
+-- zugleich die Request-ID und die spätere `queries.id` — Job, Transkript und
+-- Feedback teilen sich damit einen Identifier.
+CREATE TABLE api_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    token_id UUID REFERENCES api_tokens(id) ON DELETE SET NULL,
+    use_case VARCHAR(50) NOT NULL,
+    session_id UUID NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'default',
+    status VARCHAR(20) NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued', 'running', 'done', 'error')),
+    query_text TEXT NOT NULL,
+    images JSONB,
+    history JSONB,
+    config JSONB,
+    result JSONB,
+    error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    started_at TIMESTAMP WITH TIME ZONE,
+    finished_at TIMESTAMP WITH TIME ZONE
+);
+CREATE INDEX idx_api_jobs_queued ON api_jobs(status, created_at);
+CREATE INDEX idx_api_jobs_session ON api_jobs(session_id);
+
 -- Indizes
 CREATE INDEX idx_queries_use_case ON queries(use_case);
 CREATE INDEX idx_queries_created_at ON queries(created_at);

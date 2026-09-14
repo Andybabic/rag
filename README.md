@@ -110,9 +110,25 @@ Use Cases werden in einer **JSON-Config** beschrieben, beim Start in die DB
 - **Frontend:** Die Use-Case-Auswahl im Chat-UI wird dynamisch aus der DB
   geladen (`GET /v1/use-cases`) – kein Code-Eintrag mehr nötig.
 
-> Für Use Cases mit eigener Ingestion-Metadaten-Logik ist zusätzlich ein
-> optionales `services/data_structure/plugins/<id>.py` (mit `enrich_metadata()`)
-> nötig – das ist arbiträrer Code und nicht Teil der JSON-Config.
+- **Dokumente hochladen** funktioniert für jeden im Dashboard angelegten Use Case
+  sofort: Der data_structure-Service schlägt Use Cases ohne eigenes Plugin in der
+  DB nach und verarbeitet sie generisch; die Chunks landen in der
+  **Default-Collection** des Use Case.
+- **Die Suche liest alle Collections des Use Case** – alle, die mit einem der
+  Collection-Prefixes beginnen (keine Prefixes → `<id>_`), nicht nur die
+  Default-Collection. Nur wer im Request ausdrücklich eine `collection` angibt,
+  grenzt auf diese eine ein. Andere Use Cases bleiben hart isoliert.
+- **Default-Collection und Collection-Prefixes müssen zusammenpassen**, sonst
+  würden Uploads außerhalb der Suche landen. Das Dashboard lehnt eine
+  Default-Collection außerhalb der Prefixes ab; leer gelassen wird sie zu
+  `<id>_default`.
+- **Tabellen** (Reiter „Tabelle") landen in `<id>_default`, wenn das zu den
+  Prefixes passt, sonst in `<prefix>tabellen` (z. B. `wl_tabellen`).
+
+> Ein eigenes `services/data_structure/plugins/<id>.py` (mit `enrich_metadata()`)
+> ist nur noch nötig, wenn ein Use Case eigene Ingestion-Metadaten-Logik braucht
+> (wie GW St. Pölten mit seinen CNC-Daten) – das ist Code und nicht Teil der
+> JSON-Config.
 
 ### Neuen Use Case anlegen (datei-basiert, optional)
 
@@ -164,6 +180,37 @@ Die Retrieval-Pipeline nutzt:
 - **Cross-Encoder Reranker** – `BAAI/bge-reranker-v2-m3` scored jedes
   (Query, Chunk)-Paar gemeinsam; per `RERANKER_ENABLED=false` abschaltbar
 - **Use-Case-Isolation** – Collection-Prefixes verhindern Cross-Use-Case-Zugriff
+
+## Pipeline per API nutzen
+
+Die Pipeline ist nicht nur über die Chat-Oberfläche erreichbar, sondern auch per
+HTTP-API. Bereitgestellt wird sie vom **Frontend** — dem einzigen von außen
+erreichbaren Dienst — und intern an den evaluation-Service durchgeschleust.
+
+Weil ein Agentenlauf Sekunden bis Minuten dauert, ist die API asynchron:
+
+```
+POST /api/v1/chat                     → 202  { request_id, status: "queued" }
+GET  /api/v1/chat/{request_id}        →      { status: queued|running|done|error }
+GET  /api/v1/chat/{request_id}/result → 200  Antwort  |  409 solange unfertig
+GET  /api/v1/sessions/{session_id}    →      kompletter Chat als JSON
+```
+
+Gesichert mit `Authorization: Bearer <token>`. Tokens werden im Dashboard unter
+**Verwaltung → API-Tokens** angelegt (einmalig sichtbar, gespeichert wird nur der
+Hash) und lassen sich auf einzelne Use Cases einschränken, befristen und sperren.
+Bilder werden als base64 im JSON mitgeschickt.
+
+Jobs liegen in Postgres (`api_jobs`) und überleben einen Neustart; ein
+Hintergrund-Worker im evaluation-Service arbeitet sie mit begrenzter
+Parallelität ab, damit API-Last den interaktiven Chat nicht ausbremst.
+
+Die **Endpunkt-Referenz wird aus dem Code erzeugt** und ist in der laufenden
+Instanz im Dashboard unter **Verwaltung → API-Dokumentation** zu finden —
+inklusive Feldtabellen, Statuscodes und fertiger curl-Aufrufe. Maschinenlesbar
+liegt dieselbe Beschreibung unter `/api/v1/openapi.json`.
+
+→ **Ablauf, Einrichtung und Betrieb: [`docs/public_api.md`](docs/public_api.md)**
 
 ## Bilder im Prompt (Vision)
 

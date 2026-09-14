@@ -7,7 +7,9 @@
 	const links = [
 		{ href: '/admin/use-cases', label: 'Use Cases' },
 		{ href: '/admin/users', label: 'Benutzer' },
-		{ href: '/admin/feedback', label: 'Feedback' }
+		{ href: '/admin/feedback', label: 'Feedback' },
+		{ href: '/admin/api-tokens', label: 'API-Tokens' },
+		{ href: '/admin/api-docs', label: 'API-Dokumentation' }
 	];
 
 	function isActive(href: string): boolean {

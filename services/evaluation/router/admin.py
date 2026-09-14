@@ -9,6 +9,11 @@ import logging
 import re
 import uuid
 
+from core.api_tokens import ApiToken
+from core.api_tokens import create_token as create_api_token
+from core.api_tokens import delete_token as delete_api_token
+from core.api_tokens import list_tokens as list_api_tokens
+from core.api_tokens import revoke_token as revoke_api_token
 from core.database import get_pool
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_CATALOG
@@ -26,7 +31,7 @@ from core.use_cases import (
     set_system_prompt,
 )
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from shared.llm.config import LLMConfig
 from shared.security.crypto import CryptoError, encrypt, is_configured
 from shared.usecase_config import (
@@ -705,6 +710,26 @@ async def admin_list_use_cases():
     return {"version": 1, "use_cases": [await _serialize_use_case(uc) for uc in cases]}
 
 
+def collection_outside_prefixes(
+    use_case_id: str, default_collection: str, prefixes: list[str]
+) -> str | None:
+    """Why ``default_collection`` would be invisible to the agent – or ``None``.
+
+    Search is hard-isolated per use case: only collections starting with one of
+    its prefixes are searched (no prefixes → ``<id>_``). A default collection
+    outside them still receives every upload, but the agent may never read it –
+    the documents look uploaded and are never found.
+    """
+    effective = prefixes or [f"{use_case_id}_"]
+    if any(default_collection.startswith(p) for p in effective):
+        return None
+    return (
+        f"Default-Collection „{default_collection}“ passt zu keinem Collection-Präfix "
+        f"({', '.join(effective)}). Hochgeladene Dokumente würden dort gespeichert, "
+        "aber von der Suche nie gefunden – Collection oder Präfix anpassen."
+    )
+
+
 @router.put("/use-cases/{use_case_id}")
 async def admin_upsert_use_case(use_case_id: str, body: UseCaseInput):
     """Create or update a use case (and its system prompts), then hot-reload."""
@@ -713,6 +738,10 @@ async def admin_upsert_use_case(use_case_id: str, body: UseCaseInput):
             status_code=400,
             detail="id must match ^[a-z][a-z0-9_]*$ (lowercase, digits, underscore)",
         )
+    if problem := collection_outside_prefixes(
+        use_case_id, body.default_collection, body.collection_prefixes
+    ):
+        raise HTTPException(status_code=400, detail=problem)
     await upsert_use_case(
         use_case_id,
         slug=body.slug,
@@ -1022,4 +1051,114 @@ async def get_metrics(use_case: str = "", limit: int = 50):
             "compliance_total_issues": compliance_total_issues,
             "compliance_category_totals": compliance_category_totals,
         },
+    }
+
+
+# ── API Tokens (public pipeline API) ──────────────────────────
+
+
+class CreateApiTokenRequest(BaseModel):
+    name: str
+    # Empty list = the token may use every use case.
+    use_cases: list[str] = Field(default_factory=list)
+    expires_in_days: int | None = None
+
+
+def _token_out(token: ApiToken) -> dict:
+    return {
+        "id": token.id,
+        "name": token.name,
+        "token_prefix": token.token_prefix,
+        "use_cases": token.use_cases,
+        "created_by": token.created_by,
+        "created_at": token.created_at,
+        "last_used_at": token.last_used_at,
+        "expires_at": token.expires_at,
+        "revoked_at": token.revoked_at,
+        "active": token.active,
+    }
+
+
+@router.get("/api-tokens")
+async def get_api_tokens():
+    """List API tokens. Secrets are never returned — only the display prefix."""
+    return {"tokens": [_token_out(t) for t in await list_api_tokens()]}
+
+
+@router.post("/api-tokens", status_code=201)
+async def post_api_token(body: CreateApiTokenRequest, created_by: str = ""):
+    """Create a token.
+
+    The plaintext is in the response and nowhere else, ever again — only its
+    hash is stored, so a lost token has to be replaced rather than looked up.
+    """
+    try:
+        token, plaintext = await create_api_token(
+            body.name,
+            use_cases=body.use_cases,
+            created_by=created_by or None,
+            expires_in_days=body.expires_in_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**_token_out(token), "token": plaintext}
+
+
+@router.post("/api-tokens/{token_id}/revoke")
+async def revoke_api_token_endpoint(token_id: str):
+    """Disable a token without losing the record of it having existed."""
+    if not await revoke_api_token(token_id):
+        raise HTTPException(status_code=404, detail="Token not found or already revoked")
+    return {"status": "ok", "id": token_id}
+
+
+@router.delete("/api-tokens/{token_id}", status_code=204)
+async def delete_api_token_endpoint(token_id: str):
+    """Delete a token permanently. Its past jobs keep working (token_id → NULL)."""
+    if not await delete_api_token(token_id):
+        raise HTTPException(status_code=404, detail="Token not found")
+    return None
+
+
+@router.get("/api-jobs")
+async def list_api_jobs(use_case: str = "", limit: int = 50):
+    """Recent public-API requests — the operational view for the dashboard."""
+    pool = await get_pool()
+    limit = max(1, min(limit, 500))
+    if use_case:
+        rows = await pool.fetch(
+            """SELECT j.id, j.use_case, j.session_id, j.status, j.query_text,
+                      j.error, j.created_at, j.started_at, j.finished_at,
+                      t.name AS token_name
+               FROM api_jobs j LEFT JOIN api_tokens t ON t.id = j.token_id
+               WHERE j.use_case = $1
+               ORDER BY j.created_at DESC LIMIT $2""",
+            use_case,
+            limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """SELECT j.id, j.use_case, j.session_id, j.status, j.query_text,
+                      j.error, j.created_at, j.started_at, j.finished_at,
+                      t.name AS token_name
+               FROM api_jobs j LEFT JOIN api_tokens t ON t.id = j.token_id
+               ORDER BY j.created_at DESC LIMIT $1""",
+            limit,
+        )
+    return {
+        "jobs": [
+            {
+                "request_id": str(r["id"]),
+                "use_case": r["use_case"],
+                "session_id": str(r["session_id"]),
+                "status": r["status"],
+                "query": r["query_text"],
+                "error": r["error"],
+                "token_name": r["token_name"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
+            }
+            for r in rows
+        ]
     }

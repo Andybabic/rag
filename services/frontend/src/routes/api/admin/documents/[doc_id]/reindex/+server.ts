@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
+import { readDocumentMeta } from '$lib/server/ingest-pipeline';
 import type { RequestHandler } from './$types';
 
 /**
@@ -56,6 +57,10 @@ export const POST: RequestHandler = async ({ params, request, fetch }) => {
 		.split(',')
 		.map((c) => c.trim())
 		.filter(Boolean);
+
+	// Metadata set at ingest time (an Einstellblatt's product and machine) is
+	// recorded only in the points about to be deleted – read it first.
+	const documentMeta = await readDocumentMeta(collections, fileHash);
 
 	let pointsDeleted = 0;
 	const errors: string[] = [];
@@ -118,6 +123,11 @@ export const POST: RequestHandler = async ({ params, request, fetch }) => {
 	const form = new FormData();
 	form.append('file', fileBlob, fileName || 'document');
 	form.append('use_case', useCase);
+	if (documentMeta) {
+		form.append('meta', JSON.stringify(documentMeta));
+		// Keep the document-list name it was ingested under.
+		form.append('display_name', fileName);
+	}
 
 	const ingestResp = await fetch('/api/ingest', { method: 'POST', body: form });
 	const ingestData = await ingestResp.json();

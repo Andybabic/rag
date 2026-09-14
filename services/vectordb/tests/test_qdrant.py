@@ -6,8 +6,10 @@ import pytest
 from core.qdrant import (
     cross_search,
     delete_collection,
+    delete_points_by_filter,
     get_client,
     list_collections,
+    scroll_payloads,
     search_vectors,
     upsert_vectors,
 )
@@ -233,3 +235,50 @@ def test_cross_search_nonexistent_linked_collection():
     )
     assert len(results) == 1
     assert results[0]["linked"]["nonexistent_col"] is None
+
+
+# ── Delete by filter ─────────────────────────────────────────
+
+
+def test_delete_by_filter_none_matches_points_without_the_field():
+    """``None`` addresses points that lack a field entirely.
+
+    Replacing a product must also remove its chunks from before the machine
+    was recorded – otherwise they linger next to the new ones forever.
+    """
+    upsert_vectors("gw", [
+        {"chunk_id": "old", "vector": [0.1] * DIM,
+         "metadata": {"extra": {"product_id": "11221.6102"}}},
+        {"chunk_id": "matec", "vector": [0.2] * DIM,
+         "metadata": {"extra": {"product_id": "11221.6102", "machine": "Matec 1"}}},
+        {"chunk_id": "chiron", "vector": [0.3] * DIM,
+         "metadata": {"extra": {"product_id": "11221.6102", "machine": "Chiron 233-2"}}},
+    ])
+
+    deleted = delete_points_by_filter(
+        "gw", {"extra.product_id": "11221.6102", "extra.machine": None}
+    )
+    assert deleted == 1
+
+    deleted = delete_points_by_filter(
+        "gw", {"extra.product_id": "11221.6102", "extra.machine": "Matec 1"}
+    )
+    assert deleted == 1
+
+    left = search_vectors("gw", [0.5] * DIM, top_k=10)
+    assert [r["metadata"]["extra"]["machine"] for r in left] == ["Chiron 233-2"]
+
+
+def test_scroll_payloads_reads_metadata_by_filter():
+    upsert_vectors("docs", [
+        {"chunk_id": "a", "vector": [0.1] * DIM,
+         "metadata": {"file_hash": "h1", "extra": {"product_id": "11221.7199"}}},
+        {"chunk_id": "b", "vector": [0.2] * DIM,
+         "metadata": {"file_hash": "h2", "extra": {"product_id": "11221.7238"}}},
+    ])
+    [payload] = scroll_payloads("docs", {"file_hash": "h1"}, limit=5)
+    assert payload["extra"]["product_id"] == "11221.7199"
+
+
+def test_scroll_payloads_missing_collection_is_empty():
+    assert scroll_payloads("nope", {"file_hash": "h1"}) == []

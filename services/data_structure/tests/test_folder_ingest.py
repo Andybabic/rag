@@ -7,6 +7,11 @@ from core.folder_ingest import (
     derive_bearbeitung,
     derive_product_id,
     group_folder,
+    locate_product,
+    plan_folder,
+    program_role,
+    relative_to_product,
+    repair_name,
 )
 from core.stueckliste import build_material_chunk, extract_material_class
 
@@ -128,3 +133,132 @@ def test_build_material_chunk():
 
 def test_build_material_chunk_none_when_absent():
     assert build_material_chunk(_BOM_NO_MAT, file_name="x.csv") is None
+
+
+# ── Verstümmelte Namen ────────────────────────────────────────────────────────
+def test_repair_name_reverses_cp850_read_as_mac_roman():
+    assert repair_name("FrÑsen gro·") == "Fräsen groß"
+    assert repair_name("StÅckliste.csv") == "Stückliste.csv"
+    assert repair_name("Programme fÅr Vorrichtungen") == "Programme für Vorrichtungen"
+
+
+def test_repair_name_leaves_correct_names_alone():
+    assert repair_name("Chiron 243") == "Chiron 243"
+    # Ein echtes „ö" darf nicht umgedeutet werden – kein Markerzeichen da.
+    assert repair_name("St. Pölten") == "St. Pölten"
+
+
+def test_repair_name_handles_decomposed_unicode():
+    # macOS liefert Namen NFD-zerlegt: „N" + kombinierende Tilde statt „Ñ".
+    decomposed = "FrN\u0303sen gro\u00b7"
+    assert "\u00d1" not in decomposed
+    assert repair_name(decomposed) == "Fr\u00e4sen gro\u00df"
+
+
+# ── Klassifikation ────────────────────────────────────────────────────────────
+def test_numeric_suffix_is_not_an_extension():
+    # „11120.4225" ist ein endungsloses Programm, keine .4225-Datei.
+    iso = b"% \r\n:4225(PROFIL/11221.4225/)\r\nN20T1M6(DM.5 VHM-BOHRER)\r\n"
+    assert classify_file("11221.4225/11120.4225", iso) == "cnc"
+
+
+def test_old_versions_are_skipped():
+    assert classify_file("11221.7065/Alte Version/112217065", _CNC) == "skip"
+    assert classify_file(
+        "11221.7500/Alte Version-ohne Stufenbohrer/112217500_ALT", _CNC
+    ) == "skip"
+
+
+def test_program_role():
+    assert program_role("11221.6102/112216102_VORR") == "vorrichtung"
+    assert program_role("11221.6102/Vorrichtung_6102/112216102_VORR") == "vorrichtung"
+    assert program_role("11221.7072/112217072_2BEAR_NACHARBEIT") == "nacharbeit"
+    assert program_role("11221.7072/112217072_1BEAR") == "produktion"
+
+
+# ── Produkt, Maschine, Kategorie ──────────────────────────────────────────────
+def test_locate_product_reads_machine_and_category():
+    assert locate_product(
+        "GW/FrÑsen gro·/Chiron 243/11221.7199/112217199_1BEAR"
+    ) == ("11221.7199", "Chiron 243", "Fräsen groß")
+    # Einheitliche Schreibung der Maschine
+    assert locate_product(
+        "FrÑsen klein/chiron 239-1/11221.4095/112214095"
+    ) == ("11221.4095", "Chiron 239-1", "Fräsen klein")
+    # Unterordner eines Produkts gehören zum Produkt
+    assert locate_product(
+        "M/Chiron 233-2/11221.7500/Programme fÅr Vorrichtungen/112217500_VORR_1"
+    )[:2] == ("11221.7500", "Chiron 233-2")
+    # ZIP eines einzelnen Produkts: nichts darüber
+    assert locate_product("11221.7238/112217238_1BEAR") == ("11221.7238", None, None)
+
+
+def test_relative_to_product():
+    assert relative_to_product(
+        "GW/FrÑsen gro·/Chiron 243/11221.7199/Hypermill/x.mpf"
+    ) == "11221.7199/Hypermill/x.mpf"
+
+
+def test_same_product_on_two_machines_stays_two_groups():
+    files = [
+        ("G/Matec 1/11221.6102/112216102_2BEAR", _CNC),
+        ("M/Chiron 233-2/11221.6102/112216102_2BEAR", _CNC3),
+    ]
+    groups = group_folder(files)
+    assert sorted(g.machine for g in groups) == ["Chiron 233-2", "Matec 1"]
+    assert {g.product_id for g in groups} == {"11221.6102"}
+
+
+def test_group_folder_can_keep_products_without_cnc():
+    files = [("11221.6051/StÅckliste.csv", _BOM_WITH_MAT.encode("cp1252"))]
+    groups = group_folder(files, require_cnc=False)
+    assert len(groups) == 1
+    assert groups[0].stueckliste is not None
+
+
+# ── Upload-Planung ────────────────────────────────────────────────────────────
+_PLAN_PATHS = [
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/112217199_1BEAR",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/StÅckliste.csv",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/Einstellblatt 1.pdf",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/Einstellblatt 1.doc",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/4BEAR_1.jpg",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/Hypermill/11221_7199_1BE.mpf",
+    "GW/FrÑsen gro·/Chiron 243/11221.7199/Programm-Vorlagen-ALT/112217199_1BEAR_VORLAGE",
+    "GW/FrÑsen gro·/Matec 2/11221.6051/StÅckliste.csv",
+    "GW/FrÑsen gro·/Matec 2/11221.6051/Einstellblatt 1.pdf",
+    "GW/FrÑsen gro·/Matec 1/11221.6102/112216102_2BEAR",
+    "GW/FrÑsen gro·/Matec 1/11221.6102/112216102_VORR",
+    "GW/FrÑsen mittel/Chiron 233-2/11221.6102/112216102_2BEAR",
+    "GW/.DS_Store",
+    "GW/Initial Dataset/Scan_20.08.2025_13-40-55.pdf",
+]
+
+
+def test_plan_folder_selects_only_what_must_be_uploaded():
+    plan = plan_folder(_PLAN_PATHS)
+    p = next(p for p in plan["products"] if p["product_id"] == "11221.7199")
+    assert (p["machine"], p["category"]) == ("Chiron 243", "Fräsen groß")
+    # CNC + Stückliste; Einstellblätter nur als PDF
+    assert p["upload_paths"] == [_PLAN_PATHS[0], _PLAN_PATHS[1]]
+    assert p["einstellblaetter"] == [_PLAN_PATHS[2]]
+    assert p["ignored_documents"] == 1
+    # Fotos werden mit hochgeladen – als eigene Liste, nicht im CNC-Upload
+    assert p["bilder"] == [_PLAN_PATHS[4]]
+    assert p["images"] == 1
+
+
+def test_plan_folder_reports_skips_and_unassigned():
+    plan = plan_folder(_PLAN_PATHS)
+    assert plan["skipped"] == {"cam_arbeitsordner": 1, "vorlage": 1, "systemdatei": 1}
+    assert plan["unassigned"] == 1      # Scan ohne Produktbezug
+
+
+def test_plan_folder_warnings_and_variants():
+    by_key = {(p["product_id"], p["machine"]): p for p in plan_folder(_PLAN_PATHS)["products"]}
+    assert by_key[("11221.6051", "Matec 2")]["warnings"] == ["Kein CNC-Programm im Ordner"]
+    matec = by_key[("11221.6102", "Matec 1")]
+    assert matec["warnings"] == ["Produkt liegt auch auf: Chiron 233-2"]
+    assert matec["variants"] == [
+        {"path": "11221.6102/112216102_VORR", "role": "vorrichtung"}
+    ]

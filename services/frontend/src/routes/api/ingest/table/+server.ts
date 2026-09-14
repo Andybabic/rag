@@ -1,11 +1,26 @@
 import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
 import { fetchError, responseError } from '$lib/server/ingest-errors';
+import { tableCollection } from '$lib/table-collection';
 import type { RequestHandler } from './$types';
 
 interface InboundChunk {
 	text: string;
 	metadata?: Record<string, unknown>;
+}
+
+/** The use case's collection prefixes; [] (→ "<id>_") when the lookup fails. */
+async function useCasePrefixes(useCase: string): Promise<string[]> {
+	try {
+		const resp = await fetch(
+			`${SERVICES.evaluation}/v1/use-case/${encodeURIComponent(useCase)}/collections`
+		);
+		if (!resp.ok) return [];
+		const prefixes = (await resp.json()).prefixes;
+		return Array.isArray(prefixes) ? prefixes.filter((p): p is string => typeof p === 'string') : [];
+	} catch {
+		return [];
+	}
 }
 
 /**
@@ -98,9 +113,8 @@ export const POST: RequestHandler = async ({ request }) => {
 	}>;
 	const embedModel = embeddings[0]?.model ?? null;
 
-	// 3. Upsert into a single per-use-case collection. Use the same fallback
-	//    naming as the standard pipeline.
-	const collection = `${useCase}_default`;
+	// 3. Upsert into a collection the use case's search actually reads.
+	const collection = tableCollection(useCase, await useCasePrefixes(useCase));
 	const upsertItems = chunks.map((chunk, i) => ({
 		chunk_id: embeddings[i]?.chunk_id ?? '',
 		vector: embeddings[i].vector,

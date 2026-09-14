@@ -11,7 +11,9 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    IsEmptyCondition,
     MatchValue,
+    PayloadField,
     PointStruct,
     VectorParams,
 )
@@ -147,12 +149,20 @@ def upsert_vectors(
 
 
 def _build_filter(filters: dict) -> Filter | None:
-    """Convert a flat dict of filters to Qdrant Filter conditions."""
+    """Convert a flat dict of filters to Qdrant Filter conditions.
+
+    A value of ``None`` means "field absent or empty". That is how points
+    written before a field existed are addressed — e.g. replacing a product's
+    chunks must also remove the ones ingested before they carried a machine.
+    """
     if not filters:
         return None
     conditions = []
     for key, value in filters.items():
-        conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+        if value is None:
+            conditions.append(IsEmptyCondition(is_empty=PayloadField(key=key)))
+        else:
+            conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
     return Filter(must=conditions)
 
 
@@ -323,6 +333,36 @@ def delete_points_by_filter(collection: str, filters: dict) -> int:
     except Exception as exc:
         raise QdrantUnavailableError(f"Qdrant delete failed: {exc}") from exc
     return matched
+
+
+def scroll_payloads(collection: str, filters: dict, limit: int = 1) -> list[dict]:
+    """Payloads of up to ``limit`` points matching ``filters`` – no vector needed.
+
+    For reading document-level metadata back out of the index, e.g. before a
+    re-ingest deletes the points that are its only record. Returns ``[]`` when
+    the collection does not exist.
+    """
+    qfilter = _build_filter(filters)
+    if qfilter is None:
+        return []
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
+    if collection not in existing:
+        return []
+    try:
+        points, _next = client.scroll(
+            collection_name=collection,
+            scroll_filter=qfilter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant scroll failed: {exc}") from exc
+    return [dict(p.payload or {}) for p in points]
 
 
 def delete_collection(name: str) -> bool:

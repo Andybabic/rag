@@ -117,11 +117,54 @@ Ausgelöst im Frontend über **Upload-Button** → `POST /api/ingest`.
 
 ---
 
-### 2B. Ordner-/CNC-Ingestion (ZIP mit ganzem Produkt-Ordner) — *Use-Case GW St. Pölten*
+### 2B. Ordner-/CNC-Ingestion (ganzer Datenbestand) — *Use-Case GW St. Pölten*
 
-Das ist der spannende Spezialfall. Hier wird **kein Fließtext**, sondern ein ganzer
-**Produkt-Ordner als ZIP** hochgeladen → `POST /api/ingest/folder` →
-data_structure `/v1/structure/folder`.
+Das ist der spannende Spezialfall. Hier wird **kein Fließtext**, sondern der
+**Datenbestand** ordnerweise hochgeladen – im Dashboard unter *Dokumente →
+Datenbestand-Ordner* per Ordnerauswahl oder Drag & Drop. Es können mehrere Ordner
+auf einmal gewählt werden (der ganze Bestand, einzelne Maschinen oder einzelne
+Produktordner), weitere lassen sich vor dem Hochladen hinzufügen. Der Baum hat die
+Form `Kategorie / Maschine / Produkt`:
+
+```
+Fräsen groß/Chiron 243/11221.7199/…
+Fräsen klein/Chiron 239-1/11221.4095/…
+```
+
+Ablauf in zwei Schritten, damit von 1,4 GB nur das Nötige den Rechner verlässt:
+
+1. **Plan** – der Browser schickt nur die Pfade → `POST /api/ingest/gw/plan` →
+   data_structure `/v1/structure/plan`. Antwort: Produkte **je Maschine** und die
+   Dateien, die jedes braucht (CNC-Programme, Stückliste, Einstellblatt-PDFs, Fotos).
+   `.doc`-Fassungen, Vorlagen, `Hypermill/` und `Alte Version/` bleiben lokal.
+   Ein Ordnername zählt nur als Maschine, wenn der Index diese Maschine kennt –
+   sonst („Neue Produkte/11221.7199") wird die Maschine des Produkts aus dem
+   Bestand übernommen oder, wenn es auf mehreren Maschinen liegt, abgefragt.
+2. **Phase 1 – CNC je Produkt** – `POST /api/ingest/gw/product` (CNC + Stückliste)
+   ersetzt zuerst alles dieses Produkts auf dieser Maschine: Punkte in allen drei
+   GW-Collections, Einträge der Dokumentliste und gespeicherte Originale. Ein Ordner
+   mit demselben Namen lässt sich so einfach erneut hochladen. Originale, die ein
+   anderes Produkt byte-gleich mitbenutzt, bleiben erhalten.
+3. **Phase 2 – Einstellblätter und Fotos** über `/api/ingest`, umbenannt in
+   „`<Produkt> (<Maschine>) – <Datei>`" und mit `meta = {doc_kind: "einstellblatt" |
+   "foto", product_id, machine, category}` → `gw_ruest_data`. Fotos werden im
+   Browser auf 2048 px verkleinert, im Cleaning als einseitiges Dokument mit einem
+   Bild verarbeitet (Galerie, Bildbeschreibung) und mit ihrer Beschreibung als Text
+   indexiert.
+
+Ein Produkt ist durch **Produkt-ID + Maschine** bestimmt: `11221.6102` wird auf
+Matec 1 und Chiron 233-2 mit eigenen Programmen gefertigt. Einzelne Produkte können
+weiterhin als ZIP über `POST /api/ingest/folder` hochgeladen werden (mehrere ZIPs auf
+einmal; jedes Produkt ersetzt seinen früheren Stand).
+
+**Produkte bleiben getrennt:** Jeder Chunk nennt sein Bauteil – CNC-Texte enthalten
+Bauteil und Maschine, Einstellblätter und Fotos tragen sie im Dateinamen (und damit
+im Chunk-Kopf). Nennt eine Frage genau ein Bauteil, sucht `SEARCH` nur in dessen
+Daten; gibt es dazu nichts, wird breiter gesucht und die Treffer ausdrücklich als
+fremd markiert. Stammen Treffer aus mehreren Bauteilen, sieht der Agent jedes mit
+Bauteil und Maschine und einen Hinweis, keine Angaben zu übertragen. Bauteil-
+übergreifend ist nur, was es sein muss: die Werkzeugempfehlung von `SEARCH_CNC`
+aggregiert bewusst über alle historischen Bauteile.
 
 Ein solcher Ordner sieht typisch so aus:
 ```
@@ -135,11 +178,17 @@ Ein solcher Ordner sieht typisch so aus:
 
 **Schritt für Schritt, was hier passiert:**
 
-1. **Gruppieren** (`folder_ingest.py`): ZIP entpacken, jede Datei klassifizieren
-   (CNC / Stückliste / Einstellblatt / Bild / überspringen) und nach **Produkt-ID**
-   bündeln. Die Produkt-ID (`11221.7126`) ist der gemeinsame Schlüssel.
-   - Vorlagen (`*VORLAGE*`), CAM-Arbeitsverzeichnisse (`Hypermill/`) und Temp-Dateien
-     werden übersprungen.
+1. **Gruppieren** (`folder_ingest.py`): jede Datei klassifizieren
+   (CNC / Stückliste / Einstellblatt / Bild / überspringen) und nach
+   **Produkt-ID + Maschine** bündeln. Maschine und Kategorie kommen aus den
+   Ordnern über dem Produktordner.
+   - Übersprungen: Vorlagen (`*VORLAGE*`), CAM-Arbeitsverzeichnisse (`Hypermill/`),
+     alte Stände (`Alte Version*/`), Temp- und Systemdateien.
+   - Einstellblätter zählen nur als PDF – die `.doc`-Fassungen sind nicht zwingend aktuell.
+   - Vorrichtungs- (`_VORR`, `Vorrichtung…/`) und Nacharbeitsprogramme werden als
+     `program_role` markiert; `SEARCH_CNC` zählt Vorrichtungen nicht als Bauteil.
+   - Die Ordnernamen sind CP850-als-Mac-Roman verstümmelt (`FrÑsen gro·`) und werden
+     zurückgerechnet (`Fräsen groß`).
    - Byte-identische CNC-Kopien werden per SHA1-Hash dedupliziert.
 
 2. **Material extrahieren** (`stueckliste.py`): Aus der CSV wird die Alu-Legierung
@@ -147,11 +196,17 @@ Ein solcher Ordner sieht typisch so aus:
    beigemischt → man kann nach "Werkzeug für Material X" suchen.
 
 3. **CNC parsen** (`cnc_parser.py`) — **der Kern**:
-   - Erkennt automatisch den **Dialekt**: `simple` (handgeschrieben, ein T-Aufruf pro
-     Block) oder `structured` (CAM-Export mit Werkzeugliste + Operations-Index).
+   - Erkennt automatisch den **Dialekt**: `structured` (CAM-Export mit Werkzeugliste +
+     Operations-Index), `simple` (handgeschriebene Sinumerik-Programme) oder `iso`
+     (Fanuc-Stil der Chiron 239, `N20T1M6(…)` ohne Leerzeichen).
+   - Jede Maschine schreibt den Werkzeugwechsel anders – die Beschreibung steht in
+     derselben Zeile (`T1 M16 ;DM=9 VHMI-BOHRER`), am T-Wort mit Wechsel per `L6`
+     (Matec 1), in der Zeile davor (`N100 (DM=2.5 …)`, Matec 2) oder als Meldung
+     danach (`MSG("DM=80 MESSERKOPF")`, Chiron 233). Nackte `T<n>` sind Vorwahlen,
+     `T0` entlädt die Spindel – beides erzeugt keine Operation.
    - Zerlegt das Programm in **einzelne Operationen** — **eine Operation = ein Chunk**.
    - Repariert kaputte Umlaute aus dem CAM-Postprozessor (`Frdsen` → `Fräsen`,
-     `FrC$sen` → `Fräsen`).
+     `FrC$sen` → `Fräsen`, `Schaftfrdser` → `Schaftfräser`).
    - Klassifiziert jede Operation (Bohren / Fräsen / Taschenfräsen / …) und jedes
      Werkzeug (Bohrer / Fräser / Anbohrer / Sonderwerkzeug).
 
@@ -174,7 +229,11 @@ Ein solcher Ordner sieht typisch so aus:
       "spindle_speed": 10900,
       "feed": 3000,
       "cycle": "CYCLE82",
-      "material_class": "EN AW-6005A T6"
+      "material_class": "EN AW-6005A T6",
+      "machine": "Chiron 243",
+      "category": "Fräsen groß",
+      "program_role": "produktion",
+      "source_path": "11221.7126/112217126"
     }
   }
 }

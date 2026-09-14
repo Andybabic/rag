@@ -18,6 +18,53 @@ from core.use_cases import collection_belongs_to_use_case, get_use_case_prefixes
 logger = logging.getLogger(__name__)
 
 
+# GW-Bauteilnummer („11221.7199"). Nur für Use Cases mit gw_*-Collections.
+_PRODUCT_ID_RE = re.compile(r"(?<![\d.])(\d{5}\.\d{3,4})(?!\d)")
+
+
+def product_scope(query: str, use_case: str) -> str | None:
+    """Das eine Bauteil, um das eine Frage geht – oder ``None``.
+
+    Nennt die Frage genau ein Bauteil, wird nur in dessen Daten gesucht: sonst
+    landen Rüstangaben eines Nachbarteils in der Antwort. Mehrere genannte
+    Bauteile sind ein Vergleich – dann ist das Zusammenführen gewollt.
+    """
+    if not collection_belongs_to_use_case("gw_cnc_steps", use_case):
+        return None
+    ids = set(_PRODUCT_ID_RE.findall(query or ""))
+    return ids.pop() if len(ids) == 1 else None
+
+
+def _source_label(meta: dict) -> str:
+    """Quellenangabe eines Treffers inklusive Bauteil und Maschine.
+
+    „Einstellblatt 1.pdf" gibt es in fast jedem Produktordner. Ohne Bauteil im
+    Label kann der Agent Treffer verschiedener Produkte nicht auseinanderhalten.
+    """
+    file_name = meta.get("file_name", "")
+    page = meta.get("page")
+    source = f"{file_name}, S. {page}" if page else file_name
+    extra = meta.get("extra") or {}
+    pid, machine = extra.get("product_id"), extra.get("machine")
+    if pid and pid not in file_name:
+        source += f" · Bauteil {pid}" + (f", {machine}" if machine else "")
+    return source
+
+
+def _mixed_products_note(metas: list[dict]) -> str:
+    """Warnung, wenn Treffer aus mehreren Bauteilen stammen."""
+    products = sorted({
+        pid for m in metas if (pid := (m.get("extra") or {}).get("product_id"))
+    })
+    if len(products) < 2:
+        return ""
+    return (
+        f"Hinweis: Die Treffer stammen aus {len(products)} verschiedenen Bauteilen "
+        f"({', '.join(products)}). Übertrage keine Angaben von einem Bauteil auf ein "
+        "anderes – nenne bei jeder Angabe das Bauteil oder frage nach, welches gemeint ist."
+    )
+
+
 async def action_search(args: dict, *, use_case: str) -> dict:
     """SEARCH – embed query, search VectorDB, rerank results.
 
@@ -57,6 +104,16 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             col_resp.raise_for_status()
             available = [c["name"] for c in col_resp.json()["collections"]]
 
+        if not collection:
+            # No collection chosen: search every collection of this use case.
+            # A use case routinely spreads over several (GW: CNC steps, setup
+            # sheets and photos, material) – searching only the default one
+            # left everything else unreachable.
+            prefixes = get_use_case_prefixes(use_case)
+            collections_to_search = [
+                c for c in available if any(c.startswith(p) for p in prefixes)
+            ]
+
         if collection and collection not in available:
             # Fallback: only collections belonging to THIS use case
             prefixes = get_use_case_prefixes(use_case)
@@ -88,52 +145,70 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             return {"observation": "Keine Collections verfügbar.", "chunks": [], "searched_collections": []}
 
         # 3. Search across resolved collections (fetch more, deduplicate later)
+        # Nennt die Frage genau ein Bauteil, zuerst nur dessen Daten. Erst wenn
+        # es dazu nichts gibt, wird breiter gesucht – mit einem Hinweis, damit
+        # die fremden Treffer nicht als Angaben zum gefragten Bauteil gelten.
+        scoped_product = None if "extra.product_id" in filters else product_scope(query, use_case)
+        attempts = (
+            [{**filters, "extra.product_id": scoped_product}, filters]
+            if scoped_product else [filters]
+        )
+        scope_note = ""
         results = []
         _search_start = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            for col in collections_to_search:
-                search_resp = await client.post(
-                    f"{settings.VECTORDB_SERVICE_URL}/v1/search",
-                    json={
-                        "collection": col,
-                        "vector": vector,
-                        "top_k": 40,
-                        "filters": filters,
-                        "embed_model": query_embed_model,
-                    },
-                )
-                if search_resp.status_code == 200:
-                    for r in search_resp.json()["results"]:
-                        r.setdefault("metadata", {})["_collection"] = col
-                        results.append(r)
-                elif search_resp.status_code == 409:
-                    # Embedding-model mismatch: the index was built with a
-                    # different model than this query uses → similarities are
-                    # meaningless. Surface this clearly instead of letting the
-                    # LLM hallucinate a "keine Information" answer.
-                    body = search_resp.json()
-                    logger.error(
-                        "Embedding-model mismatch on '%s': index=%s query=%s. "
-                        "Re-ingest required.",
-                        col,
-                        body.get("index_model"),
-                        body.get("query_model"),
+            for attempt, search_filters in enumerate(attempts):
+                if attempt and scoped_product:
+                    scope_note = (
+                        f"Hinweis: Zu Bauteil {scoped_product} gibt es keine Daten. Die "
+                        f"folgenden Treffer stammen aus ANDEREN Bauteilen und gelten nicht "
+                        f"für {scoped_product}."
                     )
-                    return {
-                        "observation": (
-                            f"RETRIEVAL-FEHLER: Die Collection '{col}' wurde mit "
-                            f"Embedding-Modell '{body.get('index_model')}' "
-                            f"indexiert, die Anfrage nutzt aber "
-                            f"'{body.get('query_model')}'. Die Suche liefert "
-                            f"keine verwertbaren Treffer, bis die Collection mit "
-                            f"dem aktuellen Modell neu ingestiert wurde. "
-                            f"Antworte NICHT aus eigenem Wissen, sondern weise "
-                            f"auf dieses Konfigurationsproblem hin."
-                        ),
-                        "chunks": [],
-                        "searched_collections": collections_to_search,
-                        "embed_ms": _embed_ms,
-                    }
+                for col in collections_to_search:
+                    search_resp = await client.post(
+                        f"{settings.VECTORDB_SERVICE_URL}/v1/search",
+                        json={
+                            "collection": col,
+                            "vector": vector,
+                            "top_k": 40,
+                            "filters": search_filters,
+                            "embed_model": query_embed_model,
+                        },
+                    )
+                    if search_resp.status_code == 200:
+                        for r in search_resp.json()["results"]:
+                            r.setdefault("metadata", {})["_collection"] = col
+                            results.append(r)
+                    elif search_resp.status_code == 409:
+                        # Embedding-model mismatch: the index was built with a
+                        # different model than this query uses → similarities are
+                        # meaningless. Surface this clearly instead of letting the
+                        # LLM hallucinate a "keine Information" answer.
+                        body = search_resp.json()
+                        logger.error(
+                            "Embedding-model mismatch on '%s': index=%s query=%s. "
+                            "Re-ingest required.",
+                            col,
+                            body.get("index_model"),
+                            body.get("query_model"),
+                        )
+                        return {
+                            "observation": (
+                                f"RETRIEVAL-FEHLER: Die Collection '{col}' wurde mit "
+                                f"Embedding-Modell '{body.get('index_model')}' "
+                                f"indexiert, die Anfrage nutzt aber "
+                                f"'{body.get('query_model')}'. Die Suche liefert "
+                                f"keine verwertbaren Treffer, bis die Collection mit "
+                                f"dem aktuellen Modell neu ingestiert wurde. "
+                                f"Antworte NICHT aus eigenem Wissen, sondern weise "
+                                f"auf dieses Konfigurationsproblem hin."
+                            ),
+                            "chunks": [],
+                            "searched_collections": collections_to_search,
+                            "embed_ms": _embed_ms,
+                        }
+                if results:
+                    break
     except httpx.HTTPStatusError as exc:
         return {
             "observation": f"Suche fehlgeschlagen: {exc.response.status_code}. "
@@ -195,17 +270,16 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     for i, r in enumerate(unique[:7], 1):
         meta = r.get("metadata", {})
         text = meta.get("text", "")[:_OBSERVATION_CHARS]
-        file_name = meta.get("file_name", "")
-        page = meta.get("page")
-        source = f"{file_name}, S. {page}" if page else file_name
+        source = _source_label(meta)
         lines.append(f"[{i}] ({source}) {text}{_image_block(meta)}")
         chunks.append({
             "text": meta.get("text", ""),
             "score": r.get("rerank_score", 0.0),
             "metadata": meta,
         })
+    notes = [n for n in (scope_note, _mixed_products_note([c["metadata"] for c in chunks])) if n]
     return {
-        "observation": "\n".join(lines),
+        "observation": "\n".join(notes + lines),
         "chunks": chunks,
         "searched_collections": collections_to_search,
         "embed_ms": _embed_ms,
@@ -453,6 +527,10 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
     agg: dict[tuple, dict] = {}
     for r in results:
         meta = r.get("metadata", {})
+        # Vorrichtungsprogramme fertigen die Spannvorrichtung, nicht das
+        # Bauteil – ihre Werkzeuge gehören nicht in „in N Bauteilen verwendet".
+        if _op_facet(meta, "program_role") == "vorrichtung":
+            continue
         tool_type = _op_facet(meta, "tool_type")
         tt_low = str(tool_type or "").lower()
         if missing_tokens and any(tok in tt_low for tok in missing_tokens):
@@ -462,7 +540,8 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         a = agg.setdefault(key, {
             "tool_type": tool_type, "diameter": diameter,
             "products": set(), "speeds": [], "feeds": [],
-            "materials": set(), "operations": set(), "best_score": 0.0,
+            "materials": set(), "operations": set(), "machines": set(),
+            "best_score": 0.0,
         })
         if pid := _op_facet(meta, "product_id"):
             a["products"].add(pid)
@@ -474,6 +553,8 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             a["materials"].add(mc)
         if (op := _op_facet(meta, "operation_type")):
             a["operations"].add(op)
+        if (machine := _op_facet(meta, "machine")):
+            a["machines"].add(machine)
         a["best_score"] = max(a["best_score"], r.get("score", 0.0))
 
     # Ranking: häufigste Verwendung (Projekte) zuerst, dann Score.
@@ -521,9 +602,10 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         param_str = f", Parameter {', '.join(params)}" if params else ""
         mat_str = f", Material {', '.join(sorted(a['materials']))}" if a["materials"] else ""
         ops_str = "/".join(sorted(a["operations"])) or "?"
+        machine_str = f", Maschine(n) {', '.join(sorted(a['machines']))}" if a["machines"] else ""
         lines.append(
             f"[{i}] {_fmt_tool(a['tool_type'], a['diameter'])} – "
-            f"in {n} Bauteil(en) für {ops_str}{param_str}{mat_str}"
+            f"in {n} Bauteil(en) für {ops_str}{param_str}{mat_str}{machine_str}"
         )
         chunks.append({
             "text": f"{_fmt_tool(a['tool_type'], a['diameter'])} ({ops_str}) – {n} Projekte",
@@ -532,6 +614,7 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
                 "tool_type": a["tool_type"], "diameter": a["diameter"],
                 "operation_type": ops_str, "project_count": n,
                 "products": sorted(a["products"]),
+                "machines": sorted(a["machines"]),
             },
         })
 

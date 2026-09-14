@@ -222,3 +222,33 @@ async def test_tool_material_not_treated_as_workpiece():
     assert not captured.get("filters")
     assert "Material: VHM" not in res["observation"]
     assert "HB SF Ø10 mm" in res["observation"]
+
+
+@pytest.mark.anyio
+async def test_fixture_programs_do_not_count_as_parts_and_machines_are_named():
+    """Vorrichtungsprogramme fertigen die Spannvorrichtung, nicht das Bauteil.
+
+    Ihre Werkzeuge dürfen „in N Bauteilen verwendet" nicht aufblähen – sonst
+    gewinnt ein Werkzeug die Empfehlung, das am Bauteil nie lief.
+    """
+    fixture_hits = [
+        _cnc_hit(tool_type="VHM-FRAESER", diameter=16.0, product_id=pid,
+                 operation_type="Fräsen", score=0.95)
+        for pid in ("11221.7500", "11221.6102", "11221.3308")
+    ]
+    for hit in fixture_hits:
+        hit["metadata"]["extra"]["program_role"] = "vorrichtung"
+    part_hits = [
+        _cnc_hit(tool_type="HB SF", diameter=16.0, product_id="11221.7199",
+                 operation_type="Fräsen", score=0.8),
+    ]
+    part_hits[0]["metadata"]["extra"]["machine"] = "Chiron 243"
+
+    with _patch_client(lambda has_mat: fixture_hits + part_hits):
+        res = await action_search_cnc({"operation": "Fräsen"}, use_case="gw_stpoelten")
+
+    obs = res["observation"]
+    assert "Empfehlung: HB SF Ø16 mm" in obs
+    assert "VHM-FRAESER" not in obs
+    assert "Maschine(n) Chiron 243" in obs
+    assert res["chunks"][0]["metadata"]["machines"] == ["Chiron 243"]

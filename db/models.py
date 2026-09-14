@@ -295,3 +295,63 @@ class UseCaseSkill(Base):
         Index("idx_usecase_skills_use_case", "use_case"),
         Index("uq_usecase_skills_name", "use_case", "name", unique=True),
     )
+
+
+class ApiToken(Base):
+    """Bearer credential for the public pipeline API.
+
+    Only the SHA-256 hash is stored; the plaintext is shown once at creation.
+    ``use_cases`` is a scope list — empty means "every use case", which mirrors
+    how an admin account relates to ``user_use_cases``.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), nullable=False)
+    token_prefix = Column(String(24), nullable=False)
+    token_hash = Column(Text, nullable=False, unique=True)
+    use_cases = Column(JSONB, nullable=False, server_default="[]")
+    created_by = Column(String(100))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))
+    revoked_at = Column(DateTime(timezone=True))
+
+
+class ApiJob(Base):
+    """One asynchronous request against the public pipeline API.
+
+    ``id`` is the request id handed back to the caller and is reused as the
+    ``queries.id`` written once the pipeline finishes — so job status, chat
+    transcript and feedback all key off the same identifier.
+    """
+
+    __tablename__ = "api_jobs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_id = Column(
+        UUID(as_uuid=True), ForeignKey("api_tokens.id", ondelete="SET NULL")
+    )
+    use_case = Column(String(50), nullable=False)
+    session_id = Column(UUID(as_uuid=True), nullable=False)
+    role = Column(String(20), nullable=False, server_default="default")
+    status = Column(String(20), nullable=False, server_default="queued")
+    query_text = Column(Text, nullable=False)
+    images = Column(JSONB)
+    history = Column(JSONB)
+    config = Column(JSONB)
+    result = Column(JSONB)
+    error = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'done', 'error')",
+            name="ck_api_jobs_status",
+        ),
+        Index("idx_api_jobs_queued", "status", "created_at"),
+        Index("idx_api_jobs_session", "session_id"),
+    )
