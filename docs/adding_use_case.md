@@ -1,5 +1,13 @@
 # Neuen Use Case hinzufuegen
 
+> **Kurzweg:** Ein Use Case lässt sich vollständig im Dashboard anlegen
+> (`/admin/use-cases`) – Dokumente können danach sofort hochgeladen werden.
+> Ohne eigenes Plugin verarbeitet der data_structure-Service den Use Case
+> generisch und schreibt in dessen Default-Collection; diese muss mit einem der
+> Collection-Prefixes beginnen (leer → `<id>_default` / `<id>_`), sonst findet
+> die Suche die Dokumente nicht. Die folgenden Schritte (eigenes Plugin usw.)
+> braucht es nur für use-case-spezifische Metadaten-Logik oder eigene Actions.
+
 Diese Anleitung beschreibt, wie ein neuer Use Case zur RAG Platform
 hinzugefuegt wird. Als Beispiel erstellen wir den Use Case **"stadtwerke"**
 fuer einen Wasser-/Abwasser-Wartungsassistenten.

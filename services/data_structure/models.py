@@ -24,6 +24,30 @@ class CNCStructureRequest(BaseModel):
     config: StructureConfig = Field(default_factory=StructureConfig)
 
 
+class FolderPlanRequest(BaseModel):
+    """Relative Pfade eines gewählten Ordners (ohne Inhalte)."""
+
+    paths: list[str] = Field(default_factory=list, max_length=50_000)
+
+
+class ProductFile(BaseModel):
+    path: str
+    content_b64: str
+
+
+class ProductFilesRequest(BaseModel):
+    """Die Dateien eines Produkts; der Pfad trägt Maschine und Kategorie.
+
+    ``machine``/``category`` überschreiben den Pfad – für Produktordner, die
+    ohne ihren Maschinenordner hochgeladen werden und deren Maschine aus dem
+    Bestand übernommen oder vom Nutzer gewählt wurde.
+    """
+
+    files: list[ProductFile] = Field(default_factory=list, max_length=500)
+    machine: str | None = None
+    category: str | None = None
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str

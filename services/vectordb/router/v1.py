@@ -7,6 +7,7 @@ from core.qdrant import (
     delete_collection,
     delete_points_by_filter,
     list_collections,
+    scroll_payloads,
     search_vectors,
     upsert_vectors,
 )
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from models import (
     CrossSearchRequest,
     DeletePointsRequest,
+    ScrollRequest,
     SearchRequest,
     UpsertRequest,
 )
@@ -158,6 +160,29 @@ async def delete_points(body: DeletePointsRequest, request: Request):
         "collection": body.collection,
         "request_id": request_id,
     }
+
+
+@router.post("/scroll")
+async def scroll(body: ScrollRequest, request: Request):
+    """Payloads of points matching ``filters`` (no similarity, no vector).
+
+    Used to read a document's metadata back before its points are replaced.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    if not body.filters:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "filters_required",
+                "detail": "scroll needs at least one filter",
+                "request_id": request_id,
+            },
+        )
+    try:
+        points = scroll_payloads(body.collection, body.filters, body.limit)
+    except QdrantUnavailableError as exc:
+        return _qdrant_error_response(exc, request_id)
+    return {"points": points, "collection": body.collection, "request_id": request_id}
 
 
 @router.delete("/collection/{name}")

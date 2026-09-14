@@ -145,10 +145,18 @@ export interface UploadResult {
 	[k: string]: unknown;
 }
 
-export async function uploadFile(file: File, useCase: string): Promise<UploadResult> {
+export async function uploadFile(
+	file: File,
+	useCase: string,
+	opts: { meta?: Record<string, unknown>; displayName?: string } = {}
+): Promise<UploadResult> {
 	const form = new FormData();
 	form.append('file', file);
 	form.append('use_case', useCase);
+	// Document-level metadata copied into every chunk (e.g. an Einstellblatt's
+	// product and machine) and the name shown in the document list.
+	if (opts.meta) form.append('meta', JSON.stringify(opts.meta));
+	if (opts.displayName) form.append('display_name', opts.displayName);
 	const resp = await fetch(`${BASE}/ingest`, {
 		method: 'POST',
 		body: form
@@ -279,6 +287,77 @@ export async function uploadFolder(file: File, useCase: string): Promise<FolderU
 		body: form
 	});
 	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+// ── GW St. Pölten: Datenbestand-Ordner ─────────────────────────
+
+export interface GwPlanProduct {
+	product_id: string;
+	machine: string | null;
+	category: string | null;
+	cnc_candidates: string[];
+	stueckliste: string | null;
+	einstellblaetter: string[];
+	/** Photos – ingested one by one like the Einstellblätter. */
+	bilder: string[];
+	/** CNC programs + Stückliste – the files for the product upload. */
+	upload_paths: string[];
+	images: number;
+	ignored_documents: number;
+	variants: Array<{ path: string; role: string }>;
+	warnings: string[];
+	/** Set when the product is known on several machines: the user picks one. */
+	machine_choices?: Array<{ machine: string | null; category: string | null; isNew?: boolean }>;
+}
+
+export interface GwPlan {
+	products: GwPlanProduct[];
+	skipped: Record<string, number>;
+	unassigned: number;
+}
+
+/** Ask the server which products a picked folder holds and what to upload. */
+export async function planGwFolder(paths: string[]): Promise<GwPlan> {
+	const resp = await fetch(`${BASE}/ingest/gw/plan`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ paths })
+	});
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Ordner konnte nicht geplant werden'));
+	return resp.json();
+}
+
+export interface GwProductResult {
+	status: string;
+	product_id: string;
+	machine: string | null;
+	/** Points of the previous upload that were removed. */
+	replaced: number;
+	/** Old PDFs/photos removed from the document list with them. */
+	documents_removed: number;
+	chunks: number;
+	product: {
+		operations: number;
+		material_class: string | null;
+		warnings: string[];
+		programs: Array<{ file: string; operations: number; dialect: string; role: string }>;
+	} | null;
+}
+
+/** (Re)index one product on one machine – replaces what was there. */
+export async function uploadGwProduct(body: {
+	product_id: string;
+	machine: string | null;
+	category: string | null;
+	files: Array<{ path: string; content_b64: string }>;
+}): Promise<GwProductResult> {
+	const resp = await fetch(`${BASE}/ingest/gw/product`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!resp.ok) throw new Error(await readErrorMessage(resp, 'Produkt-Upload fehlgeschlagen'));
 	return resp.json();
 }
 

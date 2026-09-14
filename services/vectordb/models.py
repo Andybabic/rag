@@ -33,6 +33,13 @@ class DeletePointsRequest(BaseModel):
     filters: dict = Field(default_factory=dict)
 
 
+class ScrollRequest(BaseModel):
+    collection: str
+    filters: dict = Field(default_factory=dict)
+    # Up to 1000: replacing a product reads every point's file_hash first.
+    limit: int = Field(default=1, ge=1, le=1000)
+
+
 class CrossSearchRequest(BaseModel):
     primary_collection: str
     linked_collections: list[str]

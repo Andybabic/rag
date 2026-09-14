@@ -37,11 +37,15 @@ def extract_material_class(csv_text: str) -> str | None:
     return f"EN AW-{alloy}{temper}"
 
 
-def material_text(material_class: str, product_id: str | None) -> str:
+def material_text(
+    material_class: str, product_id: str | None, machine: str | None = None
+) -> str:
     """Natürlichsprachiger Embedding-Text für einen Material-Chunk."""
     lines = [f"Material: {material_class} (Aluminium-Knetlegierung)."]
     if product_id:
         lines.append(f"Bauteil: {product_id}.")
+    if machine:
+        lines.append(f"Maschine: {machine}.")
     return "\n".join(lines)
 
 
@@ -73,6 +77,6 @@ def build_material_chunk(
     )
     return Chunk(
         id=chunk_id,
-        text=material_text(material_class, product_id),
+        text=material_text(material_class, product_id, (extra or {}).get("machine")),
         metadata=meta,
     )

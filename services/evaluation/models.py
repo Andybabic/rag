@@ -70,6 +70,10 @@ class AgentQueryRequest(BaseModel):
     images: list[str] = Field(default_factory=list)
 
 
+class IngestLogDeleteRequest(BaseModel):
+    file_hashes: list[str] = Field(default_factory=list, max_length=5000)
+
+
 class FeedbackRequest(BaseModel):
     query_id: str
     feedback: str

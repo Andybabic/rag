@@ -445,3 +445,94 @@ def test_beispiel_agent_actions():
     actions = BeispielPlugin().get_agent_actions()
     assert "SEARCH" in actions
     assert "FINAL_ANSWER" in actions
+
+
+# ── GW: Einstellblätter ───────────────────────────────────────────────────────
+# Rüstblätter nennen Werkzeugnummern und Maße. Die CNC-Heuristik des Plugins
+# zählt genau solche Muster und hätte sie nach gw_cnc_steps geschickt.
+_SETUP_SHEET_TEXT = "Werkzeug T12 auf Platz 3, Anschlag X 100 Y 50 Z 20, Drehzahl S 2000"
+
+
+def test_gw_setup_sheet_text_looks_like_cnc_without_marker():
+    meta = GWStPoeltenPlugin().enrich_metadata(
+        _make_meta(use_case="gw_stpoelten"), _SETUP_SHEET_TEXT, {}
+    )
+    assert meta.collection == "gw_cnc_steps"
+
+
+def test_gw_marked_setup_sheet_is_ruest_data():
+    meta = GWStPoeltenPlugin().enrich_metadata(
+        _make_meta(use_case="gw_stpoelten"),
+        _SETUP_SHEET_TEXT,
+        {"doc_kind": "einstellblatt", "product_id": "11221.7199", "machine": "Chiron 243"},
+    )
+    assert meta.collection == "gw_ruest_data"
+    assert meta.extra["product_id"] == "11221.7199"
+    assert meta.extra["machine"] == "Chiron 243"
+    assert meta.extra["is_cnc_block"] is False
+
+
+def test_gw_marked_photo_is_ruest_data():
+    # Eine Bildbeschreibung nennt ebenso Maße und Werkzeugplätze.
+    meta = GWStPoeltenPlugin().enrich_metadata(
+        _make_meta(use_case="gw_stpoelten"),
+        "Foto: Spannvorrichtung mit Werkzeug T4, Anschlag bei X 120 Y 40",
+        {"doc_kind": "foto", "product_id": "11221.7199", "machine": "Chiron 243"},
+    )
+    assert meta.collection == "gw_ruest_data"
+    assert meta.extra["product_id"] == "11221.7199"
+
+
+# ── Use Cases aus dem Dashboard ───────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_dashboard_use_case_gets_generic_plugin():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from plugins import resolve_plugin
+    from plugins.generic import GenericPlugin
+
+    uc = SimpleNamespace(id="kunde_x", default_collection="kunde_x_handbuecher")
+    with patch("plugins.get_use_case", new=AsyncMock(return_value=uc)):
+        plugin = await resolve_plugin("kunde_x")
+    assert isinstance(plugin, GenericPlugin)
+    assert plugin.use_case_id == "kunde_x"
+    assert plugin.get_collections() == ["kunde_x_handbuecher"]
+
+
+@pytest.mark.anyio
+async def test_builtin_plugin_wins_without_db_lookup():
+    from unittest.mock import AsyncMock, patch
+
+    from plugins import resolve_plugin
+
+    lookup = AsyncMock()
+    with patch("plugins.get_use_case", new=lookup):
+        plugin = await resolve_plugin("gw_stpoelten")
+    assert isinstance(plugin, GWStPoeltenPlugin)
+    lookup.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_unknown_or_unreachable_use_case_resolves_to_none():
+    from unittest.mock import AsyncMock, patch
+
+    from plugins import resolve_plugin
+
+    with patch("plugins.get_use_case", new=AsyncMock(return_value=None)):
+        assert await resolve_plugin("tippfehler") is None
+    with patch("plugins.get_use_case", new=AsyncMock(side_effect=OSError("db down"))):
+        assert await resolve_plugin("kunde_x") is None
+
+
+def test_generic_plugin_keeps_caller_metadata():
+    from plugins.generic import GenericPlugin
+
+    meta = _make_meta(use_case="kunde_x", collection="kunde_x_handbuecher")
+    meta.extra = {"abteilung": "Wartung"}
+    plugin = GenericPlugin("kunde_x", "kunde_x_handbuecher")
+    out = plugin.enrich_metadata(meta, "Text", {"abteilung": "Wartung"})
+    assert out.collection == "kunde_x_handbuecher"
+    assert out.extra == {"abteilung": "Wartung"}

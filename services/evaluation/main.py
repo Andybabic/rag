@@ -1,9 +1,11 @@
+import logging
 import os
 
 from contextlib import asynccontextmanager
 
 from config import settings
 from core.database import close_pool, get_pool
+from core.jobs import requeue_stale_jobs, schema_ready, start_worker, stop_worker
 from core.reranker import preload_model as preload_reranker
 from core.seed import seed_use_cases
 from core.use_cases import refresh_use_cases
@@ -11,6 +13,7 @@ from fastapi import FastAPI, Request
 from models import HealthResponse
 from router.admin import router as admin_router
 from router.auth import router as auth_router
+from router.public import router as public_router
 from router.v1 import router as v1_router
 from shared.auth import ensure_bootstrap_admin
 from shared.errors import handle_error
@@ -39,7 +42,23 @@ async def lifespan(app: FastAPI):
     # doesn't block for minutes on a cold HF cache. Until it's ready, the
     # reranker falls back to hybrid-fusion ordering (still good quality).
     preload_reranker()
+    # Public-API jobs run in a background worker. Anything left "running" by a
+    # previous process is nothing's responsibility any more, so hand it back to
+    # the queue before the worker starts claiming.
+    #
+    # Gated on the schema: migrations are applied by hand here, so a new build
+    # can meet a database that predates api_jobs. Refusing to start over that
+    # would take the whole service down for a feature nobody is using yet.
+    if await schema_ready():
+        await requeue_stale_jobs()
+        start_worker()
+    else:
+        logging.getLogger(__name__).warning(
+            "Public API disabled: tables api_jobs/api_tokens are missing. "
+            "Run 'alembic upgrade head' in db/ and restart this service."
+        )
     yield
+    await stop_worker()
     await close_pool()
 
 
@@ -54,6 +73,7 @@ setup_phoenix(app, SERVICE_NAME)
 app.include_router(v1_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
+app.include_router(public_router)
 
 
 @app.exception_handler(Exception)

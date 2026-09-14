@@ -333,3 +333,23 @@ async def test_log_invalid_feedback(client):
     })
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_feedback"
+
+
+@pytest.mark.anyio
+async def test_ingest_log_delete_by_hash_returns_removed_rows(client):
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    pool = MagicMock()
+    pool.fetch = AsyncMock(return_value=[{
+        "file_name": "11221.7199 (Chiron 243) – Einstellblatt 1.pdf",
+        "file_hash": "abc", "stored_path": None, "use_case": "gw_stpoelten",
+    }])
+    with patch("router.v1.get_pool", new=AsyncMock(return_value=pool)):
+        resp = await client.post("/v1/ingest-log/delete", json={"file_hashes": ["abc", "def"]})
+    assert resp.status_code == 200
+    [doc] = resp.json()["documents"]
+    assert doc == {
+        "file_name": "11221.7199 (Chiron 243) – Einstellblatt 1.pdf",
+        "file_hash": "abc", "stored_path": "", "use_case": "gw_stpoelten",
+    }
+    assert pool.fetch.await_args.args[1] == ["abc", "def"]

@@ -94,7 +94,8 @@ async def test_clean_csv(client):
 async def test_clean_unsupported_format(client):
     resp = await client.post(
         "/v1/clean",
-        files={"file": ("image.png", b"fake", "image/png")},
+        # Photos are a supported format now (ImageHandler) – use a real unknown.
+        files={"file": ("drawing.dwg", b"fake", "application/octet-stream")},
     )
     assert resp.status_code == 400
     body = resp.json()
@@ -249,3 +250,34 @@ async def test_batch_pii_removal(client):
     body = resp.json()
     assert "a@b.at" not in body["results"][0]["markdown"]
     assert "[EMAIL_REMOVED]" in body["results"][0]["markdown"]
+
+
+@pytest.mark.anyio
+async def test_clean_photo_is_stored_and_anchored(client, tmp_path, monkeypatch):
+    """A photo goes through the same image pipeline as a picture in a PDF."""
+    monkeypatch.setattr("config.settings.FILE_STORAGE_DIR", str(tmp_path))
+    scheduled = []
+
+    async def fake_job(file_hash, use_case_dir, use_case, items):
+        scheduled.extend(items)
+
+    monkeypatch.setattr("router.v1.run_alt_text_job", fake_job)
+    png = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 3), False).tobytes("png")
+
+    resp = await client.post(
+        "/v1/clean",
+        files={"file": ("11221.7199 (Chiron 243) – Rohteil.png", png, "image/png")},
+        data={"config": json.dumps({"use_case": "gw_stpoelten"})},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["metadata"]["doc_type"] == "image"
+    assert body["image_count"] == 1
+    # Anchored behind the page marker so the chunker binds it to page 1.
+    assert "<!-- image id:" in body["markdown"]
+    assert body["markdown"].index("<!-- Page 1 -->") < body["markdown"].index("<!-- image id:")
+    [image] = body["images"]
+    assert image["url"].startswith("/api/images/gw_stpoelten/")
+    # The background description job gets the file name as context.
+    await __import__("asyncio").sleep(0)
+    assert scheduled and "Rohteil" in scheduled[0]["text_before"]

@@ -114,10 +114,13 @@
 			error = `Ungültige ID "${it.id}" (erlaubt: a–z, 0–9, _ ; Beginn mit Buchstabe).`;
 			return;
 		}
-		if (!it.slug || !it.label || !it.default_collection) {
-			error = 'slug, label und default_collection sind Pflichtfelder.';
+		if (!it.slug || !it.label) {
+			error = 'slug und label sind Pflichtfelder.';
 			return;
 		}
+		// Without prefixes the use case searches "<id>_…" – a default collection
+		// named like that is always searchable, so it is the safe default.
+		if (!it.default_collection.trim()) it.default_collection = `${it.id}_default`;
 		it.saving = true;
 		try {
 			const resp = await fetch(`/api/admin/use-cases/${encodeURIComponent(it.id)}`, {
@@ -232,6 +235,7 @@
 							<input
 								value={(it as any)[key]}
 								oninput={(e) => ((it as any)[key] = e.currentTarget.value)}
+								placeholder={key === 'default_collection' ? `${it.id || '<id>'}_default` : ''}
 								class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
 							/>
 						</label>
@@ -242,8 +246,17 @@
 					</label>
 					<label class="block">
 						<span class="mb-1 block text-xs text-gray-500">Collection-Prefixes (Komma)</span>
-						<input bind:value={it.prefixesStr} class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+						<input
+							bind:value={it.prefixesStr}
+							placeholder={`leer = ${it.id || '<id>'}_`}
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+						/>
 					</label>
+					<p class="text-[11px] text-gray-400 sm:col-span-2">
+						Hochgeladene Dokumente landen in der Default-Collection. Der Agent durchsucht nur
+						Collections, die mit einem der Prefixes beginnen – die Default-Collection muss also
+						dazu passen. Leer lassen ergibt „{it.id || '<id>'}_default" mit Prefix „{it.id || '<id>'}_".
+					</p>
 					<label class="block sm:col-span-2">
 						<span class="mb-1 block text-xs text-gray-500">Agent-Actions (Komma)</span>
 						<input bind:value={it.actionsStr} class="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs" />

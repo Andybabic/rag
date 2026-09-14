@@ -208,7 +208,8 @@ async def test_pdf_handler_pymupdf_idempotent():
 def test_supported_formats():
     fmts = supported_formats()
     assert fmts == [
-        ".cnc", ".csv", ".docx", ".md", ".mpf", ".nc", ".pdf", ".spf", ".txt"
+        ".cnc", ".csv", ".docx", ".jpeg", ".jpg", ".md", ".mpf", ".nc", ".pdf",
+        ".png", ".spf", ".txt",
     ]
 
 
@@ -264,3 +265,30 @@ async def test_unsupported_format_lists_supported():
 
     with pytest.raises(ValueError, match=r"\.pdf"):
         await clean(b"data", "file.xyz")
+
+
+# ── ImageHandler ─────────────────────────────────────────────
+
+
+def _png_bytes() -> bytes:
+    return fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 3), False).tobytes("png")
+
+
+@pytest.mark.anyio
+async def test_image_handler_turns_photo_into_one_page_document():
+    from core.handlers import ImageHandler
+
+    result = await ImageHandler().parse(_png_bytes(), "11221.7199 (Chiron 243) – 4BEAR_1.png")
+    assert result.metadata["format"] == "image"
+    assert result.metadata["total_pages"] == 1
+    # The page marker is where the clean route anchors the picture.
+    assert "<!-- Page 1 -->" in result.text
+    [image] = result.images
+    assert image["page"] == 1
+    assert image["base64"]
+    # The file name is the vision model's only context – it names product and step.
+    assert "11221.7199 (Chiron 243) – 4BEAR_1" in image["text_before"]
+
+
+def test_photos_are_supported_formats():
+    assert {".jpg", ".jpeg", ".png"} <= set(supported_formats())

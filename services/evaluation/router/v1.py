@@ -26,6 +26,7 @@ from models import (
     CitationsRequest,
     EvaluateRequest,
     FeedbackRequest,
+    IngestLogDeleteRequest,
     RerankRequest,
 )
 from shared.usecase_config import list_use_cases
@@ -116,7 +117,7 @@ async def agent_query(body: AgentQueryRequest, request: Request):
     try:
         system_prompt = await get_system_prompt(body.use_case, body.role)
         available_actions = get_agent_actions(body.use_case)
-        default_collection = get_default_collection(body.use_case)
+        get_default_collection(body.use_case)  # raises for unknown use cases
     except ValueError as exc:
         return JSONResponse(
             status_code=400,
@@ -128,7 +129,9 @@ async def agent_query(body: AgentQueryRequest, request: Request):
             },
         )
 
-    collection = body.config.collection or default_collection
+    # Only an explicit choice narrows the search; otherwise SEARCH covers every
+    # collection of the use case (see action_search).
+    collection = body.config.collection
 
     history = [{"role": m.role, "content": m.content} for m in body.history]
 
@@ -217,7 +220,7 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
     try:
         system_prompt = await get_system_prompt(body.use_case, body.role)
         available_actions = get_agent_actions(body.use_case)
-        default_collection = get_default_collection(body.use_case)
+        get_default_collection(body.use_case)  # raises for unknown use cases
     except ValueError as exc:
         return JSONResponse(
             status_code=400,
@@ -233,7 +236,8 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
         agent_span = None
         agent_span_id = None
 
-    collection = body.config.collection or default_collection
+    # Explicit choice only – see agent_query.
+    collection = body.config.collection
     history = [{"role": m.role, "content": m.content} for m in body.history]
     queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
@@ -359,6 +363,9 @@ async def use_case_collections(use_case_id: str, request: Request):
     return {
         "use_case": use_case_id,
         "default_collection": get_default_collection(use_case_id),
+        # The frontend places uploads that bypass the structuring service
+        # (tables) by these – only collections inside them are ever searched.
+        "prefixes": prefixes,
         "collections": available,
         "request_id": request_id,
     }
@@ -392,6 +399,38 @@ async def log_ingestion(body: dict, request: Request):
             content={"error": "db_error", "detail": str(exc), "request_id": request_id},
         )
     return {"status": "ok", "request_id": request_id}
+
+
+@router.post("/ingest-log/delete")
+async def delete_ingestion_logs(body: IngestLogDeleteRequest, request: Request):
+    """Remove ingestion_log rows by file_hash and return what was removed.
+
+    Replacing a GW product drops its old documents and photos. Their rows must
+    go too, or the document list keeps offering files whose vectors are gone;
+    the removed rows come back so the caller can delete the stored originals.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    if not body.file_hashes:
+        return {"status": "ok", "documents": [], "request_id": request_id}
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """DELETE FROM ingestion_log WHERE file_hash = ANY($1::text[])
+           RETURNING file_name, file_hash, stored_path, use_case""",
+        body.file_hashes,
+    )
+    return {
+        "status": "ok",
+        "documents": [
+            {
+                "file_name": row["file_name"],
+                "file_hash": row["file_hash"],
+                "stored_path": row["stored_path"] or "",
+                "use_case": row["use_case"],
+            }
+            for row in rows
+        ],
+        "request_id": request_id,
+    }
 
 
 @router.post("/log")
