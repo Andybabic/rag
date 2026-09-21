@@ -142,12 +142,54 @@ services:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
+      SANDBOX_SERVICE_URL: http://sandbox:8007
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
     env_file: .env
     depends_on:
       postgres:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+
+  # ── Skill-Plugin-Layer: Sandbox ──────────────────────────
+  #
+  # Der einzige Container mit Zugriff auf den Docker-Socket. Er startet pro
+  # Funktionsaufruf einen kurzlebigen Runner-Container (`docker run --rm`) und
+  # betreibt den Egress-Proxy, ueber den ein Runner mit Domain-Allowlist nach
+  # aussen kommt.
+  #
+  # Der Socket ist root-aequivalent auf dem Host. Deshalb liegt er hier und
+  # NICHT im evaluation-Service, der LLM-Ausgaben verarbeitet. Der Service ist
+  # nicht nach aussen gemappt; einziger Client ist evaluation, authentifiziert
+  # ueber SANDBOX_TOKEN.
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      SKILL_RUNNER_IMAGE: ${SKILL_RUNNER_IMAGE:-kermit-skill-runner:latest}
+      SKILL_EGRESS_NETWORK: ${SKILL_EGRESS_NETWORK:-kermit_skill_egress}
+      # Der Runner erreicht den Proxy unter diesem Namen im Egress-Netz.
+      SKILL_PROXY_HOST: ${SKILL_PROXY_HOST:-sandbox}
+      SKILL_PROXY_PORT: "8888"
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+    env_file: .env
+    networks:
+      - default
+      # `internal: true` — Runner-Container haengen NUR hier und haben damit
+      # keine Route ins Internet. Der Proxy ist ihr einziger erreichbarer Peer.
+      - skill_egress
+    ports:
+      - "8007:8007"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8007/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     build:
@@ -233,3 +275,11 @@ volumes:
   # Same name as in docker-compose.wrnlinien.yml so a machine that has run
   # either stack already holds the model.
   kermit_hf_cache:
+
+networks:
+  default:
+  # Internes Netz fuer Skill-Runner mit Domain-Allowlist. Ohne Route nach
+  # aussen: was nicht ueber den Egress-Proxy laeuft, kommt nicht raus.
+  skill_egress:
+    name: ${SKILL_EGRESS_NETWORK:-kermit_skill_egress}
+    internal: true

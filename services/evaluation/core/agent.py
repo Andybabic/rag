@@ -20,15 +20,19 @@ from core.actions import (
     action_refine_query,
     action_search,
     action_search_cnc,
+    action_search_tool,
+    action_skill,
 )
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import TOKENS_AGENT_STEP, call_llm
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
+from core.skill_functions import format_functions_block
 from core.use_cases import get_react_suffix
 from shared.llm.pipeline import get_last_llm_timing
 from shared.llm.thinking import strip_thinking
-from shared.usecase_config import list_skills
+from shared.skills import find_calls
+from shared.usecase_config import list_skill_functions, list_skills
 
 _ACTION_NAME_RE = re.compile(r"ACTION:\s*(\w+)\(", re.DOTALL)
 
@@ -158,21 +162,52 @@ async def _build_system_prompt(
     Pulls the global ReAct suffix and the enabled per-usecase skills from the
     resolver so admins can edit both via the UI; falls back gracefully.
     """
+    # SKILL is available exactly when the use case has callable functions.
+    # Tying it to the per-use-case action list instead would mean every new
+    # skill needs a second, unrelated switch flipped before the agent can
+    # reach it — and a tool the agent cannot reach is a tool that does not
+    # exist, whatever the skill page shows.
+    functions = []
+    try:
+        functions = await list_skill_functions(use_case)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load skill functions for %s: %s", use_case, exc)
+
+    effective_actions = list(available_actions)
+    if functions and "SKILL" not in effective_actions:
+        effective_actions.insert(
+            max(0, len(effective_actions) - 1), "SKILL"  # keep FINAL_ANSWER last
+        )
+
     action_lines = []
-    for action in available_actions:
+    for action in effective_actions:
         if action in ACTION_SIGNATURES:
             action_lines.append(f"- {ACTION_SIGNATURES[action]}")
 
     suffix = await get_react_suffix()
     skills = await list_skills(use_case, only_enabled=True)
     skills_block = _format_skills_block(skills)
-    return (
+
+    # Executable skill functions are advertised separately from the rule text:
+    # a rule changes how the agent reasons, a function is something it may
+    # call. Mixing them into one section made models treat the signatures as
+    # prose to paraphrase rather than as a literal syntax to reproduce.
+    functions_block = format_functions_block(functions)
+
+    # The functions block goes *after* the ReAct suffix, not before it. The
+    # suffix ends with the hallucination rules, and what follows them is what
+    # the model reads last — with the block in front, "ABSOLUTES VERBOT" was
+    # the final word and the model never emitted a call.
+    prompt = (
         f"{use_case_prompt}\n\n"
         f"Verfügbare Actions (immer als JSON-Argument):\n"
         f"{chr(10).join(action_lines)}\n\n"
         f"{skills_block}"
         f"{suffix}"
     )
+    if functions_block:
+        prompt = f"{prompt}\n\n{functions_block}"
+    return prompt
 
 
 def _parse_action(llm_response: str) -> tuple[str, str, dict]:
@@ -214,6 +249,9 @@ async def _execute_action(
     use_case: str,
     collection: str = "",
     filters: dict | None = None,
+    on_event: StepCallback = None,
+    request_id: str | None = None,
+    username: str | None = None,
 ) -> str | dict:
     """Execute an action and return the observation string (or dict with chunks).
 
@@ -244,6 +282,7 @@ async def _execute_action(
                 action_name, action_args,
                 session_id=session_id, use_case=use_case,
                 collection=collection, filters=filters,
+                on_event=on_event, request_id=request_id, username=username,
             )
             if isinstance(result, dict):
                 span.set_attribute(SpanAttributes.OUTPUT_VALUE, result.get("observation", str(result)))
@@ -263,12 +302,17 @@ async def _execute_action_inner(
     use_case: str,
     collection: str = "",
     filters: dict | None = None,
+    on_event: StepCallback = None,
+    request_id: str | None = None,
+    username: str | None = None,
 ) -> str | dict:
     """Execute an action and return the observation string (or dict with chunks)."""
     if action_name == "SEARCH":
         return await action_search(action_args, use_case=use_case)
     if action_name == "SEARCH_CNC":
         return await action_search_cnc(action_args, use_case=use_case)
+    if action_name == "SEARCH_TOOL":
+        return await action_search_tool(action_args, use_case=use_case)
     if action_name == "REFINE_QUERY":
         return await action_refine_query(
             action_args, use_case=use_case, collection=collection, filters=filters
@@ -279,6 +323,11 @@ async def _execute_action_inner(
         return await action_recall_memory(action_args, use_case)
     if action_name == "LOOKUP_SOURCES":
         return await action_lookup_sources(action_args, use_case)
+    if action_name == "SKILL":
+        return await action_skill(
+            action_args, use_case=use_case, session_id=session_id,
+            on_event=on_event, request_id=request_id, username=username,
+        )
     if action_name == "FINAL_ANSWER":
         return action_args.get("answer", "")
     return f"Unbekannte Action: {action_name}"
@@ -391,6 +440,8 @@ async def run_agent(
     images: list[str] | None = None,
     image_context: str = "",
     persist_memory: bool = True,
+    request_id: str | None = None,
+    username: str | None = None,
     on_event: StepCallback = None,
 ) -> dict:
     """Run the ReAct agent loop.
@@ -404,6 +455,16 @@ async def run_agent(
       - {"type": "final", "answer": ...}
     """
     full_system = await _build_system_prompt(use_case, system_prompt, available_actions)
+
+    # Which skills this use case offers, so the guards below can tell a genuine
+    # skill call from a model answering out of thin air. Read once per run; the
+    # resolver caches it anyway.
+    try:
+        skill_names = {f.skill_name.lower() for f in await list_skill_functions(use_case)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load skill names for %s: %s", use_case, exc)
+        skill_names = set()
+
     if on_event:
         await on_event({"type": "started", "max_steps": max_steps})
 
@@ -455,6 +516,10 @@ async def run_agent(
     sufficient = False
 
     has_searched = False
+    # A SKILL call is real work, not an answer pulled from nowhere. Without
+    # this the "search first" guard overrules a live-data question forever:
+    # the documents never hold the answer, so searching again changes nothing.
+    has_called_skill = False
     broadened_retry_done = False
     last_search_query = enriched_query
 
@@ -490,12 +555,31 @@ async def run_agent(
         _llm_ms = round((time.perf_counter() - _step_start) * 1000)
         thought, action_name, action_args = _parse_action(llm_response)
 
+        # An answer that calls a skill function is not an answer pulled from
+        # thin air — it is a request for live data, and both guards below exist
+        # to stop exactly the opposite. Without this the agent overrules the
+        # model twice ("SEARCH erzwungen", then "breitere Suche erzwungen") on
+        # a question no document can answer, and the model gives up on the
+        # third step. Observed verbatim: the model wrote "Die Skill-Funktion
+        # `wetter.aktuell` ist hier die passende Quelle" and was overruled.
+        answer_calls_skill = bool(
+            action_name == "FINAL_ANSWER"
+            and skill_names
+            and find_calls(action_args.get("answer", "") or "", known_skills=skill_names)
+        )
+
         # Hard guard: small models (e.g. qwen3:8b) sometimes skip SEARCH on
         # short follow-up questions and go straight to FINAL_ANSWER from the
         # conversation history. Force a SEARCH first so RAG actually runs.
         # Skipped when an image was uploaded — there RAG is optional and the
         # user may just be asking about the image itself.
-        if not has_searched and not has_image and action_name in ("FINAL_ANSWER", "CLARIFY"):
+        if (
+            not has_searched
+            and not has_image
+            and not answer_calls_skill
+            and not has_called_skill
+            and action_name in ("FINAL_ANSWER", "CLARIFY")
+        ):
             action_name = "SEARCH"
             action_args = {"query": enriched_query}
             thought = (
@@ -503,13 +587,26 @@ async def run_agent(
                 + "[Auto-Korrektur: SEARCH erzwungen, bevor eine Antwort gegeben wird.]"
             )
 
-        # Second guard: don't accept a "not in the documents" answer on the
-        # first try. A narrowed query often misses content that a broader
-        # phrasing would surface. Force exactly one broadened REFINE_QUERY.
+        # Second guard: an empty-handed search must not become a "not in the
+        # documents" answer on the first try. A narrowed query often misses
+        # content that a broader phrasing would surface, so force exactly one
+        # broadened REFINE_QUERY.
+        #
+        # Decisive is what retrieval returned, NOT how the answer is worded.
+        # Hung on the wording alone, this fired on grounded answers: a
+        # specialist that had found the Messerkopf including its tool number
+        # closed with "dazu enthalten die Dokumente keine Information *zur
+        # Verfügbarkeit*" — a correct, cited statement. The forced retry then
+        # repeated the same search for the same hits (measured: 10.4 s).
+        # With chunks in hand the model has something to answer from, and
+        # "the documents don't cover aspect X" is a legitimate answer.
         elif (
             action_name == "FINAL_ANSWER"
             and not broadened_retry_done
             and not has_image
+            and not answer_calls_skill
+            and not has_called_skill
+            and not chunks_for_citations
             and _is_no_info_answer(action_args.get("answer", ""))
         ):
             broadened_retry_done = True
@@ -533,6 +630,9 @@ async def run_agent(
                 "args": action_args,
             })
 
+        if action_name == "SKILL":
+            has_called_skill = True
+
         # Force collection/filters for SEARCH – LLM must not override these
         if action_name == "SEARCH":
             action_args["collection"] = collection
@@ -544,7 +644,7 @@ async def run_agent(
         elif action_name == "REFINE_QUERY":
             has_searched = True
             last_search_query = action_args.get("query") or last_search_query
-        elif action_name == "SEARCH_CNC":
+        elif action_name in ("SEARCH_CNC", "SEARCH_TOOL"):
             # SEARCH_CNC ist eine vollwertige Retrieval-Action. Ohne dies
             # erzwingt der Guardrail unten ein generisches SEARCH und holt
             # damit irrelevante Treffer (Bohrer/Anbohrer) zurück, die eine
@@ -560,6 +660,11 @@ async def run_agent(
             use_case=use_case,
             collection=collection,
             filters=filters,
+            # SKILL may need to ask the user before it runs, so the event
+            # channel has to reach all the way down here.
+            on_event=on_event,
+            request_id=request_id,
+            username=username,
         )
 
         # Handle structured results (SEARCH / REFINE_QUERY return dict with chunks)
@@ -618,7 +723,16 @@ async def run_agent(
                 # sufficient RAG result. This propagates to the manager,
                 # synthesizer, compliance and the UI/audit instead of looking
                 # like a confident answer.
-                sufficient = not _is_no_info_answer(answer)
+                #
+                # A skill call is the exception: the answer legitimately says
+                # the documents hold nothing *and* fetches the value elsewhere.
+                # Marking that insufficient would have the manager discard a
+                # fragment that is about to carry the actual answer.
+                sufficient = (
+                    bool(answer_calls_skill)
+                    or has_called_skill
+                    or not _is_no_info_answer(answer)
+                )
             break
 
         if action_name == "CLARIFY":

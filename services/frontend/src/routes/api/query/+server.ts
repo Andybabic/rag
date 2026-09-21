@@ -2,12 +2,15 @@ import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
 import type { RequestHandler } from './$types';
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, locals }) => {
 	const body = await request.json();
 
 	const resp = await fetch(`${SERVICES.evaluation}/v1/agent/query`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: {
+			'Content-Type': 'application/json',
+			...(locals.user?.username ? { 'X-User': locals.user.username } : {})
+		},
 		body: JSON.stringify(body)
 	});
 

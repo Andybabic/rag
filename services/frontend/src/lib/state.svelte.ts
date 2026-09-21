@@ -132,6 +132,8 @@ export interface AuditInfo {
 	merge_strategy?: string;
 	sufficient?: boolean;
 	searched_collections_count?: number;
+	skill_function_calls?: number;
+	skill_function_statuses?: string[];
 }
 
 export interface ImageRef {
@@ -139,6 +141,42 @@ export interface ImageRef {
 	page?: number | null;
 	alt_text?: string;
 	url?: string;
+}
+
+/** One executable skill call recognised in an answer, and how it ended. */
+export interface SkillFunctionCall {
+	skill: string;
+	function: string;
+	args: unknown[];
+	/** ok | error | denied | timeout | unresolved */
+	status: string;
+	result_preview?: string;
+	detail?: string;
+	duration_ms?: number;
+	permission_required?: boolean;
+}
+
+/**
+ * A live "may this function run?" prompt, shown inside the streaming message.
+ *
+ * The stream that raised it is still open and blocked, so this is not a record
+ * of something that happened — it is a question the user has to answer before
+ * the answer can finish.
+ */
+export interface PermissionPrompt {
+	call_id: string;
+	skill: string;
+	function: string;
+	signature?: string;
+	description?: string;
+	args: unknown[];
+	allowed_domains?: string[];
+	timeout_s?: number;
+	/** undefined while pending; set once the user (or the timeout) decides. */
+	approved?: boolean;
+	/** True between the click and the server's acknowledgement. */
+	submitting?: boolean;
+	error?: string;
 }
 
 export interface Message {
@@ -171,6 +209,10 @@ export interface Message {
 	 * those that match a persisted image are forwarded by the server, so
 	 * everything here is renderable. */
 	imagesUsed?: ImageRef[];
+	/** Skill functions the answer called, with their outcome. */
+	skillFunctionCalls?: SkillFunctionCall[];
+	/** Consent prompts raised while this answer was streaming. */
+	permissionPrompts?: PermissionPrompt[];
 }
 
 export interface SubCollection {
@@ -208,7 +250,7 @@ export interface ReleaseState {
 	status: ReleaseStatus;
 	snapshot: ReleaseSnapshot | null;
 	importedAt: string | null;
-	importResult: { chunks?: number; storedPath?: string } | null;
+	importResult: { chunks?: number; storedPath?: string; replacedRows?: number } | null;
 	error: string | null;
 }
 

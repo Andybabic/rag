@@ -1,9 +1,11 @@
 {
   "SEARCH": "Semantische Suche in der Vektordatenbank. Embedding der Query, Suche in den zugewiesenen Collections, Reranking.",
-  "SEARCH_CNC": "Werkzeugempfehlung aus historischen CNC-Programmen. Sucht zu einem Bearbeitungsschritt (operation) und optional Material die tatsächlich verwendeten Werkzeuge, aggregiert sie und zählt, in wie vielen Bauteilen jedes Werkzeug eingesetzt wurde. missing_tool blendet ein ausgefallenes Werkzeug aus (Alternativsuche).",
+  "SEARCH_CNC": "Werkzeugempfehlung aus historischen CNC-Programmen. Sucht zu einem Bearbeitungsschritt (operation) und optional Material die tatsächlich verwendeten Werkzeuge, aggregiert sie und zählt, in wie vielen Bauteilen jedes Werkzeug eingesetzt wurde. Nennt die Frage eine Bauteilnummer (Format 11221.5277), gehört sie IMMER in product_id und NIEMALS in operation – nur so bleiben die Treffer auf dieses Bauteil beschränkt. Nennt die Frage eine Werkzeugnummer aus dem Programm („T5\", „T12\"), gehört sie in tool_id – damit findest du genau dieses Werkzeug samt Drehzahl und Vorschub. missing_tool blendet ein ausgefallenes Werkzeug aus (Alternativsuche).",
   "REFINE_QUERY": "Formuliere die Suchanfrage um – mit Synonymen, Oberbegriffen oder anderer Granularität – und führe eine neue Suche durch. Nur sinnvoll, wenn die vorherige SEARCH mager war.",
   "CLARIFY": "Rückfrage an den Benutzer stellen, wenn die Anfrage unklar oder mehrdeutig ist.",
   "RECALL_MEMORY": "Agent-Gedächtnis abrufen – gespeicherte Erkenntnisse aus früheren Anfragen.",
   "LOOKUP_SOURCES": "Verfügbare Quellen/Collections für den aktuellen Use Case auflisten.",
-  "FINAL_ANSWER": "Endgültige Antwort formulieren, basierend auf den gesammelten Suchergebnissen."
+  "FINAL_ANSWER": "Endgültige Antwort formulieren, basierend auf den gesammelten Suchergebnissen.",
+  "SKILL": "Ruft eine Funktion eines Skills auf und liefert deren Ergebnis als OBSERVATION zurück. Der richtige Weg für alles, was nicht in Dokumenten stehen kann: Live-Daten, Messwerte, externe Dienste. Welche Funktionen es gibt, steht im Abschnitt „Ausführbare Skill-Funktionen“. Rufe die Funktion einfach auf — eine eventuell nötige Freigabe holt die Plattform selbst beim Nutzer ein. Frage NIEMALS per CLARIFY um Erlaubnis, eine Funktion auszuführen; das kostet eine ganze Runde und beantwortet nichts.",
+  "SEARCH_TOOL": "Schlägt ein Werkzeug in der importierten Werkzeugliste nach: Artikelnummer, Lagerbestand, Mindest-/Höchstbestand, Bestellmenge und Hauptlieferant. Beantwortet „ist eines da\" und „wer liefert nach\" – nicht, wo es liegt (das steht im Einstellblatt) und nicht, womit gefertigt wurde (das sagt SEARCH_CNC). Die Bestände sind der Stand des letzten Imports, keine Live-Abfrage."
 }

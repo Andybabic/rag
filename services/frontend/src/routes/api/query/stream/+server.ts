@@ -1,12 +1,18 @@
 import { SERVICES } from '$lib/server/services';
 import type { RequestHandler } from './$types';
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, locals }) => {
 	const body = await request.json();
 
 	const upstream = await fetch(`${SERVICES.evaluation}/v1/agent/query/stream`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: {
+			'Content-Type': 'application/json',
+			// The evaluation service has no session of its own. Skill-function
+			// executions are audited per user, so the logged-in name travels
+			// with the request; hooks.server.ts has already established it.
+			...(locals.user?.username ? { 'X-User': locals.user.username } : {})
+		},
 		body: JSON.stringify(body)
 	});
 

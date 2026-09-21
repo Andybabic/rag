@@ -12,6 +12,7 @@ services/
   embedding/     – Vektor-Erzeugung via Ollama
   vectordb/      – Qdrant-Anbindung & Ähnlichkeitssuche
   evaluation/    – ReAct-Agent, Reranking, Citation Mapping
+  sandbox/       – Isolierte Ausführung von Skill-Funktionen (Plugin-Layer)
   frontend/      – Chat-UI mit Use-Case-Auswahl
 docs/            – Architektur- und API-Dokumentation
 ```
@@ -180,6 +181,38 @@ Die Retrieval-Pipeline nutzt:
 - **Cross-Encoder Reranker** – `BAAI/bge-reranker-v2-m3` scored jedes
   (Query, Chunk)-Paar gemeinsam; per `RERANKER_ENABLED=false` abschaltbar
 - **Use-Case-Isolation** – Collection-Prefixes verhindern Cross-Use-Case-Zugriff
+
+## Skills mit ausführbaren Funktionen
+
+Ein Skill ist zunächst Text, der an den Agent-System-Prompt gehängt wird. Er
+kann zusätzlich **eine** Code-Datei mitbringen (`.py` **oder** `.js`), deren
+Funktionen das LLM als `skillname.funktion(...)` in seiner Antwort aufruft. Ein
+Parser erkennt diese Aufrufe, die Ausführung läuft in einem kurzlebigen,
+isolierten Docker-Container, und der Aufruf wird im Antworttext durch das
+Ergebnis ersetzt.
+
+| | |
+|---|---|
+| Verwaltung | **Verwaltung → Skills → Bearbeiten → Ausführbare Funktionen** (nur Admin) |
+| Freigabe | Funktionen mit `# ask for permission` fragen vor der Ausführung im Chat nach |
+| Netzzugriff | Nur Hosts aus `# allow-network:`; ohne Angabe läuft der Container mit `--network none` |
+| Variablen | Pro Skill ein JSON-Objekt (API-Keys etc.) — schreibbar nur für Admins, lesbar für niemanden |
+| Beispiel | `wetter` (Open-Meteo), geseedet aus `services/evaluation/config/skills/` |
+| Übersicht | Die Skill-Liste zeigt je Skill Sprache, Funktionen, Freigabepflicht, erreichbare Hosts und Variablenzahl |
+| Export/Import | JSON pro Use Case — mit Code, **ohne** Variablenwerte |
+
+**Erstmalige Einrichtung auf einer bestehenden Datenbank:** `make migrate`.
+Der Plugin-Layer braucht Migration 0010. Datenbanken, die aus `db/init.sql`
+entstanden sind, tragen keine Alembic-Marke — `make migrate` erkennt ihren
+Stand, stempelt ihn und migriert von dort. Ohne die Migration bleibt der
+Plugin-Layer inaktiv; bestehende Skills funktionieren unverändert weiter.
+
+Das Runner-Image baut `make skill-runner` (in `make up` und `make dev`
+enthalten). Master-Schalter und Limits stehen in `.env` unter
+„Skill-Plugin-Layer"; **`SANDBOX_TOKEN` in Produktion setzen**.
+
+- Skill schreiben: [`docs/skill_functions_developer.md`](docs/skill_functions_developer.md)
+- Wie es intern funktioniert: [`docs/skill_functions_architecture.md`](docs/skill_functions_architecture.md)
 
 ## Pipeline per API nutzen
 

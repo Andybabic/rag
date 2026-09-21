@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { sendFeedback } from '$lib/api';
 	import type { Message, TimingPhase } from '$lib/state.svelte';
+	import SkillPermissionPrompt from './SkillPermissionPrompt.svelte';
 	import { marked } from 'marked';
 
 	// `readonly` renders the message exactly like the live chat but without the
@@ -403,6 +404,15 @@
 				</div>
 			{/if}
 
+			<!-- Consent prompts. Above the answer text on purpose: while one is
+			     pending the answer below it is unfinished, and the pipeline is
+			     waiting on exactly this. -->
+			{#if message.permissionPrompts && message.permissionPrompts.length > 0}
+				{#each message.permissionPrompts as prompt (prompt.call_id)}
+					<SkillPermissionPrompt {prompt} />
+				{/each}
+			{/if}
+
 			<!-- Answer text (rendered as markdown) -->
 			{#if message.text}
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -515,6 +525,44 @@
 						{/each}
 					</div>
 					{/if}
+				</div>
+			{/if}
+
+			{#if !message.streaming && message.skillFunctionCalls && message.skillFunctionCalls.length > 0}
+				<div class="mt-3 border-t border-gray-100 pt-2.5">
+					<p class="mb-1.5 text-[12px] font-medium uppercase tracking-wide text-gray-400">
+						Ausgeführte Skill-Funktionen
+					</p>
+					<ul class="space-y-1">
+						{#each message.skillFunctionCalls as call}
+							<li class="flex items-start gap-2 text-[13px]">
+								<span aria-hidden="true">
+									{call.status === 'ok'
+										? '✅'
+										: call.status === 'denied'
+											? '🚫'
+											: call.status === 'unresolved'
+												? '❓'
+												: '⚠️'}
+								</span>
+								<span class="min-w-0 flex-1 text-gray-700">
+									<code class="font-mono text-[12.5px] text-gray-900">
+										{call.skill}.{call.function}({(call.args ?? [])
+											.map((a) => (typeof a === 'string' ? `"${a}"` : String(a)))
+											.join(', ')})
+									</code>
+									{#if call.status === 'ok'}
+										<span class="text-gray-500"> → {call.result_preview}</span>
+									{:else}
+										<span class="text-gray-500"> — {call.detail || call.status}</span>
+									{/if}
+									{#if call.duration_ms}
+										<span class="text-gray-400"> ({call.duration_ms} ms)</span>
+									{/if}
+								</span>
+							</li>
+						{/each}
+					</ul>
 				</div>
 			{/if}
 

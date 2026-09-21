@@ -8,6 +8,7 @@ from core.database import close_pool, get_pool
 from core.jobs import requeue_stale_jobs, schema_ready, start_worker, stop_worker
 from core.reranker import preload_model as preload_reranker
 from core.seed import seed_use_cases
+from core.skill_seed import seed_skills
 from core.use_cases import refresh_use_cases
 from fastapi import FastAPI, Request
 from models import HealthResponse
@@ -38,6 +39,10 @@ async def lifespan(app: FastAPI):
     # (meta + collection prefixes) from the DB into memory.
     await seed_use_cases()
     await refresh_use_cases()
+    # Reference skills from config/skills/ — create-if-missing, and back-fill
+    # the code file for a skill that predates the plugin layer. Runs after the
+    # use-case registry because a skill is scoped to a use case.
+    await seed_skills()
     # Start the cross-encoder download in the background so the first query
     # doesn't block for minutes on a cold HF cache. Until it's ready, the
     # reranker falls back to hybrid-fusion ordering (still good quality).

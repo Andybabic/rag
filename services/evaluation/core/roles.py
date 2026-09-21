@@ -133,6 +133,13 @@ def filter_actions(role: RoleConfig, available_actions: list[str]) -> list[str]:
         for a in available_actions:
             if a.startswith("SEARCH") and a not in filtered:
                 filtered.append(a)
+    # SKILL is added to the use case's actions only when it actually has
+    # callable functions, and it answers exactly the questions no document
+    # can. Letting a role allowlist strip it would mean a sub-task created
+    # *for* a live-data question arrives without the one tool that can serve
+    # it — which is how the weather half of a question goes unanswered.
+    if "SKILL" in enabled and "SKILL" not in filtered:
+        filtered.append("SKILL")
     if "FINAL_ANSWER" not in filtered:
         filtered.append("FINAL_ANSWER")
     return filtered

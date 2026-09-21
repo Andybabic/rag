@@ -26,10 +26,13 @@
 		type PickedFile
 	} from '$lib/folder-files';
 	import { unionByFile } from '$lib/gw-location';
+	import { groupPdfPages, pdfGroupCount } from '$lib/pdf-groups';
+	import { fileForPdfGroup } from '$lib/pdf-merge';
 
 	let { onDone }: { onDone?: () => void } = $props();
 
-	type RowStatus = 'wartet' | 'läuft' | 'ok' | 'fehler';
+	type RowStatus = 'wartet' | 'läuft' | 'ok' | 'fehler' | 'abgelehnt';
+	type RejectReason = '' | 'duplikat' | 'person' | 'sonstiges';
 	interface Row {
 		product: GwPlanProduct;
 		machine: string | null;
@@ -42,7 +45,21 @@
 		docsFailed: number;
 		msg: string;
 		notes: string[];
+		rejectReason: RejectReason;
+		rejectNote: string;
 	}
+
+	const REJECT_OPTIONS: Array<{ value: RejectReason; label: string }> = [
+		{ value: '', label: '—' },
+		{ value: 'duplikat', label: 'Duplikat' },
+		{ value: 'person', label: 'Person anschreiben' },
+		{ value: 'sonstiges', label: 'Sonstiges' }
+	];
+	const REJECT_LABEL: Record<Exclude<RejectReason, ''>, string> = {
+		duplikat: 'Duplikat',
+		person: 'Person anschreiben',
+		sonstiges: 'Sonstiges'
+	};
 
 	const SKIP_LABELS: Record<string, string> = {
 		vorlage: 'Vorlagen',
@@ -57,6 +74,7 @@
 	let stopRequested = $state(false);
 	let error = $state('');
 	let includeDocs = $state(true);
+	let view: 'alle' | 'offen' | 'abgelehnt' = $state('alle');
 
 	let picked = new Map<string, File>();
 	let plan = $state<GwPlan | null>(null);
@@ -64,21 +82,36 @@
 
 	const totals = $derived.by(() => {
 		const products = plan?.products ?? [];
+		const pdfPaths = products.flatMap((p) => p.einstellblaetter);
+		const pdfs = pdfGroupCount(pdfPaths);
 		return {
 			products: products.length,
 			machines: new Set(products.map((p) => p.machine ?? '?')).size,
 			cnc: products.reduce((n, p) => n + p.cnc_candidates.length, 0),
-			pdfs: products.reduce((n, p) => n + p.einstellblaetter.length, 0),
+			pdfs: pdfs.documents,
+			pdfFiles: pdfs.files,
+			pdfMerged: pdfs.merged,
 			photos: products.reduce((n, p) => n + p.bilder.length, 0),
-			docs: products.reduce((n, p) => n + p.ignored_documents, 0)
+			docs: products.reduce((n, p) => n + (p.ignored_paths?.length ?? p.ignored_documents), 0)
 		};
 	});
-	const remaining = $derived(rows.filter((r) => r.status !== 'ok').length);
+	const remaining = $derived(
+		rows.filter((r) => r.status !== 'ok' && r.status !== 'abgelehnt').length
+	);
 	const finished = $derived(rows.filter((r) => r.status === 'ok' || r.status === 'fehler').length);
+	const uploaded = $derived(rows.filter((r) => r.status === 'ok').length);
+	const rejected = $derived(rows.filter((r) => r.status === 'abgelehnt'));
+	const visibleRows = $derived.by(() => {
+		if (view === 'offen') return rows.filter((r) => r.status !== 'ok' && r.status !== 'abgelehnt');
+		if (view === 'abgelehnt') return rejected;
+		return rows;
+	});
 
 	const rowKey = (p: GwPlanProduct) => `${p.product_id}|${p.machine ?? ''}`;
 	const needsChoice = (r: Row) => !!r.product.machine_choices?.length && !r.machine;
-	const docPaths = (r: Row) => [...r.product.einstellblaetter, ...r.product.bilder];
+	const photoPaths = (r: Row) => r.product.bilder;
+	const pdfGroups = (r: Row) => groupPdfPages(r.product.einstellblaetter);
+	const docItemCount = (r: Row) => pdfGroups(r).length + photoPaths(r).length;
 
 	function newRow(product: GwPlanProduct): Row {
 		return {
@@ -91,8 +124,62 @@
 			docsSent: [],
 			docsFailed: 0,
 			msg: '',
-			notes: []
+			notes: [],
+			rejectReason: '',
+			rejectNote: ''
 		};
+	}
+
+	function ignoredNames(p: GwPlanProduct): string[] {
+		return (p.ignored_paths ?? []).map((path) => path.split('/').pop() ?? path);
+	}
+
+	function rejectLabel(r: Row): string {
+		if (!r.rejectReason) return '';
+		const base = REJECT_LABEL[r.rejectReason];
+		return r.rejectNote.trim() ? `${base}: ${r.rejectNote.trim()}` : base;
+	}
+
+	function setReject(r: Row, reason: RejectReason) {
+		if (r.status === 'läuft' || r.status === 'ok') return;
+		r.rejectReason = reason;
+		if (reason) {
+			r.status = 'abgelehnt';
+			r.msg = rejectLabel(r);
+			return;
+		}
+		r.rejectNote = '';
+		r.status = 'wartet';
+		r.msg = '';
+	}
+
+	function csvCell(value: string): string {
+		if (/[;"\n]/.test(value)) return `"${value.replaceAll('"', '""')}"`;
+		return value;
+	}
+
+	function exportRejected() {
+		const header = ['Produkt', 'Maschine', 'Kategorie', 'Grund', 'Notiz', 'Übersprungene Dateien'];
+		const lines = rejected.map((r) =>
+			[
+				r.product.product_id,
+				r.machine ?? '',
+				r.category ?? '',
+				r.rejectReason ? REJECT_LABEL[r.rejectReason] : '',
+				r.rejectNote.trim(),
+				ignoredNames(r.product).join(', ')
+			]
+				.map(csvCell)
+				.join(';')
+		);
+		const csv = [header.join(';'), ...lines].join('\n');
+		const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = 'abgelehnt.csv';
+		a.click();
+		URL.revokeObjectURL(url);
 	}
 
 	async function addFiles(files: PickedFile[]) {
@@ -106,7 +193,10 @@
 			plan = await planGwFolder([...picked.keys()]);
 			rows = plan.products.map((product) => {
 				const prev = previous.get(rowKey(product));
-				return prev && prev.status === 'ok' ? { ...prev, product } : newRow(product);
+				if (prev && (prev.status === 'ok' || prev.status === 'abgelehnt')) {
+					return { ...prev, product };
+				}
+				return newRow(product);
 			});
 			if (!plan.products.length) {
 				error = 'Keine Produktordner gefunden (erwartet: …/11221.xxxx/…).';
@@ -166,9 +256,15 @@
 	const label = (r: Row) => (r.machine ? `${r.product.product_id} (${r.machine})` : r.product.product_id);
 
 	function summary(r: Row): string {
-		const docs = docPaths(r).length;
+		const docs = docItemCount(r);
 		const parts = [`${r.ops} Operationen`];
-		if (includeDocs && docs) parts.push(`${r.docsSent.length - r.docsFailed}/${docs} Dokumente & Fotos`);
+		if (includeDocs && docs) {
+			const sent = new Set(r.docsSent);
+			const groups = pdfGroups(r);
+			const pdfsDone = groups.filter((g) => g.pages.every((p) => sent.has(p.path))).length;
+			const photosDone = photoPaths(r).filter((p) => sent.has(p)).length;
+			parts.push(`${pdfsDone + photosDone - r.docsFailed}/${docs} Dokumente & Fotos`);
+		}
 		if (r.notes.length) parts.push(`⚠ ${r.notes.join(' · ')}`);
 		return parts.join(' · ');
 	}
@@ -193,28 +289,64 @@
 		r.notes = [...(result.product?.warnings ?? [])];
 	}
 
+	async function sendDoc(r: Row, file: File, kind: 'einstellblatt' | 'foto') {
+		const name = `${label(r)} – ${file.name}`;
+		await uploadFile(renamed(file, name), 'gw_stpoelten', {
+			meta: {
+				doc_kind: kind,
+				product_id: r.product.product_id,
+				machine: r.machine,
+				category: r.category
+			},
+			displayName: name
+		});
+	}
+
 	/** Returns false when stopped before all documents were sent. */
 	async function uploadDocs(r: Row): Promise<boolean> {
-		const docs = docPaths(r);
-		for (const [i, path] of docs.entries()) {
+		const groups = pdfGroups(r);
+		const photos = photoPaths(r);
+		const total = groups.length + photos.length;
+		let i = 0;
+
+		for (const group of groups) {
 			if (stopRequested) return false;
-			if (r.docsSent.includes(path)) continue;
-			const original = picked.get(path);
-			const isPhoto = r.product.bilder.includes(path);
-			if (!original) continue;
-			r.msg = `${r.ops} Operationen · ${isPhoto ? 'Foto' : 'Einstellblatt'} ${i + 1}/${docs.length} …`;
+			if (group.pages.every((p) => r.docsSent.includes(p.path))) {
+				i++;
+				continue;
+			}
+			i++;
+			const n = group.pages.length;
+			r.msg =
+				n > 1
+					? `${r.ops} Operationen · ${group.fileName} (${n} Seiten) ${i}/${total} …`
+					: `${r.ops} Operationen · Einstellblatt ${i}/${total} …`;
 			try {
-				const file = isPhoto ? await shrinkImage(original) : original;
-				const name = `${label(r)} – ${file.name}`;
-				await uploadFile(renamed(file, name), 'gw_stpoelten', {
-					meta: {
-						doc_kind: isPhoto ? 'foto' : 'einstellblatt',
-						product_id: r.product.product_id,
-						machine: r.machine,
-						category: r.category
-					},
-					displayName: name
-				});
+				const file = await fileForPdfGroup(group, picked);
+				await sendDoc(r, file, 'einstellblatt');
+			} catch (e) {
+				r.docsFailed++;
+				r.notes.push(
+					`${group.fileName}: ${e instanceof Error ? e.message.slice(0, 80) : 'fehlgeschlagen'}`
+				);
+			}
+			for (const page of group.pages) {
+				if (!r.docsSent.includes(page.path)) r.docsSent.push(page.path);
+			}
+		}
+
+		for (const path of photos) {
+			if (stopRequested) return false;
+			if (r.docsSent.includes(path)) {
+				i++;
+				continue;
+			}
+			i++;
+			const original = picked.get(path);
+			if (!original) continue;
+			r.msg = `${r.ops} Operationen · Foto ${i}/${total} …`;
+			try {
+				await sendDoc(r, await shrinkImage(original), 'foto');
 			} catch (e) {
 				r.docsFailed++;
 				r.notes.push(`${original.name}: ${e instanceof Error ? e.message.slice(0, 80) : 'fehlgeschlagen'}`);
@@ -228,7 +360,7 @@
 		uploading = true;
 		stopRequested = false;
 		error = '';
-		const todo = rows.filter((r) => r.status !== 'ok' && !needsChoice(r));
+		const todo = rows.filter((r) => r.status !== 'ok' && r.status !== 'abgelehnt' && !needsChoice(r));
 
 		// Phase 1: CNC programs of every product – seconds, and the whole set is
 		// searchable right away.
@@ -239,7 +371,7 @@
 			r.msg = 'CNC-Programme …';
 			try {
 				await uploadCnc(r);
-				const pending = includeDocs && docPaths(r).length > 0;
+				const pending = includeDocs && docItemCount(r) > 0;
 				r.status = pending ? 'wartet' : 'ok';
 				r.msg = pending ? `${r.ops} Operationen · Dokumente & Fotos folgen` : summary(r);
 			} catch (e) {
@@ -254,7 +386,7 @@
 		if (includeDocs) {
 			for (const r of todo) {
 				if (stopRequested) break;
-				if (!r.cncDone || r.status === 'ok' || r.status === 'fehler') continue;
+				if (!r.cncDone || r.status === 'ok' || r.status === 'fehler' || r.status === 'abgelehnt') continue;
 				r.status = 'läuft';
 				const complete = await uploadDocs(r);
 				r.status = complete ? 'ok' : 'wartet';
@@ -282,7 +414,11 @@
 	<p class="mb-3 mt-0.5 text-xs text-gray-500">
 		Einen oder mehrere Ordner wählen oder hineinziehen – den ganzen Bestand, eine Maschine oder
 		einzelne Produktordner. Hochgeladen werden CNC-Programme, Stücklisten, Einstellblätter (PDF)
-		und Fotos. Ein Ordner mit demselben Namen ersetzt beim erneuten Hochladen die alten Daten.
+		und Fotos. Einzelseiten wie „Einstellblatt 3-1.pdf“ und „3-2.pdf“ werden vorher zu einem
+		Dokument zusammengeführt. Duplikate oder unklare Ordner können als <span class="font-medium"
+			>abgelehnt</span> markiert werden – sie bleiben in einer eigenen Liste (Person anschreiben,
+		Duplikat) und werden nicht hochgeladen. Ein Ordner mit demselben Namen ersetzt beim erneuten
+		Hochladen die alten Daten.
 	</p>
 
 	{#if !plan || !rows.length}
@@ -322,7 +458,14 @@
 			</div>
 			<div class="rounded bg-gray-50 px-3 py-2">
 				<p class="text-lg font-semibold text-gray-800">{totals.pdfs}</p>
-				<p class="text-gray-500">Einstellblätter (PDF)</p>
+				<p class="text-gray-500">
+					Einstellblätter
+					{#if totals.pdfMerged}
+						<span class="block text-[10px] text-gray-400">
+							{totals.pdfFiles} Dateien → {totals.pdfMerged} zusammengeführt
+						</span>
+					{/if}
+				</p>
 			</div>
 			<div class="rounded bg-gray-50 px-3 py-2">
 				<p class="text-lg font-semibold text-gray-800">{totals.photos}</p>
@@ -340,7 +483,48 @@
 			{/if}
 		</p>
 
+		<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+			<div class="flex gap-1 text-xs">
+				<button
+					onclick={() => (view = 'alle')}
+					class="rounded px-2 py-1 {view === 'alle' ? 'bg-gray-800 text-white' : 'text-gray-500 hover:bg-gray-100'}"
+				>
+					Alle ({rows.length})
+				</button>
+				<button
+					onclick={() => (view = 'offen')}
+					class="rounded px-2 py-1 {view === 'offen' ? 'bg-gray-800 text-white' : 'text-gray-500 hover:bg-gray-100'}"
+				>
+					Offen ({remaining})
+				</button>
+				<button
+					onclick={() => (view = 'abgelehnt')}
+					class="rounded px-2 py-1 {view === 'abgelehnt'
+						? 'bg-rose-700 text-white'
+						: rejected.length
+							? 'text-rose-700 hover:bg-rose-50'
+							: 'text-gray-500 hover:bg-gray-100'}"
+				>
+					Abgelehnt ({rejected.length})
+				</button>
+			</div>
+			{#if rejected.length}
+				<button onclick={exportRejected} class="text-xs text-rose-700 hover:underline">
+					Abgelehnte als CSV
+				</button>
+			{/if}
+		</div>
+
 		<div class="max-h-96 overflow-y-auto rounded border border-gray-100">
+			{#if visibleRows.length === 0}
+				<p class="px-3 py-6 text-center text-xs text-gray-400">
+					{view === 'abgelehnt'
+						? 'Noch nichts abgelehnt. In der Spalte „Abgelehnt“ Duplikat oder Person anschreiben wählen.'
+						: view === 'offen'
+							? 'Nichts Offen – alles hochgeladen oder abgelehnt.'
+							: 'Keine Produkte.'}
+				</p>
+			{:else}
 			<table class="w-full text-xs">
 				<thead class="sticky top-0 bg-gray-50 text-left uppercase text-gray-400">
 					<tr>
@@ -348,17 +532,19 @@
 						<th class="px-3 py-2 font-medium">Produkt</th>
 						<th class="px-3 py-2 font-medium">Dateien</th>
 						<th class="px-3 py-2 font-medium">Status</th>
+						<th class="px-3 py-2 font-medium">Abgelehnt</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-gray-100">
-					{#each rows as row (rowKey(row.product))}
+					{#each visibleRows as row (rowKey(row.product))}
 						{@const p = row.product}
-						<tr>
+						{@const skipped = ignoredNames(p)}
+						<tr class={row.status === 'abgelehnt' ? 'bg-rose-50/60' : ''}>
 							<td class="px-3 py-2 text-gray-600">
 								{#if p.machine_choices?.length}
 									<select
 										value={row.machine ?? ''}
-										disabled={uploading}
+										disabled={uploading || row.status === 'abgelehnt'}
 										onchange={(e) => chooseMachine(row, e.currentTarget.value)}
 										class="rounded border border-amber-300 px-1.5 py-1 text-xs"
 									>
@@ -375,10 +561,16 @@
 							<td class="px-3 py-2 font-mono text-gray-800">{p.product_id}</td>
 							<td class="px-3 py-2 text-gray-500">
 								{p.cnc_candidates.length} CNC{p.stueckliste ? ' · Stückliste' : ''} ·
-								{p.einstellblaetter.length} PDF · {p.bilder.length} Fotos
+								{groupPdfPages(p.einstellblaetter).length} PDF · {p.bilder.length} Fotos
 								{#if p.variants.length}
 									<span class="block text-[10px] text-gray-400">
 										{p.variants.length} Vorrichtung/Nacharbeit (markiert)
+									</span>
+								{/if}
+								{#if skipped.length}
+									<span class="block text-[10px] text-amber-700" title={skipped.join(' · ')}>
+										{skipped.length} Datei{skipped.length === 1 ? '' : 'en'} nicht eingelesen
+										({skipped.slice(0, 2).join(', ')}{skipped.length > 2 ? ' …' : ''})
 									</span>
 								{/if}
 							</td>
@@ -389,26 +581,64 @@
 									<span class="text-green-700" title={row.msg}>✓ {row.msg}</span>
 								{:else if row.status === 'fehler'}
 									<span class="text-red-600" title={row.msg}>✗ {row.msg.slice(0, 90)}</span>
+								{:else if row.status === 'abgelehnt'}
+									<span class="text-rose-700" title={row.msg}>⊘ {rejectLabel(row)}</span>
 								{:else if needsChoice(row)}
 									<span class="text-amber-600">Maschine wählen</span>
 								{:else}
 									<span class="text-gray-400">{row.msg || 'wartet'}</span>
 								{/if}
-								{#if row.status !== 'ok'}
+								{#if row.status !== 'ok' && row.status !== 'abgelehnt'}
 									{#each p.warnings as w}
 										<span class="block text-[10px] text-amber-600">⚠ {w}</span>
 									{/each}
+								{/if}
+							</td>
+							<td class="px-3 py-2">
+								<select
+									value={row.rejectReason}
+									disabled={uploading || row.status === 'läuft' || row.status === 'ok'}
+									onchange={(e) => setReject(row, e.currentTarget.value as RejectReason)}
+									class="max-w-[11rem] rounded border px-1.5 py-1 text-xs
+										{row.rejectReason
+											? 'border-rose-300 bg-rose-50 text-rose-800'
+											: 'border-gray-200 text-gray-600'}"
+								>
+									{#each REJECT_OPTIONS as opt}
+										<option value={opt.value}>{opt.label}</option>
+									{/each}
+								</select>
+								{#if row.rejectReason}
+									<input
+										type="text"
+										value={row.rejectNote}
+										disabled={uploading}
+										placeholder={row.rejectReason === 'person'
+											? 'an wen / warum …'
+											: row.rejectReason === 'duplikat'
+												? 'welches Original …'
+												: 'Notiz …'}
+										oninput={(e) => {
+											row.rejectNote = e.currentTarget.value;
+											row.msg = rejectLabel(row);
+										}}
+										class="mt-1 w-full rounded border border-rose-200 px-1.5 py-1 text-[11px] text-gray-700"
+									/>
 								{/if}
 							</td>
 						</tr>
 					{/each}
 				</tbody>
 			</table>
+			{/if}
 		</div>
 
 		<div class="mt-3 flex flex-wrap items-center gap-3">
 			{#if uploading}
-				<span class="text-xs text-gray-500">{finished}/{rows.length} Produkte</span>
+				<span class="text-xs text-gray-500"
+					>{finished}/{rows.length - rejected.length} Produkte{#if rejected.length}
+						· {rejected.length} abgelehnt{/if}</span
+				>
 				<button
 					onclick={() => (stopRequested = true)}
 					disabled={stopRequested}
@@ -417,14 +647,20 @@
 					{stopRequested ? 'Stoppt nach der aktuellen Datei …' : 'Anhalten'}
 				</button>
 			{:else if remaining === 0}
-				<span class="text-sm font-medium text-green-700">✓ Alle {rows.length} Produkte hochgeladen</span>
+				<span class="text-sm font-medium text-green-700">
+					{#if rejected.length}
+						✓ {uploaded} hochgeladen · {rejected.length} abgelehnt
+					{:else}
+						✓ Alle {rows.length} Produkte hochgeladen
+					{/if}
+				</span>
 			{:else}
 				<button
 					onclick={uploadAll}
 					disabled={planning}
 					class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
 				>
-					{finished ? `${remaining} verbleibende hochladen` : `${rows.length} Produkte hochladen`}
+					{finished ? `${remaining} verbleibende hochladen` : `${remaining} Produkte hochladen`}
 				</button>
 				<label class="flex items-center gap-2 text-xs text-gray-600">
 					<input type="checkbox" bind:checked={includeDocs} class="h-4 w-4 rounded border-gray-300" />
@@ -446,7 +682,7 @@
 				<button onclick={reset} class="text-xs text-gray-500 hover:underline">Auswahl leeren</button>
 			{/if}
 		</div>
-		{#if includeDocs && (totals.pdfs || totals.photos) && !finished}
+		{#if includeDocs && (totals.pdfs || totals.photos) && remaining > 0}
 			<p class="mt-2 text-xs text-gray-400">
 				Zuerst werden die CNC-Programme aller Produkte eingelesen (Sekunden), danach Einstellblätter
 				und Fotos – jedes durchläuft Texterkennung bzw. Bildanalyse und dauert deutlich länger. Die

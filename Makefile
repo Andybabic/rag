@@ -87,7 +87,23 @@ frontend-build: ## Frontend bauen (SvelteKit)
 	cd services/frontend && npm install && npm run build
 	@echo "Frontend-Build fertig."
 
-up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port ## Alle Services fuer Hosting (Docker-Build, externes Ollama)
+migrate: _ensure-compose-v2 ## DB-Migrationen anwenden (alembic upgrade head)
+	@echo "Wende ausstehende Migrationen an ..."
+	@docker compose -f docker-compose.dev.yml run --rm --no-deps \
+		-v "$(PWD)/db:/db" -w /db \
+		-e POSTGRES_HOST=postgres -e POSTGRES_PORT=5432 \
+		--entrypoint sh evaluation -c \
+		"pip install --quiet --disable-pip-version-check -r requirements.txt \
+		 && python migrate.py"
+	@echo "Migrationen angewendet. Die Services einmal neu starten:  make down && make dev"
+
+skill-runner: ## Runner-Image fuer Skill-Funktionen bauen (Plugin-Layer)
+	@echo "Baue Skill-Runner-Image ..."
+	docker build -t $${SKILL_RUNNER_IMAGE:-kermit-skill-runner:latest} \
+		services/sandbox/runner
+	@echo "Skill-Runner-Image bereit."
+
+up: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port skill-runner ## Alle Services fuer Hosting (Docker-Build, externes Ollama)
 	@echo "Starte alle Services (BIND_PORTS=$$(grep '^BIND_PORTS=' .env 2>/dev/null | cut -d= -f2- | tr -d ' \r' || echo false), Ollama: $$(grep '^OLLAMA_BASE_URL=' .env)) ..."
 	$(COMPOSE_BUILD) up --build -d
 	@echo ""
@@ -110,10 +126,10 @@ up-dev-full: _ensure-compose-v2 _ensure-data-dirs ## Alle Services inkl. lokalem
 	@echo "Ollama-Modelle laden:  make pull-models"
 	@echo "Logs anzeigen:         make logs"
 
-dev: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
+dev: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port skill-runner ## Backend in Docker, Frontend mit Vite-Hot-Reload auf Host (localhost:5173)
 	@echo "Starte Backend-Services (ohne Frontend-Container) ..."
 	$(COMPOSE) up --build -d \
-		postgres qdrant cleaning data_structure embedding vectordb evaluation
+		postgres qdrant cleaning data_structure embedding vectordb evaluation sandbox
 	@cd services/frontend && [ -d node_modules ] || npm install
 	@echo ""
 	@echo "Frontend dev server mit Hot-Reload → http://localhost:5173"

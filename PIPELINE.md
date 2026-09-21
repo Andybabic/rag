@@ -184,7 +184,9 @@ Ein solcher Ordner sieht typisch so aus:
    Ordnern über dem Produktordner.
    - Übersprungen: Vorlagen (`*VORLAGE*`), CAM-Arbeitsverzeichnisse (`Hypermill/`),
      alte Stände (`Alte Version*/`), Temp- und Systemdateien.
-   - Einstellblätter zählen nur als PDF – die `.doc`-Fassungen sind nicht zwingend aktuell.
+    - Einstellblätter zählen nur als PDF – die `.doc`-Fassungen sind nicht zwingend aktuell.
+      Einzelseiten (`Einstellblatt 3-1.pdf`, `3-2.pdf`) werden vor dem Einlesen zu einem
+      Mehrseiten-PDF zusammengeführt.
    - Vorrichtungs- (`_VORR`, `Vorrichtung…/`) und Nacharbeitsprogramme werden als
      `program_role` markiert; `SEARCH_CNC` zählt Vorrichtungen nicht als Bauteil.
    - Die Ordnernamen sind CP850-als-Mac-Roman verstümmelt (`FrÑsen gro·`) und werden

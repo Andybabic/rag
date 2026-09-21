@@ -153,3 +153,33 @@ async def test_general_question_marks_mixed_products():
     assert "2 verschiedenen Bauteilen" in obs
     assert "Bauteil 11221.7199, Chiron 243" in obs
     assert "Bauteil 11221.7238, Chiron 243" in obs
+
+
+# ── Bauteil überlebt die Zerlegung des Managers ───────────────
+
+
+def test_subquery_keeps_the_product_the_user_asked_about():
+    """Der Planer schreibt die Frage neu und verliert dabei die Nummer.
+
+    Ohne sie greift die Eingrenzung in ``action_search`` nicht mehr, und der
+    Sub-Agent antwortet mit den Rüstdaten eines fremden Bauteils.
+    """
+    from core.manager import _with_product_scope
+
+    sub_query = _with_product_scope("Ist der Messerkopf Dm63 verfügbar?", "11221.5277")
+    assert product_scope(sub_query, "gw_stpoelten") == "11221.5277"
+
+
+def test_subquery_that_still_names_the_product_is_left_alone():
+    from core.manager import _with_product_scope
+
+    sub_query = "Welche Werkzeuge nutzt 11221.5277 beim Planfräsen?"
+    assert _with_product_scope(sub_query, "11221.5277") == sub_query
+
+
+def test_no_product_no_rewrite():
+    from core.manager import _with_product_scope
+
+    assert _with_product_scope("Welches Werkzeug für Taschenfräsen?", None) == (
+        "Welches Werkzeug für Taschenfräsen?"
+    )

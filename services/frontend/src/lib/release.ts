@@ -115,7 +115,7 @@ function snapshotToRowChunks(s: ReleaseSnapshot): Array<{
 async function uploadTableChunks(
 	snapshot: ReleaseSnapshot,
 	useCase: string
-): Promise<{ chunks?: number; storedPath?: string }> {
+): Promise<{ chunks?: number; storedPath?: string; replacedRows?: number }> {
 	const file = snapshotToCsvFile(snapshot);
 	const chunks = snapshotToRowChunks(snapshot);
 
@@ -133,7 +133,10 @@ async function uploadTableChunks(
 	const result = await resp.json();
 	return {
 		chunks: typeof result?.chunks === 'number' ? result.chunks : undefined,
-		storedPath: typeof result?.stored_path === 'string' ? result.stored_path : undefined
+		storedPath: typeof result?.stored_path === 'string' ? result.stored_path : undefined,
+		// Wie viele Zeilen des vorigen Exports ersetzt wurden. Sichtbar, weil
+		// ein stilles Löschen genauso beunruhigend ist wie ein stilles Doppeln.
+		replacedRows: typeof result?.replaced_rows === 'number' ? result.replaced_rows : undefined
 	};
 }
 
@@ -146,7 +149,7 @@ async function uploadTableChunks(
 export async function importSnapshot(
 	snapshot: ReleaseSnapshot,
 	useCase: string
-): Promise<{ chunks?: number; storedPath?: string }> {
+): Promise<{ chunks?: number; storedPath?: string; replacedRows?: number }> {
 	if (!snapshot || !snapshot.releasedAt) {
 		throw new Error('Import blockiert: Snapshot wurde nicht freigegeben.');
 	}
