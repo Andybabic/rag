@@ -23,6 +23,52 @@
 	let error = $state('');
 	let notice = $state('');
 
+	/** Use Case, dessen Bestand gerade gelöscht werden soll (null = Dialog zu). */
+	let wipeTarget: string | null = $state(null);
+	let wipePassword = $state('');
+	let wipeBusy = $state(false);
+	let wipeError = $state('');
+
+	function askWipe(id: string) {
+		wipeTarget = id;
+		wipePassword = '';
+		wipeError = '';
+	}
+
+	function closeWipe() {
+		wipeTarget = null;
+		wipePassword = '';
+		wipeError = '';
+	}
+
+	async function confirmWipe() {
+		if (!wipeTarget || !wipePassword) return;
+		wipeBusy = true;
+		wipeError = '';
+		try {
+			const resp = await fetch('/api/admin/reset', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ use_case: wipeTarget, password: wipePassword })
+			});
+			const body = await resp.json().catch(() => ({}));
+			if (!resp.ok) {
+				wipeError = body.detail || `Löschen fehlgeschlagen (HTTP ${resp.status}).`;
+				return;
+			}
+			notice =
+				`Wissensbestand von „${wipeTarget}" gelöscht: ` +
+				`${body.collections_deleted} Collection(s), ${body.documents_deleted} Dokument(e), ` +
+				`${body.files_deleted} Datei(en).` +
+				(body.errors?.length ? ` Mit Fehlern: ${body.errors.join('; ')}` : '');
+			closeWipe();
+		} catch {
+			wipeError = 'Dienst nicht erreichbar.';
+		} finally {
+			wipeBusy = false;
+		}
+	}
+
 	function splitCsv(s: string): string[] {
 		return s
 			.split(',')
@@ -263,6 +309,28 @@
 					</label>
 				</div>
 
+				{#if !it.isNew}
+					<div class="mt-4 rounded-lg border border-red-200 bg-red-50/60 p-3">
+						<div class="flex flex-wrap items-center justify-between gap-2">
+							<div>
+								<p class="text-xs font-semibold uppercase text-red-700">Gefahrenzone</p>
+								<p class="mt-1 text-xs text-red-800">
+									Löscht den gesamten Wissensbestand dieses Use Case: alle Collections mit
+									seinen Prefixes, das Agent-Gedächtnis, die Dokumentliste und die abgelegten
+									Originaldateien. Konfiguration, Prompts und Benutzer bleiben, ebenso
+									Chatverlauf und Feedback. <strong>Nicht rückgängig zu machen.</strong>
+								</p>
+							</div>
+							<button
+								onclick={() => askWipe(it.id)}
+								class="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+							>
+								Daten löschen
+							</button>
+						</div>
+					</div>
+				{/if}
+
 				<div class="mt-4 space-y-3">
 					<p class="text-xs font-semibold uppercase text-gray-400">System-Prompts</p>
 					{#each rolesOf(it) as role}
@@ -281,3 +349,50 @@
 		{/each}
 	{/if}
 </div>
+
+{#if wipeTarget}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+		<div class="w-full max-w-md rounded-xl bg-white p-5 shadow-xl">
+			<h3 class="text-base font-bold text-gray-900">
+				Wissensbestand von „{wipeTarget}" löschen
+			</h3>
+			<p class="mt-2 text-sm text-gray-600">
+				Alle Collections, Dokumente und hochgeladenen Dateien dieses Use Case werden
+				entfernt. Das lässt sich nicht rückgängig machen — der Bestand muss danach neu
+				hochgeladen werden.
+			</p>
+			<label class="mt-4 block">
+				<span class="mb-1 block text-xs text-gray-500">
+					Zur Bestätigung das eigene Passwort eingeben
+				</span>
+				<!-- svelte-ignore a11y_autofocus -->
+				<input
+					type="password"
+					autofocus
+					bind:value={wipePassword}
+					onkeydown={(e) => e.key === 'Enter' && confirmWipe()}
+					class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+				/>
+			</label>
+			{#if wipeError}
+				<p class="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{wipeError}</p>
+			{/if}
+			<div class="mt-4 flex justify-end gap-2">
+				<button
+					onclick={closeWipe}
+					disabled={wipeBusy}
+					class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+				>
+					Abbrechen
+				</button>
+				<button
+					onclick={confirmWipe}
+					disabled={wipeBusy || !wipePassword}
+					class="rounded-lg bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+				>
+					{wipeBusy ? 'Löscht …' : 'Endgültig löschen'}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
