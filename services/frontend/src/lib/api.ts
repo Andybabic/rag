@@ -305,6 +305,8 @@ export interface GwPlanProduct {
 	upload_paths: string[];
 	images: number;
 	ignored_documents: number;
+	/** .doc/.xls and similar – listed so they can be followed up separately. */
+	ignored_paths?: string[];
 	variants: Array<{ path: string; role: string }>;
 	warnings: string[];
 	/** Set when the product is known on several machines: the user picks one. */
@@ -578,6 +580,16 @@ export interface Skill {
 	detailed_task: string;
 	enabled: boolean;
 	position: number;
+	/** Plugin layer. The source itself is fetched separately via getSkillCode();
+	 *  variable *values* are never part of a skill listing. */
+	code_language?: 'python' | 'javascript' | null;
+	code_file_name?: string | null;
+	has_code?: boolean;
+	/** How many variables are stored — never which, never their values. */
+	variable_count?: number;
+	/** Function table, delivered with the listing so the overview needs no
+	 *  extra request per skill. */
+	functions?: SkillFunctionDef[];
 }
 
 export async function listSkills(useCase: string): Promise<{ use_case: string; skills: Skill[] }> {
@@ -615,6 +627,186 @@ export async function updateSkill(
 export async function deleteSkill(id: string) {
 	const resp = await fetch(`${BASE}/admin/skills/item/${id}`, { method: 'DELETE' });
 	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+// ── Skill-Funktionen (Plugin-Layer) ─────────────────────────
+
+export interface SkillFunctionDef {
+	id: string;
+	name: string;
+	signature: string;
+	description: string;
+	params: string[];
+	/** Effective flag: the admin's choice if set, otherwise the source file's. */
+	ask_for_permission: boolean;
+	/** What the `ask for permission` marker in the code says. */
+	permission_from_code?: boolean;
+	/** The admin's explicit choice, or null when the code decides. */
+	permission_override?: boolean | null;
+	allowed_domains: string[];
+	timeout_ms: number;
+	memory_mb: number;
+}
+
+export interface SkillCode {
+	language: 'python' | 'javascript' | null;
+	file_name: string | null;
+	source: string;
+	functions: SkillFunctionDef[];
+}
+
+/** Read a skill's code file and the function table derived from it. */
+export async function getSkillCode(id: string): Promise<SkillCode> {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}/code`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+/**
+ * Save a skill's code file. The server parses it and rewrites the function
+ * table, so the response carries the functions it actually found — including
+ * which of them will ask for permission.
+ */
+export async function saveSkillCode(
+	id: string,
+	body: { file_name: string; source: string }
+) {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}/code`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	return resp.json();
+}
+
+export async function deleteSkillCode(id: string) {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}/code`, { method: 'DELETE' });
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+/**
+ * Skill variables. Values are never sent to the browser — the listing returns
+ * names and a masked preview only, which is what keeps an API key out of the
+ * skill UI. Saving replaces the whole object.
+ */
+export async function getSkillVariables(
+	id: string
+): Promise<{ variables: Array<{ name: string; preview: string }> }> {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}/variables`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+export async function saveSkillVariables(
+	id: string,
+	variables: Record<string, string | null>
+) {
+	const resp = await fetch(`${BASE}/admin/skills/item/${id}/variables`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ variables })
+	});
+	return resp.json();
+}
+
+export interface SkillImportEntry {
+	name: string;
+	language?: string | null;
+	functions: string[];
+	needs_permission: string[];
+	reaches_hosts: string[];
+	missing_variables: string[];
+}
+
+export interface SkillImportResult {
+	status?: string;
+	error?: string;
+	detail?: string;
+	created: SkillImportEntry[];
+	updated: SkillImportEntry[];
+	skipped: string[];
+	failed: Array<{ name: string; error: string }>;
+}
+
+/**
+ * Export skills. Pass `skillId` for a single skill — same document shape, so
+ * both import through the same path. Variable values are never included.
+ */
+export async function exportSkills(useCase: string, skillId?: string) {
+	const query = skillId ? `?skill_id=${encodeURIComponent(skillId)}` : '';
+	const resp = await fetch(`${BASE}/admin/skills/${useCase}/export${query}`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+/**
+ * Import skills from an exported document.
+ *
+ * The result reports what actually arrived — which functions exist now, which
+ * ask before running and which hosts they may reach. Importing a skill means
+ * importing executable code, so that is worth reading.
+ */
+export async function importSkills(
+	useCase: string,
+	doc: { version?: number; skills: unknown[] },
+	overwrite: boolean
+): Promise<SkillImportResult> {
+	const resp = await fetch(`${BASE}/admin/skills/${useCase}/import`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ version: doc.version ?? 1, skills: doc.skills, overwrite })
+	});
+	return resp.json();
+}
+
+/**
+ * Turn the consent prompt for one function on or off.
+ *
+ * `null` hands the decision back to the `ask for permission` marker in the
+ * source. Stored separately from the parsed flag, so saving the code file
+ * again does not undo it.
+ */
+export async function setFunctionPermission(
+	skillId: string,
+	functionName: string,
+	ask: boolean | null
+) {
+	const resp = await fetch(
+		`${BASE}/admin/skills/item/${skillId}/functions/${encodeURIComponent(functionName)}/permission`,
+		{
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ ask })
+		}
+	);
+	return resp.json();
+}
+
+export async function getSkillExecutions(useCase: string, limit = 50) {
+	const resp = await fetch(`${BASE}/admin/skills/${useCase}/executions?limit=${limit}`);
+	if (!resp.ok) throw new Error(await resp.text());
+	return resp.json();
+}
+
+/**
+ * Answer a pending "may this function run?" prompt.
+ *
+ * The stream that asked is still open and waiting on this, so it is sent as
+ * its own short request rather than being folded into the stream body.
+ * A 404 means the request already expired — the function did not run.
+ */
+export async function respondToPermission(
+	callId: string,
+	approved: boolean,
+	sessionId: string
+): Promise<{ status?: string; error?: string; detail?: string }> {
+	const resp = await fetch(`${BASE}/permission/${callId}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ approved, session_id: sessionId })
+	});
 	return resp.json();
 }
 

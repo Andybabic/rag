@@ -2,6 +2,8 @@ import { json } from '@sveltejs/kit';
 import { SERVICES } from '$lib/server/services';
 import { fetchError, responseError } from '$lib/server/ingest-errors';
 import { tableCollection } from '$lib/table-collection';
+import { tableKey } from '$lib/table-key';
+import { replaceTableRows } from '$lib/server/table-replace';
 import type { RequestHandler } from './$types';
 
 interface InboundChunk {
@@ -115,6 +117,13 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	// 3. Upsert into a collection the use case's search actually reads.
 	const collection = tableCollection(useCase, await useCasePrefixes(useCase));
+	const key = tableKey(file.name);
+
+	// Ein neuer Export ersetzt den alten vollständig. Nur zu ergänzen hiesse,
+	// zu einem Werkzeug mehrere Bestände nebeneinander zu führen, von denen
+	// keiner als der gültige erkennbar wäre.
+	const replaced = await replaceTableRows(collection, key, useCase);
+
 	const upsertItems = chunks.map((chunk, i) => ({
 		chunk_id: embeddings[i]?.chunk_id ?? '',
 		vector: embeddings[i].vector,
@@ -124,6 +133,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			stored_path: storedPath,
 			anonymized,
 			ingest_strategy: 'per-row',
+			table_key: key,
 			...(chunk.metadata ?? {})
 		}
 	}));
@@ -167,6 +177,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		strategy: 'per-row',
 		chunks: upserted,
 		collection,
-		stored_path: storedPath
+		stored_path: storedPath,
+		table_key: key,
+		replaced_rows: replaced.points,
+		replaced_documents: replaced.documents
 	});
 };

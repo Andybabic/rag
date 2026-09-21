@@ -284,6 +284,16 @@ class UseCaseSkill(Base):
     detailed_task = Column(Text, nullable=False)
     enabled = Column(Boolean, nullable=False, server_default="true")
     position = Column(Integer, nullable=False, server_default="0")
+    # Plugin layer — a skill may carry exactly one code file (.py or .js,
+    # never both). Nullable throughout: a skill without a function part keeps
+    # working exactly as before.
+    code_language = Column(String(20))
+    code_file_name = Column(String(255))
+    code = Column(Text)
+    # Free-form name/value pairs, defined per skill. Never returned by the
+    # regular skill listing — the values leave the DB only inside the
+    # execution step and through the admin-only variables endpoint.
+    variables = Column(JSONB, nullable=False, server_default="{}")
     created_at = Column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -292,8 +302,96 @@ class UseCaseSkill(Base):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "code_language IS NULL OR code_language IN ('python', 'javascript')",
+            name="ck_usecase_skills_code_language",
+        ),
         Index("idx_usecase_skills_use_case", "use_case"),
         Index("uq_usecase_skills_name", "use_case", "name", unique=True),
+    )
+
+
+class UseCaseSkillFunction(Base):
+    """One callable function of a skill, derived from its code file.
+
+    The rows are rewritten whenever the skill's code file is saved: the import
+    step parses the source and writes what it found. ``ask_for_permission``
+    is settled here once, on purpose — the gate that decides whether a user is
+    asked before code runs reads this column, never the source text, so the
+    marker cannot be changed between the check and the run.
+
+    ``allowed_domains`` empty means no network at all: the runner container is
+    started with ``--network none``. Anything listed is reachable only through
+    the sandbox's egress proxy, which enforces the same list.
+    """
+
+    __tablename__ = "usecase_skill_functions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    skill_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("usecase_skills.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name = Column(String(100), nullable=False)
+    signature = Column(Text, nullable=False, server_default="")
+    description = Column(Text, nullable=False, server_default="")
+    params = Column(JSONB, nullable=False, server_default="[]")
+    # What the source file declares.
+    ask_for_permission = Column(Boolean, nullable=False, server_default="false")
+    # What an admin decided in the dashboard; NULL follows the file. Separate
+    # because saving a code file rewrites these rows — a single column would
+    # silently drop a consent gate someone switched on.
+    permission_override = Column(Boolean)
+    allowed_domains = Column(JSONB, nullable=False, server_default="[]")
+    timeout_ms = Column(Integer, nullable=False, server_default="10000")
+    memory_mb = Column(Integer, nullable=False, server_default="256")
+    position = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_skill_functions_skill", "skill_id"),
+        Index("uq_skill_functions_name", "skill_id", "name", unique=True),
+    )
+
+
+class SkillExecution(Base):
+    """Audit trail for one attempted skill-function execution.
+
+    Deliberately thin: who asked, what was called, whether consent was needed
+    and given, and how it ended. Arguments are stored because they are what
+    makes a permission decision reviewable; the *result* is not — only its
+    size — and skill variables never appear here at all.
+    """
+
+    __tablename__ = "skill_executions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    skill_id = Column(
+        UUID(as_uuid=True), ForeignKey("usecase_skills.id", ondelete="SET NULL")
+    )
+    use_case = Column(String(50), nullable=False)
+    skill_name = Column(String(100), nullable=False)
+    function_name = Column(String(100), nullable=False)
+    session_id = Column(UUID(as_uuid=True))
+    request_id = Column(UUID(as_uuid=True))
+    username = Column(String(100))
+    args = Column(JSONB, nullable=False, server_default="[]")
+    permission_required = Column(Boolean, nullable=False, server_default="false")
+    permission_granted = Column(Boolean)
+    status = Column(String(20), nullable=False)
+    error = Column(Text)
+    result_bytes = Column(Integer, nullable=False, server_default="0")
+    duration_ms = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok', 'error', 'denied', 'timeout', 'unresolved')",
+            name="ck_skill_executions_status",
+        ),
+        Index("idx_skill_executions_use_case", "use_case", "created_at"),
+        Index("idx_skill_executions_session", "session_id"),
     )
 
 

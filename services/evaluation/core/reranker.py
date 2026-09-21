@@ -16,6 +16,12 @@ import threading
 logger = logging.getLogger(__name__)
 
 _RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+# Truncation length per (query, chunk) pair. The cross-encoder is the single
+# most expensive step of a request on CPU, and its cost scales with this.
+# Chunks are ~256 tokens by default, so 512 mostly pays for padding — but
+# lowering it below the chunk size silently truncates evidence, so it stays a
+# deliberate setting rather than a quiet default change.
+_RERANKER_MAX_LENGTH = int(os.getenv("RERANKER_MAX_LENGTH", "512") or 512)
 _RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() in ("1", "true", "yes")
 
 _model = None
@@ -41,7 +47,7 @@ def _load_model_blocking() -> None:
     global _model, _model_load_failed, _model_loading  # noqa: PLW0603
     try:
         from sentence_transformers import CrossEncoder
-        model = CrossEncoder(_RERANKER_MODEL_NAME, max_length=512)
+        model = CrossEncoder(_RERANKER_MODEL_NAME, max_length=_RERANKER_MAX_LENGTH)
         with _model_lock:
             _model = model
         logger.info("Loaded reranker model: %s", _RERANKER_MODEL_NAME)

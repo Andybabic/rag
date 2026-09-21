@@ -1,6 +1,6 @@
 # Architektur
 
-Die Plattform besteht aus sechs Services die als Docker-Container laufen und über HTTP kommunizieren.
+Die Plattform besteht aus sieben Services die als Docker-Container laufen und über HTTP kommunizieren.
 
 ## Services
 
@@ -9,7 +9,10 @@ Die Plattform besteht aus sechs Services die als Docker-Container laufen und üb
 3. **Embedding Service** – Text → Vektoren via Ollama
 4. **Vector DB Service** – Qdrant: Speicherung & Ähnlichkeitssuche
 5. **Evaluation & Agent Service** – ReAct-Agent, Reranking, Citations
-6. **Frontend** – Chat-Interface mit Upload & Quellenanzeige
+6. **Sandbox Service** – führt Skill-Funktionen in kurzlebigen Containern aus
+   (siehe `skill_functions_architecture.md`). Einziger Service mit Zugriff auf
+   den Docker-Socket; nicht öffentlich erreichbar.
+7. **Frontend** – Chat-Interface mit Upload & Quellenanzeige
 
 ## Shared Package
 

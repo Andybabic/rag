@@ -15,9 +15,19 @@
 		createSkill,
 		updateSkill,
 		deleteSkill,
+		getSkillCode,
+		saveSkillCode,
+		deleteSkillCode,
+		getSkillVariables,
+		saveSkillVariables,
+		exportSkills,
+		importSkills,
+		setFunctionPermission,
 		type UsecaseConfig,
 		type PromptKeyEntry,
 		type Skill,
+		type SkillFunctionDef,
+		type SkillImportResult,
 		type ConfigTestResult
 	} from '$lib/api';
 
@@ -110,6 +120,276 @@
 	let newSkillTask = $state('');
 	let creatingSkill = $state(false);
 	let createSkillError = $state('');
+
+	// ── Plugin layer: code file + variables per skill ────────
+	// Loaded lazily, only for the skill whose panel is open: a code file can
+	// be a quarter megabyte and the variables endpoint is a separate,
+	// admin-only read that should not fire for every row in the list.
+	interface SkillPluginState {
+		loading: boolean;
+		fileName: string;
+		source: string;
+		functions: SkillFunctionDef[];
+		saving: boolean;
+		error: string;
+		saved: boolean;
+		/** Name/value rows. Values are write-only — see loadPlugin(). */
+		variables: Array<{ name: string; value: string; preview: string; isNew: boolean }>;
+		variablesSaving: boolean;
+		variablesError: string;
+		variablesSaved: boolean;
+	}
+	let pluginState: Record<string, SkillPluginState> = $state({});
+
+	function emptyPlugin(): SkillPluginState {
+		return {
+			loading: false,
+			fileName: '',
+			source: '',
+			functions: [],
+			saving: false,
+			error: '',
+			saved: false,
+			variables: [],
+			variablesSaving: false,
+			variablesError: '',
+			variablesSaved: false
+		};
+	}
+
+	// ── Export / Import ─────────────────────────────────────
+
+	let importInput: HTMLInputElement | undefined = $state();
+	let importOverwrite = $state(false);
+	let importResult: SkillImportResult | null = $state(null);
+	let importError = $state('');
+	let busyTransfer = $state(false);
+
+	async function doExportSkills(skill?: SkillRow) {
+		busyTransfer = true;
+		importError = '';
+		try {
+			const doc = await exportSkills(app.useCase, skill?.id);
+			const blob = new Blob([JSON.stringify(doc, null, 2) + '\n'], {
+				type: 'application/json'
+			});
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = skill
+				? `skill_${app.useCase}_${skill.name}.json`
+				: `skills_${app.useCase}.json`;
+			a.click();
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			importError = e instanceof Error ? e.message : String(e);
+		}
+		busyTransfer = false;
+	}
+
+	async function onImportFile(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = ''; // so the same file can be picked again after a fix
+		if (!file) return;
+
+		busyTransfer = true;
+		importError = '';
+		importResult = null;
+		try {
+			const doc = JSON.parse(await file.text());
+			if (!Array.isArray(doc.skills)) {
+				importError = 'Die Datei enthält kein "skills"-Array.';
+			} else {
+				const result = await importSkills(app.useCase, doc, importOverwrite);
+				if (result.error) {
+					importError = result.detail ?? result.error;
+				} else {
+					importResult = result;
+					await loadSkills();
+				}
+			}
+		} catch (e) {
+			importError = e instanceof Error ? e.message : String(e);
+		}
+		busyTransfer = false;
+	}
+
+	async function toggleFunctionPermission(
+		skill: SkillRow,
+		fn: SkillFunctionDef,
+		ask: boolean
+	) {
+		const entry = pluginState[skill.id];
+		if (entry) entry.error = '';
+		try {
+			const res = await setFunctionPermission(skill.id, fn.name, ask);
+			if (res.error) {
+				if (entry) entry.error = res.detail ?? res.error;
+				return;
+			}
+			// Update both views in place: the panel the admin is looking at and
+			// the badge row of the collapsed list, which reads skill.functions.
+			fn.ask_for_permission = ask;
+			fn.permission_override = ask;
+			const listed = (skill.functions ?? []).find((f) => f.name === fn.name);
+			if (listed) {
+				listed.ask_for_permission = ask;
+				listed.permission_override = ask;
+			}
+		} catch (e) {
+			if (entry) entry.error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	// ── Risikoprofil eines Skills ───────────────────────────
+	// Was ein Skill tun *kann*, ist bei ausführbarem Code die wichtigste
+	// Information der Seite. Sie kommt mit dem Listing mit, also braucht die
+	// Übersicht keinen Request pro Zeile.
+
+	function skillFunctions(s: SkillRow): SkillFunctionDef[] {
+		return s.functions ?? [];
+	}
+
+	function gatedFunctions(s: SkillRow): SkillFunctionDef[] {
+		return skillFunctions(s).filter((f) => f.ask_for_permission);
+	}
+
+	function skillHosts(s: SkillRow): string[] {
+		return [...new Set(skillFunctions(s).flatMap((f) => f.allowed_domains ?? []))];
+	}
+
+	function toggleSkillPanel(idx: number) {
+		const skill = skills[idx];
+		skill.expanded = !skill.expanded;
+		// Fetch on open, once. The code file and the (admin-only) variables are
+		// two extra requests per skill, so they stay off the list view — but
+		// making the user click a second time to see whether a skill even has
+		// functions is a worse trade.
+		if (skill.expanded && !pluginState[skill.id]) loadPlugin(skill.id);
+	}
+
+	async function loadPlugin(skillId: string) {
+		if (pluginState[skillId]?.loading) return;
+		const entry = pluginState[skillId] ?? emptyPlugin();
+		entry.loading = true;
+		pluginState[skillId] = entry;
+		try {
+			const [code, vars] = await Promise.all([
+				getSkillCode(skillId),
+				getSkillVariables(skillId)
+			]);
+			entry.fileName = code.file_name ?? '';
+			entry.source = code.source ?? '';
+			entry.functions = code.functions ?? [];
+			// The server sends names and a mask, never the stored value. An
+			// empty `value` therefore means "unchanged", not "empty" — saving
+			// sends the mask back only for rows the admin did not touch.
+			entry.variables = (vars.variables ?? []).map((v) => ({
+				name: v.name,
+				value: '',
+				preview: v.preview,
+				isNew: false
+			}));
+		} catch (e) {
+			entry.error = e instanceof Error ? e.message : String(e);
+		}
+		entry.loading = false;
+		pluginState[skillId] = entry;
+	}
+
+	async function savePluginCode(skillId: string) {
+		const entry = pluginState[skillId];
+		if (!entry) return;
+		entry.saving = true;
+		entry.error = '';
+		entry.saved = false;
+		try {
+			const result = await saveSkillCode(skillId, {
+				file_name: entry.fileName.trim(),
+				source: entry.source
+			});
+			if (result.error) {
+				entry.error = result.detail ?? result.error;
+			} else {
+				entry.functions = result.functions ?? [];
+				entry.saved = true;
+				setTimeout(() => {
+					if (pluginState[skillId]) pluginState[skillId].saved = false;
+				}, 2500);
+				await loadSkills();
+			}
+		} catch (e) {
+			entry.error = e instanceof Error ? e.message : String(e);
+		}
+		entry.saving = false;
+	}
+
+	async function removePluginCode(skillId: string) {
+		if (!confirm('Code-Datei und alle daraus abgeleiteten Funktionen löschen?')) return;
+		const entry = pluginState[skillId] ?? emptyPlugin();
+		try {
+			await deleteSkillCode(skillId);
+			entry.fileName = '';
+			entry.source = '';
+			entry.functions = [];
+			pluginState[skillId] = entry;
+			await loadSkills();
+		} catch (e) {
+			entry.error = e instanceof Error ? e.message : String(e);
+			pluginState[skillId] = entry;
+		}
+	}
+
+	function addVariableRow(skillId: string) {
+		const entry = pluginState[skillId] ?? emptyPlugin();
+		entry.variables = [...entry.variables, { name: '', value: '', preview: '', isNew: true }];
+		pluginState[skillId] = entry;
+	}
+
+	function removeVariableRow(skillId: string, index: number) {
+		const entry = pluginState[skillId];
+		if (!entry) return;
+		entry.variables = entry.variables.filter((_, i) => i !== index);
+	}
+
+	async function savePluginVariables(skillId: string) {
+		const entry = pluginState[skillId];
+		if (!entry) return;
+		// The read side is masked, so this form never holds the real value of
+		// an existing variable. An untouched row is therefore sent as null,
+		// which the server reads as "keep what is stored" — sending the mask
+		// back would overwrite a live API key with the string '****abcd'.
+		const payload: Record<string, string | null> = {};
+		for (const row of entry.variables) {
+			const name = row.name.trim();
+			if (!name) continue;
+			payload[name] = row.isNew || row.value ? row.value : null;
+		}
+		entry.variablesSaving = true;
+		entry.variablesError = '';
+		entry.variablesSaved = false;
+		try {
+			const result = await saveSkillVariables(skillId, payload);
+			if (result.error) {
+				entry.variablesError = result.detail ?? result.error;
+			} else {
+				entry.variablesSaved = true;
+				entry.variables = entry.variables.map((v) => ({
+					...v,
+					value: '',
+					isNew: false,
+					preview: v.value ? `****${v.value.slice(-4)}` : v.preview
+				}));
+				setTimeout(() => {
+					if (pluginState[skillId]) pluginState[skillId].variablesSaved = false;
+				}, 2500);
+			}
+		} catch (e) {
+			entry.variablesError = e instanceof Error ? e.message : String(e);
+		}
+		entry.variablesSaving = false;
+	}
 
 	// ── Loaders ─────────────────────────────────────────────
 
@@ -838,6 +1118,103 @@
 				</p>
 			</div>
 
+			<!-- Export / Import -->
+			<div class="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2">
+				<button
+					onclick={() => doExportSkills()}
+					disabled={busyTransfer || skills.length === 0}
+					class="rounded border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+				>
+					Exportieren
+				</button>
+				<button
+					onclick={() => importInput?.click()}
+					disabled={busyTransfer}
+					class="rounded border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+				>
+					Importieren …
+				</button>
+				<input
+					bind:this={importInput}
+					type="file"
+					accept="application/json,.json"
+					onchange={onImportFile}
+					class="hidden"
+				/>
+				<label class="flex items-center gap-1.5 text-xs text-gray-500">
+					<input type="checkbox" bind:checked={importOverwrite} class="rounded border-gray-300" />
+					Bestehende überschreiben
+				</label>
+				<span class="ml-auto text-[11px] text-gray-400">
+					Der Export enthält den Code, aber keine Variablenwerte.
+				</span>
+			</div>
+
+			{#if importError}
+				<p class="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+					{importError}
+				</p>
+			{/if}
+
+			{#if importResult}
+				<!-- Was tatsächlich angekommen ist. Ein Import bringt Code ins
+				     System, der ausgeführt wird — danach soll niemand suchen
+				     müssen, was er sich geholt hat. -->
+				<div class="rounded-lg border border-gray-200 bg-white p-3 text-xs">
+					<div class="mb-1.5 flex items-center justify-between">
+						<span class="font-semibold text-gray-700">Import-Ergebnis</span>
+						<button
+							onclick={() => (importResult = null)}
+							class="text-gray-400 hover:text-gray-600"
+							aria-label="Ergebnis schließen">&times;</button
+						>
+					</div>
+					{#each [...importResult.created.map((e) => ({ e, tag: 'neu' })), ...importResult.updated.map((e) => ({ e, tag: 'aktualisiert' }))] as row}
+						<div class="border-t border-gray-100 py-1.5">
+							<div class="flex flex-wrap items-center gap-1.5">
+								<span class="font-medium text-gray-800">{row.e.name}</span>
+								<span class="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
+									{row.tag}
+								</span>
+								{#if row.e.functions.length > 0}
+									<span class="text-gray-500">
+										{row.e.functions.length}
+										{row.e.functions.length === 1 ? 'Funktion' : 'Funktionen'}
+									</span>
+								{/if}
+							</div>
+							{#if row.e.needs_permission.length > 0}
+								<p class="mt-0.5 text-amber-800">
+									Fragt vor Ausführung nach: {row.e.needs_permission.join(', ')}
+								</p>
+							{/if}
+							{#if row.e.reaches_hosts.length > 0}
+								<p class="mt-0.5 text-sky-800">
+									Darf erreichen: {row.e.reaches_hosts.join(', ')}
+								</p>
+							{/if}
+							{#if row.e.missing_variables.length > 0}
+								<p class="mt-0.5 text-gray-600">
+									Variablen ohne Wert: {row.e.missing_variables.join(', ')} — im Skill
+									hinterlegen, sonst laufen die Funktionen ins Leere.
+								</p>
+							{/if}
+						</div>
+					{/each}
+					{#if importResult.skipped.length > 0}
+						<p class="border-t border-gray-100 pt-1.5 text-gray-500">
+							Übersprungen (Name existiert bereits): {importResult.skipped.join(', ')} —
+							„Bestehende überschreiben" aktivieren, um sie zu ersetzen.
+						</p>
+					{/if}
+					{#each importResult.failed as f}
+						<p class="border-t border-gray-100 pt-1.5 text-red-700">
+							{f.name}: {f.error}
+						</p>
+					{/each}
+				</div>
+			{/if}
+
 			<!-- New skill form -->
 			<div class="rounded-lg border border-gray-200 bg-white p-3">
 				<h4 class="mb-2 text-xs font-semibold text-gray-500">Neuen Skill anlegen</h4>
@@ -913,7 +1290,7 @@
 											class="rounded border border-transparent px-1 text-sm font-semibold text-gray-800 hover:border-gray-200 focus:border-blue-400 focus:outline-none"
 										/>
 										<button
-											onclick={() => (s.expanded = !s.expanded)}
+											onclick={() => toggleSkillPanel(idx)}
 											class="text-xs text-blue-600 hover:underline"
 										>
 											{s.expanded ? 'Zuklappen' : 'Bearbeiten'}
@@ -925,8 +1302,16 @@
 											<span class="animate-pulse text-[10px] text-blue-500">...</span>
 										{/if}
 										<button
+											onclick={() => doExportSkills(s)}
+											disabled={busyTransfer}
+											class="ml-auto text-xs text-gray-500 hover:underline disabled:opacity-40"
+											title="Nur diesen Skill als JSON exportieren"
+										>
+											Exportieren
+										</button>
+										<button
 											onclick={() => removeSkill(idx)}
-											class="ml-auto text-xs text-red-500 hover:underline"
+											class="text-xs text-red-500 hover:underline"
 										>
 											Löschen
 										</button>
@@ -939,6 +1324,88 @@
 										class="mt-1.5 w-full rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-600 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
 										placeholder="Übersicht"
 									/>
+
+									<!-- Risikoprofil: was dieser Skill tun kann, ohne Aufklappen.
+									     Bei ausführbarem Code ist das die wichtigste Information
+									     der ganzen Seite, deshalb steht sie in der Zeile selbst. -->
+									<div class="mt-2 flex flex-wrap items-center gap-1.5">
+										{#if skillFunctions(s).length === 0}
+											<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+												Nur Regeltext
+											</span>
+										{:else}
+											<span class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[11px] text-gray-600">
+												{s.code_language === 'javascript' ? 'JS' : 'PY'}
+											</span>
+											<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">
+												{skillFunctions(s).length}
+												{skillFunctions(s).length === 1 ? 'Funktion' : 'Funktionen'}
+											</span>
+
+											{#if gatedFunctions(s).length > 0}
+												<span
+													class="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800"
+													title="Fragt vor der Ausführung im Chat nach: {gatedFunctions(s).map((f) => f.name).join(', ')}"
+												>
+													{gatedFunctions(s).length === skillFunctions(s).length
+														? 'Freigabe nötig'
+														: `${gatedFunctions(s).length}× Freigabe nötig`}
+												</span>
+											{:else}
+												<span
+													class="rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-700"
+													title="Läuft ohne Rückfrage"
+												>
+													läuft automatisch
+												</span>
+											{/if}
+
+											{#if skillHosts(s).length > 0}
+												<span
+													class="rounded bg-sky-100 px-1.5 py-0.5 text-[11px] text-sky-800"
+													title="Erreichbare Hosts: {skillHosts(s).join(', ')}"
+												>
+													Netz: {skillHosts(s).length}
+													{skillHosts(s).length === 1 ? 'Host' : 'Hosts'}
+												</span>
+											{:else}
+												<span class="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">
+													kein Netz
+												</span>
+											{/if}
+										{/if}
+
+										{#if (s.variable_count ?? 0) > 0}
+											<span
+												class="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600"
+												title="Werte sind nur schreibbar, nie lesbar"
+											>
+												{s.variable_count}
+												{s.variable_count === 1 ? 'Variable' : 'Variablen'}
+											</span>
+										{/if}
+									</div>
+
+									{#if skillFunctions(s).length > 0 && !s.expanded}
+										<!-- Die Aufrufe selbst. Sie sind das, was das Modell in eine
+										     Antwort schreiben darf — konkreter geht "was kann
+										     passieren" nicht. -->
+										<ul class="mt-1.5 space-y-0.5">
+											{#each skillFunctions(s) as fn}
+												<li class="flex items-baseline gap-1.5 text-[11.5px]">
+													<code class="font-mono text-gray-700">
+														{s.name}.{fn.signature || fn.name + '()'}
+													</code>
+													{#if fn.ask_for_permission}
+														<span class="text-[10px] text-amber-700">fragt nach</span>
+													{/if}
+													{#if fn.description}
+														<span class="truncate text-gray-400">— {fn.description}</span>
+													{/if}
+												</li>
+											{/each}
+										</ul>
+									{/if}
 
 									{#if s.expanded}
 										<textarea
@@ -956,6 +1423,195 @@
 											>
 												Speichern
 											</button>
+										</div>
+
+										<!-- ── Plugin layer: code file + variables ── -->
+										{@const plugin = pluginState[s.id]}
+										<div class="mt-3 rounded-lg border border-gray-200 bg-gray-50/70 p-3">
+											<div class="flex items-center justify-between">
+												<h5 class="text-xs font-semibold text-gray-600">
+													Ausführbare Funktionen
+												</h5>
+												{#if !plugin}
+													<button
+														onclick={() => loadPlugin(s.id)}
+														class="text-xs text-blue-600 hover:underline"
+													>
+														Erneut laden
+													</button>
+												{:else if s.has_code}
+													<span class="text-[11px] text-gray-400">
+														{plugin.functions.length}
+														{plugin.functions.length === 1 ? 'Funktion' : 'Funktionen'}
+														· {s.code_language === 'javascript' ? 'JavaScript' : 'Python'}
+													</span>
+												{/if}
+											</div>
+											<p class="mt-0.5 text-[11px] text-gray-400">
+												Eine Datei pro Skill (<code>.py</code> oder <code>.js</code>). Jede
+												Funktion wird als <code>{s.name}.funktion(...)</code> aufrufbar.
+												Markiere eine Funktion mit
+												<code>#&nbsp;ask&nbsp;for&nbsp;permission</code> (bzw.
+												<code>//&nbsp;ask&nbsp;for&nbsp;permission</code>), wenn vor der
+												Ausführung im Chat nachgefragt werden soll.
+											</p>
+
+											{#if plugin?.loading}
+												<p class="mt-2 animate-pulse text-xs text-gray-400">Laden …</p>
+											{:else if plugin}
+												<input
+													type="text"
+													bind:value={plugin.fileName}
+													placeholder="Dateiname, z.B. wetter.py"
+													class="mt-2 w-full rounded border border-gray-200 px-2.5 py-1 font-mono text-xs"
+												/>
+												<textarea
+													bind:value={plugin.source}
+													rows={10}
+													spellcheck="false"
+													placeholder={'# allow-network: api.open-meteo.com\ndef aktuell(ort):\n    ...'}
+													class="mt-2 w-full rounded border border-gray-200 px-3 py-2 font-mono text-[11.5px] leading-relaxed text-gray-700 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+												></textarea>
+
+												{#if plugin.error}
+													<p class="mt-1.5 whitespace-pre-wrap text-xs text-red-600">
+														{plugin.error}
+													</p>
+												{/if}
+
+												<div class="mt-2 flex items-center gap-2">
+													<button
+														onclick={() => savePluginCode(s.id)}
+														disabled={plugin.saving || !plugin.fileName.trim() || !plugin.source.trim()}
+														class="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-40"
+													>
+														Code speichern
+													</button>
+													{#if s.has_code}
+														<button
+															onclick={() => removePluginCode(s.id)}
+															class="text-xs text-red-500 hover:underline"
+														>
+															Code entfernen
+														</button>
+													{/if}
+													{#if plugin.saved}
+														<span class="text-xs text-green-600">Gespeichert!</span>
+													{/if}
+												</div>
+
+												{#if plugin.functions.length > 0}
+													<ul class="mt-2.5 space-y-2">
+														{#each plugin.functions as fn}
+															<li class="rounded border border-gray-200 bg-white px-2.5 py-2">
+																<div class="flex flex-wrap items-center gap-1.5 text-[11.5px]">
+																	<code class="font-mono text-gray-800">
+																		{s.name}.{fn.signature}
+																	</code>
+																	{#if fn.allowed_domains.length > 0}
+																		<span class="rounded bg-sky-100 px-1.5 py-0.5 text-sky-800">
+																			Netz: {fn.allowed_domains.join(', ')}
+																		</span>
+																	{:else}
+																		<span class="rounded bg-gray-100 px-1.5 py-0.5 text-gray-500">
+																			kein Netz
+																		</span>
+																	{/if}
+																	{#if fn.description}
+																		<span class="text-gray-500">{fn.description}</span>
+																	{/if}
+																</div>
+
+																<label class="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-gray-700">
+																	<input
+																		type="checkbox"
+																		checked={fn.ask_for_permission}
+																		onchange={(e) =>
+																			toggleFunctionPermission(
+																				s,
+																				fn,
+																				(e.currentTarget as HTMLInputElement).checked
+																			)}
+																		class="rounded border-gray-300"
+																	/>
+																	Vor dem Ausführen im Chat nachfragen
+																	{#if fn.permission_override !== null && fn.permission_override !== undefined && fn.permission_override !== fn.permission_from_code}
+																		<span
+																			class="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800"
+																			title="Im Quelltext steht {fn.permission_from_code
+																				? '# ask for permission'
+																				: 'keine Markierung'}"
+																		>
+																			weicht vom Code ab
+																		</span>
+																	{/if}
+																</label>
+															</li>
+														{/each}
+													</ul>
+												{/if}
+
+												<!-- Variables. Values are write-only by design. -->
+												<div class="mt-3 border-t border-gray-200 pt-2.5">
+													<div class="flex items-center justify-between">
+														<h5 class="text-xs font-semibold text-gray-600">
+															Skill-Variablen
+														</h5>
+														<button
+															onclick={() => addVariableRow(s.id)}
+															class="text-xs text-blue-600 hover:underline"
+														>
+															+ Variable
+														</button>
+													</div>
+													<p class="mt-0.5 text-[11px] text-gray-400">
+														Stehen der Funktion als <code>SKILL_VARS["name"]</code> und als
+														Umgebungsvariable zur Verfügung. Werte werden nie zurück an den
+														Browser gesendet — ein leeres Feld lässt den gespeicherten Wert
+														unverändert.
+													</p>
+
+													{#each plugin.variables as variable, vIdx}
+														<div class="mt-1.5 flex items-center gap-1.5">
+															<input
+																type="text"
+																bind:value={variable.name}
+																placeholder="name"
+																class="w-40 rounded border border-gray-200 px-2 py-1 font-mono text-[11.5px]"
+															/>
+															<input
+																type="password"
+																bind:value={variable.value}
+																placeholder={variable.isNew ? 'Wert' : `unverändert (${variable.preview})`}
+																class="min-w-0 flex-1 rounded border border-gray-200 px-2 py-1 font-mono text-[11.5px]"
+															/>
+															<button
+																onclick={() => removeVariableRow(s.id, vIdx)}
+																class="text-xs text-red-500 hover:underline"
+																aria-label="Variable entfernen"
+															>
+																&times;
+															</button>
+														</div>
+													{/each}
+
+													{#if plugin.variablesError}
+														<p class="mt-1.5 text-xs text-red-600">{plugin.variablesError}</p>
+													{/if}
+													<div class="mt-2 flex items-center gap-2">
+														<button
+															onclick={() => savePluginVariables(s.id)}
+															disabled={plugin.variablesSaving}
+															class="rounded border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+														>
+															Variablen speichern
+														</button>
+														{#if plugin.variablesSaved}
+															<span class="text-xs text-green-600">Gespeichert!</span>
+														{/if}
+													</div>
+												</div>
+											{/if}
 										</div>
 									{/if}
 								</div>

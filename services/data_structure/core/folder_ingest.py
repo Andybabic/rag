@@ -290,7 +290,7 @@ class PlannedProduct:
     stueckliste: str | None = None
     einstellblaetter: list[str] = field(default_factory=list)
     bilder: list[str] = field(default_factory=list)
-    ignored_documents: int = 0
+    ignored_documents: list[str] = field(default_factory=list)
     variants: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -334,7 +334,7 @@ def plan_folder(paths: list[str]) -> dict:
         elif kind == "image":
             prod.bilder.append(path)
         elif kind == "document":
-            prod.ignored_documents += 1
+            prod.ignored_documents.append(path)
 
     machines_by_pid: dict[str, list[str]] = {}
     for (pid, machine) in products:
@@ -363,7 +363,8 @@ def plan_folder(paths: list[str]) -> dict:
                 "bilder": p.bilder,
                 "upload_paths": p.upload_paths(),
                 "images": len(p.bilder),
-                "ignored_documents": p.ignored_documents,
+                "ignored_documents": len(p.ignored_documents),
+                "ignored_paths": p.ignored_documents,
                 "variants": p.variants,
                 "warnings": p.warnings,
             }

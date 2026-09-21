@@ -10,9 +10,29 @@
 
 	let showPreview = $state(false);
 
+	// Der PII-Scan ist eine Empfehlung, keine Bedingung. Erzwungen hat er
+	// Tabellen ohne jeden Personenbezug — eine Werkzeugliste mit Artikelnummer,
+	// Bestand und Lieferant — minutenlang aufgehalten, und wer importieren
+	// will, klickt sich durch eine Pflicht, die er nicht braucht. Blockiert
+	// wird nur noch, solange ein Scan tatsächlich läuft: Sein Ergebnis
+	// entscheidet, was maskiert wird, und mitten hinein freizugeben hiesse,
+	// eine halbe Maskierung zu exportieren.
+	const scanRunning = $derived(
+		app.pii.status === 'loading-model' || app.pii.status === 'scanning'
+	);
+
+	// Die eine Ausnahme: Maskieren ohne Scan geht nicht. Der Scan liefert die
+	// Fundstellen; ohne ihn bliebe jede Zelle unverändert, der Import trüge
+	// aber das Kennzeichen „anonymisiert" — eine Zusage, die niemand
+	// eingelöst hat.
+	const maskingNeedsScan = $derived(
+		app.anonymizeMode !== 'off' && app.pii.status === 'idle'
+	);
+
 	const canRelease = $derived(
 		!!app.parsedTable &&
-			(app.pii.status === 'done' || app.pii.status === 'error') &&
+			!scanRunning &&
+			!maskingNeedsScan &&
 			app.release.status !== 'importing'
 	);
 
@@ -272,11 +292,20 @@
 		<div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
 			{#if !app.parsedTable}
 				Bitte zuerst eine CSV/Excel-Datei laden.
-			{:else if app.pii.status === 'idle'}
-				Bitte zuerst einen PII-Scan starten — auch wenn das Ergebnis ohne Maskierung importiert werden soll.
-			{:else if app.pii.status === 'loading-model' || app.pii.status === 'scanning'}
+			{:else if scanRunning}
 				Scan läuft … bitte warten.
+			{:else if maskingNeedsScan}
+				Für die gewählte Maskierung wird der PII-Scan gebraucht — er liefert die
+				Fundstellen. Ohne Maskierung („Aus (Original)") kann direkt importiert werden.
 			{/if}
+		</div>
+	{/if}
+
+	{#if canRelease && app.pii.status === 'idle' && app.release.status === 'idle'}
+		<div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+			Ohne PII-Scan: Die Tabelle wird unverändert importiert. Bei
+			personenbezogenen Daten lohnt der Scan — bei einer reinen Sach- oder
+			Artikelliste ist er verzichtbar.
 		</div>
 	{/if}
 
@@ -301,6 +330,9 @@
 				{app.release.snapshot.chunkingStrategy === 'per-row' ? 'pro Zeile' : 'ganze Datei'}
 				{#if app.release.importResult?.chunks !== undefined}
 					· {app.release.importResult.chunks} Chunks
+				{/if}
+				{#if app.release.importResult?.replacedRows}
+					· {app.release.importResult.replacedRows} Zeilen des vorigen Exports ersetzt
 				{/if}
 			</div>
 			<div class="mt-2 flex flex-wrap gap-2">

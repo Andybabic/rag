@@ -1,0 +1,14 @@
+{
+  "$comment": "Reference skills shipped with the platform. Seeded create-if-missing at startup, exactly like config/use_cases.json: a skill that already exists in the DB is never overwritten, so edits made in the dashboard survive a restart. Remove a skill from this file to stop seeding it; deleting it in the dashboard alone means it is recreated on the next boot.",
+  "skills": [
+    {
+      "name": "wetter",
+      "use_cases": ["*"],
+      "code_file": "wetter.py",
+      "enabled": true,
+      "position": 100,
+      "overview": "Live-Wetterdaten über Open-Meteo",
+      "detailed_task": "Wenn die Frage aktuelles Wetter oder eine Wettervorhersage betrifft, rufe die Wetterfunktion auf, statt aus Dokumenten zu antworten oder Werte zu schätzen.\n\n- Aktuelles Wetter: schreibe wetter.aktuell(\"<Ort>\") wörtlich an die Stelle, an der der Wert stehen soll.\n- Vorhersage: schreibe wetter.vorhersage(\"<Ort>\", <Tage>) — Tage zwischen 1 und 7.\n\nDer Aufruf wird nach deiner Antwort ausgeführt und durch das Ergebnis ersetzt. Erfinde niemals selbst Temperaturen, Wetterlagen oder Vorhersagen: nenne keinen Wert, den du nicht über die Funktion geholt hast. Nenne den Ort immer explizit; ist er unklar, frage nach, statt zu raten."
+    }
+  ]
+}

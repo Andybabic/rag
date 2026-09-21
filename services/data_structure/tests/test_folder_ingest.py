@@ -243,6 +243,7 @@ def test_plan_folder_selects_only_what_must_be_uploaded():
     assert p["upload_paths"] == [_PLAN_PATHS[0], _PLAN_PATHS[1]]
     assert p["einstellblaetter"] == [_PLAN_PATHS[2]]
     assert p["ignored_documents"] == 1
+    assert p["ignored_paths"] == [_PLAN_PATHS[3]]
     # Fotos werden mit hochgeladen – als eigene Liste, nicht im CNC-Upload
     assert p["bilder"] == [_PLAN_PATHS[4]]
     assert p["images"] == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 
 import time
@@ -17,6 +18,10 @@ from core.use_cases import collection_belongs_to_use_case, get_use_case_prefixes
 
 logger = logging.getLogger(__name__)
 
+
+#: Rüstunterlagen (Einstellblätter, Fotos) – mit Dateiname und Seite, also
+#: das Einzige, was der Nutzer in der Quellenansicht aufschlagen kann.
+_RUEST_COLLECTION = "gw_ruest_data"
 
 # GW-Bauteilnummer („11221.7199"). Nur für Use Cases mit gw_*-Collections.
 _PRODUCT_ID_RE = re.compile(r"(?<![\d.])(\d{5}\.\d{3,4})(?!\d)")
@@ -250,7 +255,9 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     #     window — parallel sub-agents serialised on it and unrelated requests
     #     stalled. torch releases the GIL during inference, so a thread lets
     #     concurrent reranks genuinely overlap.
-    above = await asyncio.to_thread(rerank_chunks, query, fused[:25], top_n=15)
+    above = await asyncio.to_thread(
+        rerank_chunks, query, fused[:_RERANK_CANDIDATES], top_n=_RERANK_TOP_N
+    )
     if not above:
         above = fused[:5]
     _rerank_ms = round((time.perf_counter() - _rerank_start) * 1000)
@@ -304,6 +311,18 @@ async def action_search(args: dict, *, use_case: str) -> dict:
 # agent's context.
 _OBSERVATION_CHARS = 550
 
+# How many fused candidates the cross-encoder scores, and how many it keeps.
+#
+# Worth knowing before changing: only the top 7 survivors reach the agent's
+# OBSERVATION, so everything scored beyond what dedup plus that cut needs is
+# paid for and thrown away. On CPU each candidate costs real time — measured
+# on this stack, 25 candidates take ~11 s per search, and a request doing
+# three searches spent ~34 s of its ~91 s here. Lowering the candidate count
+# is the cheapest speed-up available; the cost is that a chunk ranked low by
+# the hybrid fusion can no longer be rescued by the reranker.
+_RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "25") or 25)
+_RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "15") or 15)
+
 
 def _image_block(meta: dict) -> str:
     """Render the descriptions of images belonging to this chunk's page.
@@ -326,6 +345,83 @@ def _image_block(meta: dict) -> str:
     return "".join(parts)
 
 
+def _as_text(value) -> str:
+    """Ein Action-Argument als Text – egal was das Modell geliefert hat.
+
+    Kleine Modelle schicken für ein Feld auch mal ``{"value": …}`` oder eine
+    Liste. Ein ``.strip()`` darauf hat schon ganze Sub-Agents abstürzen lassen
+    („'dict' object has no attribute 'strip'"), deshalb hier einmal zentral
+    einsammeln statt an jeder Fundstelle.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(p for p in (_as_text(v) for v in value) if p)
+    if isinstance(value, dict):
+        return " ".join(p for p in (_as_text(v) for v in value.values()) if p)
+    return str(value).strip()
+
+
+# Feldbezeichner, die ohne die Bauteilnummer daneben nichts mehr bedeuten
+# („material": "bauteil:11221.5277" → nach dem Entfernen der Nummer Müll).
+_PRODUCT_LABEL_RE = re.compile(
+    r"\b(bauteil|bauteilnummer|artikel|artikelnummer|article|part|teil|nummer|nr)\b\.?:?",
+    re.I,
+)
+
+
+# Werkzeugnummer im Programm („T5", „T12"). Bewusst eng: nur ein allein
+# stehendes T mit Zahl, damit „T6-Gewinde" nicht als Nummer durchgeht.
+_TOOL_ID_RE = re.compile(r"(?<![A-Za-z0-9-])T\s?(\d{1,3})(?![\d.,-])", re.I)
+# Werkstoffzustand einer Aluminiumlegierung („EN AW-6005A T6", „6082 T651").
+# Dasselbe Muster wie eine Werkzeugnummer und trotzdem das Gegenteil: eine
+# Materialangabe. Sie wird vor der Suche nach Werkzeugnummern ausgeblendet.
+_MATERIAL_TEMPER_RE = re.compile(
+    r"\b(?:EN\s*)?(?:AW[-\s]?)?\d{4}[A-Z]?\s*[-–]?\s*T\d{1,3}\b", re.I
+)
+
+
+def _without_material_tempers(text: str) -> str:
+    return _MATERIAL_TEMPER_RE.sub(" ", text or "")
+_TOOL_LABEL_RE = re.compile(
+    r"\b(werkzeug(?:-?nr\.?|nummer)?|tool(?:\s?no\.?|\s?id)?)\b\.?:?", re.I
+)
+
+
+def _strip_tool_ids(text: str) -> str:
+    """Die Werkzeugnummer aus einem Freitextfeld lösen – wie die Bauteilnummer.
+
+    „T5" als Bearbeitungsschritt zu verschlagworten bringt nichts: Im Text
+    steht „Werkzeug-Nr. T5", die Bedeutung trägt der Filter, nicht die Vektor-
+    Ähnlichkeit.
+    """
+    keep = _MATERIAL_TEMPER_RE.findall(text or "")  # Werkstoffzustand bleibt
+    rest = _TOOL_LABEL_RE.sub(
+        " ", _TOOL_ID_RE.sub(" ", _without_material_tempers(text))
+    )
+    # Der Werkstoff wird erst NACH dem Glätten wieder angehängt: „EN AW-6005A"
+    # ohne Bindestrich ist nicht mehr dieselbe Legierungsbezeichnung.
+    rest = re.sub(r"[\s:,;/–-]+", " ", rest).strip(" :,;/–-")
+    rest = " ".join(p for p in [rest, *keep] if p).strip()
+    return "" if len(rest) < 3 else rest
+
+
+def _strip_product_ids(text: str) -> str:
+    """Bauteilnummern (und ihre Feldbezeichner) aus einem Freitextfeld lösen.
+
+    Als Suchtext ist „11221.5277" wertlos – semantisch steht die Nummer
+    nirgends. Als Filter ist sie entscheidend. Sie gehört deshalb aus
+    ``operation``/``material`` heraus und in den Bauteil-Filter hinein.
+    """
+    rest = _PRODUCT_LABEL_RE.sub(" ", _PRODUCT_ID_RE.sub(" ", text or ""))
+    rest = re.sub(r"[\s:,;/–-]+", " ", rest).strip()
+    return "" if len(rest) < 3 else rest
+
+
 def _op_facet(meta: dict, key: str):
     """Read an operation facet, tolerating both nested (extra.<key>) and
     flat payload layouts."""
@@ -335,11 +431,22 @@ def _op_facet(meta: dict, key: str):
     return meta.get(key)
 
 
-def _fmt_tool(tool_type, diameter) -> str:
+def _fmt_tool(tool_type, diameter, tool_ids=()) -> str:
+    """Name eines Werkzeugs für die Ausgabe.
+
+    Ohne Werkzeugtyp trägt die Nummer den Namen: Im Programm steht bei
+    manchen Schritten nur „Planfräsen schruppen" ohne Werkzeugangabe — welches
+    Werkzeug gemeint ist, sagt dann das Einstellblatt unter derselben Nummer.
+    """
     dia = ""
     if isinstance(diameter, (int, float)):
         dia = f" Ø{int(diameter) if diameter == int(diameter) else diameter} mm"
-    return f"{tool_type or 'unbekanntes Werkzeug'}{dia}"
+    if tool_type:
+        return f"{tool_type}{dia}"
+    if tool_ids:
+        return (f"Werkzeug {', '.join(sorted(tool_ids))}"
+                f"{dia} (Typ im Programm nicht hinterlegt)")
+    return f"unbekanntes Werkzeug{dia}"
 
 
 # Schneidstoff-/Werkzeug-Begriffe – KEINE Werkstücke. Das LLM verwechselt
@@ -390,6 +497,48 @@ def _dia_eq(a, b, tol: float = 0.01) -> bool:
     return isinstance(a, (int, float)) and isinstance(b, (int, float)) and abs(a - b) <= tol
 
 
+#: So viele Chunks der Rüstunterlagen eines Bauteils gehen höchstens in die
+#: Beobachtung. Deckt die Blätter eines Bauteils ab, ohne das Kontextfenster
+#: mit Fotobeschreibungen zu fluten.
+_RUEST_MAX_CHUNKS = 12
+
+
+async def _scroll_ruest(client, product_id: str) -> list[dict]:
+    """Alle Einstellblatt-Chunks eines Bauteils – ohne Ähnlichkeitsranking.
+
+    Einstellblätter zuerst, Fotos nur, wenn dann noch Platz ist: Die
+    Werkzeugliste steht auf dem Blatt, nicht auf dem Foto.
+    """
+    async def _page(filters: dict) -> list[dict]:
+        r = await client.post(
+            f"{settings.VECTORDB_SERVICE_URL}/v1/scroll",
+            json={"collection": _RUEST_COLLECTION, "filters": filters,
+                  "limit": 100},
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("points", [])
+
+    sheets = await _page({"extra.product_id": product_id,
+                          "extra.doc_kind": "einstellblatt"})
+    rest = []
+    if len(sheets) < _RUEST_MAX_CHUNKS:
+        rest = [p for p in await _page({"extra.product_id": product_id})
+                if (p.get("extra") or {}).get("doc_kind") != "einstellblatt"]
+
+    def _order(p: dict) -> tuple:
+        return (str(p.get("file_name") or ""), p.get("page") or 0)
+
+    points = sorted(sheets, key=_order) + sorted(rest, key=_order)
+    # scroll liefert Payloads; auf die Trefferform von /v1/search bringen,
+    # damit der Aufrufer nicht zwei Gestalten kennen muss.
+    return [
+        {"text": p.get("text", ""), "score": 0.0,
+         "metadata": {k: v for k, v in p.items() if k != "text"}}
+        for p in points[:_RUEST_MAX_CHUNKS]
+    ]
+
+
 async def action_search_cnc(args: dict, *, use_case: str) -> dict:
     """SEARCH_CNC – Werkzeugempfehlung für GW St. Pölten.
 
@@ -401,6 +550,9 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
 
     Args:
         operation: Bearbeitungsschritt (z.B. „Taschenfräsen", „Bohren Ø10").
+        product_id: optional – Bauteilnummer („11221.5277"). Gesetzt, wird nur
+                    in den Programmen dieses Bauteils gesucht. Wird auch aus
+                    operation/material geborgen, wo kleine Modelle sie ablegen.
         material:  Werkstoff (z.B. „EN AW-6005A T6", „Aluminium").
         missing_tool: optional – Werkzeug, das NICHT verfügbar ist; wird aus
                       den Empfehlungen ausgeschlossen (Alternativsuche).
@@ -418,9 +570,44 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             "searched_collections": [],
         }
 
-    operation = (args.get("operation") or args.get("query") or "").strip()
-    material = (args.get("material") or "").strip()
-    missing_tool = (args.get("missing_tool") or "").strip()
+    operation = _as_text(args.get("operation") or args.get("query"))
+    material = _as_text(args.get("material"))
+    missing_tool = _as_text(args.get("missing_tool"))
+
+    # Bauteilnummer. Sie hat ein eigenes Argument, aber kleine Modelle stecken
+    # sie genauso gern in operation ("operation": "11221.5277") oder material
+    # ("material": "bauteil:11221.5277"). Von überall einsammeln, aus den
+    # Textfeldern entfernen und als harten Filter nutzen – sonst beantwortet
+    # die Suche die Frage zu Bauteil A mit den Werkzeugen von Bauteil B.
+    scoped_product = next(
+        (pid for field in (
+            _as_text(args.get("product_id") or args.get("bauteil")
+                     or args.get("article") or args.get("artikel")
+                     or args.get("part")),
+            operation,
+            material,
+        ) for pid in _PRODUCT_ID_RE.findall(field)),
+        None,
+    )
+    operation = _strip_product_ids(operation)
+    material = _strip_product_ids(material)
+
+    # Werkzeugnummer („T5"). Der Rüster liest sie am Einstellblatt oder im
+    # Programm ab und fragt danach — sie steht als ``extra.tool_id`` an jedem
+    # Schritt. Ohne diesen Weg landet „T5" als Bearbeitungsschritt in der
+    # semantischen Suche, trifft nichts, und die Antwort lautet „keine Daten",
+    # obwohl die Schnittwerte im selben Chunk stehen.
+    requested_tool_id = next(
+        (f"T{tid}" for field in (
+            _as_text(args.get("tool_id") or args.get("tool_no")
+                     or args.get("werkzeug") or args.get("werkzeug_nr")),
+            operation,
+            missing_tool,
+        ) for tid in _TOOL_ID_RE.findall(_without_material_tempers(field))),
+        None,
+    )
+    if requested_tool_id:
+        operation = _strip_tool_ids(operation)
 
     # Robustheit gegen Arg-Verwechslung kleiner Modelle: „VHM" o.ä. ist ein
     # Schneidstoff (Werkzeug), kein Werkstück. Niemals als Werkstück-Material
@@ -465,13 +652,14 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             _embed_ms = round((time.perf_counter() - _embed_start) * 1000)
 
             _search_start = time.perf_counter()
-            async def _search(filters: dict) -> list[dict]:
+            async def _search(filters: dict, collection: str = "gw_cnc_steps",
+                              top_k: int = 40) -> list[dict]:
                 r = await client.post(
                     f"{settings.VECTORDB_SERVICE_URL}/v1/search",
                     json={
-                        "collection": "gw_cnc_steps",
+                        "collection": collection,
                         "vector": vector,
-                        "top_k": 40,
+                        "top_k": top_k,
                         "filters": filters,
                         "embed_model": embed_model,
                     },
@@ -480,11 +668,60 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
                     return []
                 return r.json()["results"]
 
-            results = await _search(material_filter)
-            material_filtered = bool(results)
-            if not results and material_filter:
-                results = await _search({})
-                material_filtered = False
+            # Eingrenzungen der Reihe nach fallen lassen, von der schärfsten
+            # Kombination bis ungefiltert. Die Reihenfolge ist fachlich, nicht
+            # technisch: Die Werkzeugnummer fällt VOR dem Bauteil, denn sie
+            # gilt nur innerhalb eines Programms — „T5" ist in einem anderen
+            # Bauteil ein völlig anderes Werkzeug. Der Werkstoff fällt zuerst,
+            # er macht die Suche nur unscharf, nicht falsch.
+            available = {
+                "tool": {"extra.tool_id": requested_tool_id} if requested_tool_id else None,
+                "product": {"extra.product_id": scoped_product} if scoped_product else None,
+                "material": material_filter or None,
+            }
+            attempts = [
+                ("tool", "product", "material"),
+                ("tool", "product"),
+                ("product", "material"),
+                ("product",),
+                ("material",),
+                (),
+            ]
+            results: list[dict] = []
+            used: tuple = ()
+            seen: set[tuple] = set()
+            for combo in attempts:
+                keys = tuple(k for k in combo if available[k])
+                if keys in seen:
+                    continue
+                seen.add(keys)
+                search_filters: dict = {}
+                for k in keys:
+                    search_filters.update(available[k])
+                results = await _search(search_filters)
+                if results:
+                    used = keys
+                    break
+            tool_filtered = "tool" in used
+            product_filtered = "product" in used
+            material_filtered = "material" in used
+
+            # Das Einstellblatt ist das Blatt, das der Rüster an der Maschine
+            # in der Hand hält – und die einzige Quelle mit Seitenzahl, an der
+            # er eine Angabe nachschlagen kann. Das CNC-Programm liefert die
+            # Werte, das Einstellblatt die überprüfbare Fundstelle.
+            ruest_results = []
+            if scoped_product and collection_belongs_to_use_case(
+                _RUEST_COLLECTION, use_case
+            ):
+                # Vollständig lesen statt ähnlichkeitssuchen. Die Werkzeug-
+                # liste eines Einstellblatts zerfällt in 500-Zeichen-Chunks,
+                # und welcher davon die gesuchte Zeile trägt, entscheidet die
+                # Vektorähnlichkeit nicht zuverlässig: Die Zeile „20 | Dm=63/45°
+                # Messerkopf" lag mal im Treffer, mal nicht — die Antwort kippte
+                # mit ihr zwischen „lagert auf Träger 50" und „gibt es nicht".
+                # Ein Bauteil hat wenige Blätter; die liest man ganz.
+                ruest_results = await _scroll_ruest(client, scoped_product)
             _search_ms = round((time.perf_counter() - _search_start) * 1000)
     except httpx.HTTPError as exc:
         return {
@@ -532,17 +769,38 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         if _op_facet(meta, "program_role") == "vorrichtung":
             continue
         tool_type = _op_facet(meta, "tool_type")
-        tt_low = str(tool_type or "").lower()
+        tool_id = _op_facet(meta, "tool_id")
+        op_label = _op_facet(meta, "operation_label")
+        # Ohne Typ UND ohne Nummer bleibt nichts, was man rüsten könnte –
+        # solche Chunks sammelten sich früher unter „unbekanntes Werkzeug" zu
+        # einem Eintrag, der über die Bauteil-Anzahl sogar das Ranking anführte.
+        # Mit Nummer ist es dagegen ein echtes Werkzeug: Der Dm63 Messerkopf
+        # steht im Programm von 11221.5277 als T20 ohne Typ, und ihn zu
+        # verwerfen hiess „wird nicht verwendet" zu antworten, obwohl er im
+        # Einstellblatt unter derselben Nummer steht.
+        if not str(tool_type or "").strip() and not tool_id:
+            continue
+        tt_low = str(tool_type or op_label or "").lower()
         if missing_tokens and any(tok in tt_low for tok in missing_tokens):
             continue  # Alternativsuche: ausgefallenes Werkzeug ausblenden
         diameter = _op_facet(meta, "diameter")
-        key = (str(tool_type), diameter)
+        # Ohne Typ gruppiert die Nummer, sonst fielen alle typlosen Schritte
+        # eines Bauteils in einen Topf.
+        key = (str(tool_type) if tool_type else f"nr:{tool_id}", diameter)
         a = agg.setdefault(key, {
             "tool_type": tool_type, "diameter": diameter,
             "products": set(), "speeds": [], "feeds": [],
             "materials": set(), "operations": set(), "machines": set(),
+            "tool_ids": set(), "labels": set(),
             "best_score": 0.0,
         })
+        # Die Werkzeugnummer aus dem Programm. Sie fehlte in der Ausgabe, und
+        # damit war eine Frage nach „T5" nicht zu beantworten, obwohl Nummer
+        # und Schnittwerte im selben Chunk stehen.
+        if tool_id:
+            a["tool_ids"].add(str(tool_id).upper())
+        if op_label and not tool_type:
+            a["labels"].add(str(op_label))
         if pid := _op_facet(meta, "product_id"):
             a["products"].add(pid)
         if (s := _op_facet(meta, "spindle_speed")):
@@ -555,7 +813,14 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
             a["operations"].add(op)
         if (machine := _op_facet(meta, "machine")):
             a["machines"].add(machine)
-        a["best_score"] = max(a["best_score"], r.get("score", 0.0))
+        # Herkunft des besten Treffers mitführen. Ohne sie steht in der
+        # Quellenansicht nur „FASENFRAESER Ø8 mm – 1 Projekte" ohne Datei und
+        # ohne Zeile: nichts, was der Rüster nachschlagen könnte.
+        score = r.get("score", 0.0)
+        if score >= a["best_score"] or not a.get("source_meta"):
+            a["source_meta"] = meta
+            a["source_text"] = r.get("text", "")
+        a["best_score"] = max(a["best_score"], score)
 
     # Ranking: häufigste Verwendung (Projekte) zuerst, dann Score.
     ranked = sorted(
@@ -580,19 +845,48 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         }
 
     head = f"Bearbeitungsschritt: {operation or '—'}"
+    if scoped_product:
+        head += f" | Bauteil: {scoped_product}"
+        if not product_filtered:
+            head += (
+                f" — ACHTUNG: zu Bauteil {scoped_product} gibt es keine CNC-Daten. "
+                f"Die folgenden Werkzeuge stammen aus ANDEREN Bauteilen und gelten "
+                f"nicht für {scoped_product}"
+            )
+    if requested_tool_id:
+        head += f" | Werkzeug-Nr. {requested_tool_id}"
+        if not tool_filtered:
+            head += (
+                f" — ACHTUNG: {requested_tool_id} ist in diesen Programmen nicht "
+                f"belegt; die folgenden Werkzeuge tragen ANDERE Nummern"
+            )
+        elif not scoped_product:
+            head += (
+                " (Hinweis: Werkzeugnummern gelten je Programm — dieselbe "
+                "Nummer meint in einem anderen Bauteil ein anderes Werkzeug)"
+            )
     if requested_dia is not None:
         d = int(requested_dia) if requested_dia == int(requested_dia) else requested_dia
-        head += f" | Ø {d} mm" + ("" if dia_filtered else " (kein exakter Ø-Treffer)")
+        head += f" | Ø {d} mm" + ("" if dia_filtered else (
+            f" — kein Werkzeug mit Ø {d} mm vorhanden, die folgenden Optionen "
+            f"haben ANDERE Durchmesser"
+        ))
     if material:
         head += f" | Material: {material}"
         if not material_filtered:
             head += " (kein exakter Material-Treffer – semantische Suche)"
     if missing_tokens:
         head += f" | Alternativen ohne: {missing_tool}"
-    lines = [head, f"{len(ranked)} Werkzeug-Option(en) aus historischen Programmen:"]
+    # Bei einem einzelnen Bauteil ist die Werkzeugliste endlich (rund 20
+    # Einträge) und komplett relevant. Fünf Zeilen reichten dort nicht: Der
+    # gesuchte Messerkopf stand auf Platz 6 und fehlte in der Antwort, was
+    # als „wird nicht verwendet" zurückkam.
+    shown = 12 if scoped_product else 5
+    lines = [head, f"{len(ranked)} Werkzeug-Option(en) aus historischen Programmen"
+             + (f" (die ersten {shown}):" if len(ranked) > shown else ":")]
 
     chunks = []
-    for i, a in enumerate(ranked[:5], 1):
+    for i, a in enumerate(ranked[:shown], 1):
         n = len(a["products"])
         params = []
         if a["speeds"]:
@@ -603,35 +897,275 @@ async def action_search_cnc(args: dict, *, use_case: str) -> dict:
         mat_str = f", Material {', '.join(sorted(a['materials']))}" if a["materials"] else ""
         ops_str = "/".join(sorted(a["operations"])) or "?"
         machine_str = f", Maschine(n) {', '.join(sorted(a['machines']))}" if a["machines"] else ""
+        tid_str = (f", Werkzeug-Nr. {', '.join(sorted(a['tool_ids']))}"
+                   if a["tool_ids"] else "")
+        src = a.get("source_meta") or {}
+        src_extra = src.get("extra") or {}
+        program = src_extra.get("program_name") or src.get("file_name") or ""
+        prog_str = f", Programm {program}" if program else ""
+        # Fehlt der Werkzeugtyp, ist die Bezeichnung aus dem Programm der
+        # einzige Hinweis darauf, was dort gefahren wurde („Planfräsen
+        # schruppen") – zusammen mit der Nummer führt sie ins Einstellblatt.
+        label_str = (
+            f", Bezeichnung im Programm: {'; '.join(sorted(a['labels']))}"
+            if a["labels"] and not a["tool_type"] else ""
+        )
         lines.append(
-            f"[{i}] {_fmt_tool(a['tool_type'], a['diameter'])} – "
-            f"in {n} Bauteil(en) für {ops_str}{param_str}{mat_str}{machine_str}"
+            f"[{i}] {_fmt_tool(a['tool_type'], a['diameter'], a['tool_ids'])}"
+            f"{tid_str} – in {n} Bauteil(en) für {ops_str}{param_str}{mat_str}"
+            f"{machine_str}{label_str}{prog_str}"
         )
         chunks.append({
-            "text": f"{_fmt_tool(a['tool_type'], a['diameter'])} ({ops_str}) – {n} Projekte",
+            # Der Originaltext des Schritts, nicht die Zusammenfassung: Er
+            # trägt Werkzeug, Nummer, Material, Schnittwerte und die
+            # Original-Bezeichnung aus dem Programm – also das, woran die
+            # Angabe zu prüfen ist.
+            "text": a.get("source_text")
+            or f"{_fmt_tool(a['tool_type'], a['diameter'], a['tool_ids'])} "
+            f"({ops_str}) – {n} Projekte",
             "score": a["best_score"],
             "metadata": {
+                "file_name": src.get("file_name", ""),
+                "stored_path": src.get("stored_path", ""),
+                "page": src.get("page"),
+                "collection": "gw_cnc_steps",
+                "extra": src_extra,
                 "tool_type": a["tool_type"], "diameter": a["diameter"],
+                "tool_ids": sorted(a["tool_ids"]),
                 "operation_type": ops_str, "project_count": n,
                 "products": sorted(a["products"]),
                 "machines": sorted(a["machines"]),
             },
         })
 
-    if ranked:
+    # Ohne Treffer im gefragten Bauteil ist „Empfehlung" das falsche Wort –
+    # das häufigste Werkzeug anderer Bauteile ist keine Rüstempfehlung.
+    if ranked and not (scoped_product and not product_filtered):
         top = ranked[0]
         lines.append(
-            f"Empfehlung: {_fmt_tool(top['tool_type'], top['diameter'])} "
+            f"Empfehlung: {_fmt_tool(top['tool_type'], top['diameter'], top['tool_ids'])} "
             f"(häufigstes Werkzeug für diese Operation"
             + (f", {len(top['products'])} Bauteile)." if top["products"] else ").")
         )
 
+    # Die Einstellblätter des Bauteils hinten anhängen – als eigene,
+    # aufschlagbare Quellen mit Dateiname und Seite. Das CNC-Programm sagt,
+    # womit gefertigt wurde; nachprüfen kann der Rüster es nur hier.
+    searched = ["gw_cnc_steps"]
+    if ruest_results:
+        searched.append(_RUEST_COLLECTION)
+        lines.append(
+            f"Rüstunterlagen zu Bauteil {scoped_product} "
+            f"(dort sind die Angaben nachzuschlagen):"
+        )
+        # Die Einstellblätter führen eine eigene Werkzeugliste mit der Spalte
+        # WZ.NR. Ob deren Nummern dieselben sind wie die T-Nummern der
+        # Programme, ist im Betrieb NICHT gesichert — bei einem geprüften
+        # Bauteil stimmten mehrere Zeilen überein, andere nicht. Die
+        # Entscheidung gehört deshalb ins Modell, nicht in diesen Code: Es
+        # sieht beide Seiten und kann Bezeichnung, Durchmesser und Operation
+        # gegeneinander halten. Was es hier NICHT darf, ist stillschweigend
+        # gleichsetzen.
+        lines.append(
+            "ZUORDNUNG: Die Einstellblätter enthalten oft eine Werkzeugliste "
+            "mit eigener Spalte „WZ.NR.“. Ob diese Nummern den T-Nummern der "
+            "CNC-Programme entsprechen, ist NICHT gesichert. Stelle einen "
+            "Bezug nur her, wenn Bezeichnung, Durchmesser oder Operation "
+            "zusammenpassen — und schreibe dann dazu, dass es eine Annahme "
+            "über die Nummerngleichheit ist, die am Einstellblatt zu prüfen "
+            "ist. Ein Werkzeug, dessen Typ im Programm fehlt, ist NICHT "
+            "„nicht verwendet“: Die Nummer belegt den Einsatz, die "
+            "Bezeichnung steht im Einstellblatt."
+        )
+        for r in ruest_results:
+            meta = r.get("metadata", {})
+            text = " ".join((r.get("text") or "").split())
+            # NICHT kürzen: Die Chunks der Rüstunterlagen sind ohnehin auf
+            # 500 Zeichen geschnitten, und die entscheidende Tabellenzeile
+            # steht oft hinten. Gemessen: „20 | Dm=63/45° Messerkopf" lag auf
+            # Position 367 und fiel einer 300-Zeichen-Kürzung zum Opfer — die
+            # Antwort lautete daraufhin „wird nicht verwendet".
+            lines.append(f"[{len(chunks) + 1}] ({_source_label(meta)}) {text}")
+            chunks.append({
+                "text": r.get("text", ""),
+                "score": r.get("score", 0.0),
+                "metadata": meta,
+            })
+
     return {
         "observation": "\n".join(lines),
         "chunks": chunks,
-        "searched_collections": ["gw_cnc_steps"],
+        "searched_collections": searched,
         "embed_ms": _embed_ms,
         "search_ms": _search_ms,
+    }
+
+
+#: Die importierte Werkzeugliste (Bestand, Lieferant, Artikelnummer). Sie
+#: kommt über den Tabellen-Import und landet dort, wo die Suche des Use Case
+#: sie liest — siehe ``tableCollection`` im Frontend.
+_TOOL_TABLE_COLLECTION = "gw_stpoelten_default"
+
+#: Ab dieser Ähnlichkeit gilt ein Eintrag als dasselbe Werkzeug. Gemessen an
+#: der importierten Liste (qwen3-embedding:8b): „VHM Spiralbohrer DM 4,65 mm"
+#: trifft mit 0,85, „Gewindeformer M6" mit 0,73 — beide stehen drin. Der Dm63
+#: Messerkopf, der NICHT in der Liste steht, kommt auf 0,58, reiner Unsinn
+#: („Kühlschrank") auf 0,42. Die Vektorsuche liefert immer etwas; ohne diese
+#: Grenze meldet sie einen Ø6-Fräser als Antwort auf einen Ø63 Messerkopf.
+#: Bei einem anderen Embedding-Modell ist der Wert neu zu messen.
+_TOOL_MATCH_MIN = 0.65
+
+#: Spalten, die in der Beobachtung nichts zu suchen haben: interne Schlüssel
+#: und Kennzahlen, die eine Rüstentscheidung nicht tragen.
+_TOOL_TABLE_SKIP = {
+    "kaestchenklasse", "hauptlieferant", "stellplatzmenge", "row_index",
+}
+
+
+def _tool_row_line(text: str) -> str:
+    """Eine Tabellenzeile („Spalte: Wert" je Zeile) zu einer Zeile eindampfen."""
+    parts = []
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key, value = key.strip(), value.strip()
+        if not value or key.lower() in _TOOL_TABLE_SKIP:
+            continue
+        if key.lower() == "artikelnummer":
+            parts.append(f"Artikel {value}")
+        elif key.lower() == "bestand":
+            # Der Stichtag klebt an der Zahl, nicht in einer Kopfzeile: Die
+            # wurde bei der Synthese verworfen, und aus „Stand des Imports"
+            # wurde in der Antwort „laut aktueller Werkzeugliste".
+            parts.append(f"Bestand {value} (Stand des Listen-Imports)")
+        else:
+            parts.append(f"{key} {value}")
+    return " · ".join(parts)
+
+
+async def action_search_tool(args: dict, *, use_case: str) -> dict:
+    """SEARCH_TOOL – Werkzeug im Lagerbestand nachschlagen.
+
+    Beantwortet „Ist das Werkzeug da, und wer liefert nach?" aus der
+    importierten Werkzeugliste: Artikelnummer, Bestand, Mindest- und
+    Höchstbestand, Bestellmenge, Hauptlieferant.
+
+    Bewusst getrennt von ``SEARCH_CNC``: Das CNC-Programm sagt, WOMIT gefertigt
+    wurde, das Einstellblatt, WO das Werkzeug liegt, und diese Liste, OB eines
+    da ist. Drei Fragen, drei Quellen.
+
+    Der Bestand ist der Stand des zuletzt importierten Exports, keine
+    Live-Abfrage. Das steht in der Beobachtung, damit die Antwort dem Rüster
+    nicht zwei Stück verspricht, die im Regal längst fehlen.
+
+    Args:
+        tool: Werkzeugbezeichnung im Klartext („VHM-Bohrer 4,65", „Gewindeformer M6").
+        article: optional – Artikelnummer, wenn der Nutzer sie nennt.
+    """
+    _embed_ms = 0
+    _search_ms = 0
+    if not collection_belongs_to_use_case(_TOOL_TABLE_COLLECTION, use_case):
+        return {
+            "observation": f"SEARCH_TOOL ist für Use Case '{use_case}' nicht verfügbar.",
+            "chunks": [], "embed_ms": _embed_ms, "search_ms": _search_ms,
+            "searched_collections": [],
+        }
+
+    tool = _as_text(args.get("tool") or args.get("query") or args.get("werkzeug"))
+    article = _as_text(args.get("article") or args.get("artikelnummer"))
+    query = " ".join(p for p in (tool, article) if p)
+    if not query:
+        return {
+            "observation": "SEARCH_TOOL benötigt eine Werkzeugbezeichnung im Feld 'tool'.",
+            "chunks": [], "embed_ms": _embed_ms, "search_ms": _search_ms,
+            "searched_collections": [],
+        }
+
+    try:
+        _embed_start = time.perf_counter()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            embed_resp = await client.post(
+                f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
+                json={"type": "text", "content": query, "metadata": {},
+                      "use_case": use_case},
+            )
+            embed_resp.raise_for_status()
+            embed_json = embed_resp.json()
+            _embed_ms = round((time.perf_counter() - _embed_start) * 1000)
+
+            _search_start = time.perf_counter()
+            search_resp = await client.post(
+                f"{settings.VECTORDB_SERVICE_URL}/v1/search",
+                json={
+                    "collection": _TOOL_TABLE_COLLECTION,
+                    "vector": embed_json["vector"],
+                    "top_k": 5,
+                    "filters": {},
+                    "embed_model": embed_json.get("model"),
+                },
+            )
+            _search_ms = round((time.perf_counter() - _search_start) * 1000)
+            if search_resp.status_code != 200:
+                # Ohne importierte Liste ist die Collection nicht vorhanden —
+                # das ist kein Fehler, sondern eine fehlende Datenquelle.
+                return {
+                    "observation": (
+                        "Keine Werkzeugliste importiert. Bestand und Lieferant "
+                        "lassen sich daher nicht nachschlagen."
+                    ),
+                    "chunks": [], "embed_ms": _embed_ms, "search_ms": _search_ms,
+                    "searched_collections": [],
+                }
+            results = search_resp.json()["results"]
+    except httpx.HTTPError as exc:
+        return {
+            "observation": f"Suchservice nicht erreichbar: {exc}.",
+            "chunks": [], "embed_ms": _embed_ms, "search_ms": _search_ms,
+            "searched_collections": [],
+        }
+
+    if not results:
+        return {
+            "observation": f'„{query}“ steht nicht in der Werkzeugliste.',
+            "chunks": [], "embed_ms": _embed_ms, "search_ms": _search_ms,
+            "searched_collections": [_TOOL_TABLE_COLLECTION],
+        }
+
+    best = max((r.get("score", 0.0) for r in results), default=0.0)
+    if best < _TOOL_MATCH_MIN:
+        lines = [
+            f'„{query}“ steht NICHT in der Werkzeugliste '
+            f'(beste Ähnlichkeit {best:.2f}).',
+            "Die folgenden Einträge sind lediglich ähnlich und sind NICHT das "
+            "gesuchte Werkzeug. Gib sie höchstens als mögliche Alternative an "
+            "und sage klar, dass das gesuchte Werkzeug nicht gelistet ist.",
+        ]
+    else:
+        lines = [
+            f'Werkzeugliste (Lagerbestand) – Treffer zu „{query}“:',
+            "ACHTUNG: Die Bestände sind der Stand des zuletzt importierten "
+            "Exports, keine Live-Abfrage. Nenne sie immer als Stand der Liste "
+            "und verweise darauf, dass am Lager zu prüfen ist.",
+        ]
+    chunks = []
+    for i, r in enumerate(results, 1):
+        meta = r.get("metadata", {})
+        line = _tool_row_line(r.get("text", "")) or " ".join((r.get("text") or "").split())
+        source = meta.get("file_name") or "Werkzeugliste"
+        lines.append(f"[{i}] ({source}) {line}")
+        chunks.append({
+            "text": r.get("text", ""),
+            "score": r.get("score", 0.0),
+            "metadata": meta,
+        })
+
+    return {
+        "observation": "\n".join(lines),
+        "chunks": chunks,
+        "embed_ms": _embed_ms,
+        "search_ms": _search_ms,
+        "searched_collections": [_TOOL_TABLE_COLLECTION],
     }
 
 
@@ -705,8 +1239,59 @@ async def action_lookup_sources(args: dict, use_case: str) -> str:
 ACTION_HANDLERS: dict[str, str] = {
     "SEARCH": "action_search",
     "SEARCH_CNC": "action_search_cnc",
+    "SEARCH_TOOL": "action_search_tool",
     "REFINE_QUERY": "action_refine_query",
     "CLARIFY": "action_clarify",
     "RECALL_MEMORY": "action_recall_memory",
     "LOOKUP_SOURCES": "action_lookup_sources",
 }
+
+
+async def action_skill(
+    args: dict,
+    *,
+    use_case: str,
+    session_id: str,
+    on_event=None,
+    request_id: str | None = None,
+    username: str | None = None,
+) -> str:
+    """Execute one skill function and return its result as an observation.
+
+    This is the *active* path: the agent decides to call a function the way it
+    decides to search, and the value comes back as an OBSERVATION it can reason
+    about, combine with document chunks and cite. The text-pattern path (a call
+    written into the answer) stays as a fallback for models that write one
+    anyway — but it cannot do any of that, because by then the answer is done.
+
+    Consent is enforced here, not by the caller: an action that could run a
+    permission-gated function without asking would be a way around the gate.
+    """
+    from core.skill_functions import execute_named_function
+
+    skill = str(args.get("skill") or "").strip()
+    function = str(args.get("function") or "").strip()
+    raw_args = args.get("args")
+    if isinstance(raw_args, (str, int, float, bool)):
+        call_args = [raw_args]
+    elif isinstance(raw_args, list):
+        call_args = list(raw_args)
+    elif isinstance(raw_args, dict):
+        # Some models emit {"ort": "Fürth"} instead of a list. Positional order
+        # is the declaration order, which the function table already knows.
+        call_args = list(raw_args.values())
+    else:
+        call_args = []
+
+    if not skill or not function:
+        return (
+            "Fehler: SKILL braucht 'skill' und 'function'. "
+            'Beispiel: SKILL({"skill": "wetter", "function": "aktuell", '
+            '"args": ["Nürnberg"]})'
+        )
+
+    return await execute_named_function(
+        skill, function, call_args,
+        use_case=use_case, session_id=session_id,
+        request_id=request_id, username=username, on_event=on_event,
+    )

@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 
 from core.api_tokens import ApiToken
 from core.api_tokens import create_token as create_api_token
@@ -34,16 +35,32 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from shared.llm.config import LLMConfig
 from shared.security.crypto import CryptoError, encrypt, is_configured
+from shared.skills import (
+    SkillCodeError,
+    detect_language,
+    parse_skill_code,
+)
 from shared.usecase_config import (
     Skill,
+    SkillFunction,
+    clear_skill_code,
     create_skill,
     delete_skill,
     delete_use_case,
+    get_skill,
+    get_skill_code,
+    get_skill_variables,
     get_use_case,
+    list_functions_for_skill,
     list_prompts,
+    list_skill_executions,
+    list_skill_functions,
     list_skills,
     list_use_cases,
     resolve_config,
+    set_function_permission,
+    set_skill_code,
+    set_skill_variables,
     update_skill,
     upsert_config,
     upsert_prompt,
@@ -463,14 +480,36 @@ def _skill_to_dict(s: Skill) -> dict:
         "detailed_task": s.detailed_task,
         "enabled": s.enabled,
         "position": s.position,
+        # Plugin layer. The source itself is fetched separately and the
+        # variable *values* are never part of any skill listing.
+        "code_language": s.code_language,
+        "code_file_name": s.code_file_name,
+        "has_code": s.has_code,
+        "variable_count": s.variable_count,
     }
 
 
 @router.get("/skills/{use_case}")
 async def get_skills(use_case: str):
-    """List all skills for a use case (enabled and disabled, ordered)."""
+    """List all skills for a use case (enabled and disabled, ordered).
+
+    Each skill carries its function table. The overview has to answer "what can
+    this actually do?" at a glance — which functions exist, which ask before
+    they run, which hosts they reach — and fetching that per skill would mean
+    one request per row before the page could say anything.
+    """
     skills = await list_skills(use_case)
-    return {"use_case": use_case, "skills": [_skill_to_dict(s) for s in skills]}
+    by_skill: dict[str, list] = {}
+    for fn in await list_skill_functions(use_case, only_enabled=False):
+        by_skill.setdefault(fn.skill_id, []).append(fn)
+    return {
+        "use_case": use_case,
+        "skills": [
+            {**_skill_to_dict(s),
+             "functions": [_function_to_dict(f) for f in by_skill.get(s.id, [])]}
+            for s in skills
+        ],
+    }
 
 
 class SkillCreate(BaseModel):
@@ -534,6 +573,449 @@ async def delete_skill_endpoint(skill_id: str):
     if not ok:
         return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
     return {"status": "ok"}
+
+
+# ── Skill-Funktionen (Plugin-Layer) ──────────────────────────
+#
+# Everything below sits under /v1/admin, which the frontend gate restricts to
+# role=admin. That gate is the access control for skill variables: their
+# values are reachable only here and in the execution step, and never through
+# the skill listing an ordinary user can load.
+
+
+def _function_to_dict(f: SkillFunction) -> dict:
+    return {
+        "id": f.id,
+        "name": f.name,
+        "signature": f.signature,
+        "description": f.description,
+        "params": f.params,
+        # The effective flag, plus what it was derived from — the UI shows a
+        # hint when an admin's choice differs from the source file.
+        "ask_for_permission": f.ask_for_permission,
+        "permission_from_code": f.permission_from_code,
+        "permission_override": f.permission_override,
+        "allowed_domains": f.allowed_domains,
+        "timeout_ms": f.timeout_ms,
+        "memory_mb": f.memory_mb,
+    }
+
+
+@router.get("/skills/item/{skill_id}/code")
+async def get_skill_code_endpoint(skill_id: str):
+    """A skill's code file plus the function table derived from it."""
+    skill = await get_skill(skill_id)
+    if skill is None:
+        return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
+    code = await get_skill_code(skill_id)
+    functions = await list_functions_for_skill(skill_id)
+    return {
+        "language": code[0] if code else None,
+        "file_name": code[1] if code else None,
+        "source": code[2] if code else "",
+        "functions": [_function_to_dict(f) for f in functions],
+    }
+
+
+class SkillCodeSave(BaseModel):
+    file_name: str = Field(
+        description="Decides the language: .py → Python, .js → JavaScript"
+    )
+    source: str
+
+
+@router.put("/skills/item/{skill_id}/code")
+async def put_skill_code(skill_id: str, body: SkillCodeSave):
+    """Store a skill's code file and re-derive its callable functions.
+
+    This is the import step. The source is parsed here, once, and what it
+    declares — names, parameters, ``ask for permission``, ``allow-network`` —
+    is written to the database. The execution path reads those rows and never
+    re-reads the source, so the flag cannot change between check and run.
+    """
+    skill = await get_skill(skill_id)
+    if skill is None:
+        return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
+
+    try:
+        language = detect_language(body.file_name)
+        parsed = parse_skill_code(body.source, language)
+    except SkillCodeError as exc:
+        return {"error": "invalid_code", "detail": str(exc)}
+
+    functions = [
+        {
+            "name": f.name,
+            "signature": f.signature(),
+            "description": f.description,
+            "params": list(f.params),
+            "ask_for_permission": f.ask_for_permission,
+            "allowed_domains": list(f.allowed_domains),
+        }
+        for f in parsed
+    ]
+    try:
+        await set_skill_code(
+            skill_id,
+            language=language,
+            file_name=body.file_name,
+            source=body.source,
+            functions=functions,
+        )
+    except RuntimeError as exc:
+        return {"error": "db_unavailable", "detail": str(exc)}
+    except LookupError as exc:
+        return {"error": "not_found", "detail": str(exc)}
+
+    return {
+        "status": "ok",
+        "language": language,
+        "functions": functions,
+        "permission_required_count": sum(
+            1 for f in functions if f["ask_for_permission"]
+        ),
+    }
+
+
+@router.delete("/skills/item/{skill_id}/code")
+async def delete_skill_code_endpoint(skill_id: str):
+    """Remove a skill's code file; it reverts to a pure prompt-text skill."""
+    try:
+        ok = await clear_skill_code(skill_id)
+    except RuntimeError as exc:
+        return {"error": "db_unavailable", "detail": str(exc)}
+    if not ok:
+        return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
+    return {"status": "ok"}
+
+
+class FunctionPermission(BaseModel):
+    ask: bool | None = Field(
+        description="True = vor Ausführung fragen, False = nicht fragen, "
+                    "null = wieder der Markierung im Quelltext folgen."
+    )
+
+
+@router.put("/skills/item/{skill_id}/functions/{function_name}/permission")
+async def put_function_permission(
+    skill_id: str, function_name: str, body: FunctionPermission
+):
+    """Turn the consent prompt for one function on or off.
+
+    Stored separately from the flag derived at import time, so saving the code
+    file again does not quietly undo it. Sending ``null`` hands the decision
+    back to the ``ask for permission`` marker in the source.
+    """
+    try:
+        ok = await set_function_permission(skill_id, function_name, body.ask)
+    except RuntimeError as exc:
+        return {"error": "unavailable", "detail": str(exc)}
+    if not ok:
+        return {"error": "not_found",
+                "detail": f"Funktion {function_name!r} gehört nicht zu diesem Skill."}
+    return {"status": "ok", "function": function_name, "ask": body.ask}
+
+
+@router.get("/skills/item/{skill_id}/variables")
+async def get_skill_variables_endpoint(skill_id: str):
+    """Variable *names* and a masked preview — never the values.
+
+    An API key that has been stored should not be readable back out through
+    the UI that stored it. Editing a value means overwriting it, which is the
+    same contract the per-use-case LLM API keys already use.
+    """
+    skill = await get_skill(skill_id)
+    if skill is None:
+        return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
+    values = await get_skill_variables(skill_id)
+    return {
+        "skill_id": skill_id,
+        "variables": [
+            {"name": name, "preview": _redact(str(value) if value is not None else "")}
+            for name, value in sorted(values.items())
+        ],
+    }
+
+
+class SkillVariablesSave(BaseModel):
+    variables: dict[str, str | None] = Field(
+        default_factory=dict,
+        description="The complete variable object. A null value means 'keep "
+                    "what is stored' — the UI never receives a value, so that "
+                    "is the only way it can leave one untouched. Names absent "
+                    "from the object are deleted.",
+    )
+
+
+#: Names must be usable as an environment variable and as an identifier in
+#: both runtimes, because the runner injects them as both.
+_VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_MAX_VARIABLES = 64
+_MAX_VARIABLE_LENGTH = 4096
+
+
+@router.put("/skills/item/{skill_id}/variables")
+async def put_skill_variables(skill_id: str, body: SkillVariablesSave):
+    """Write a skill's variable object.
+
+    The endpoint replaces, but a ``null`` value carries the stored value
+    forward. That matters because the read side is masked: the UI never holds
+    the real value of an existing key, so without this an admin who edits one
+    variable would overwrite every other one with its own mask.
+    """
+    if len(body.variables) > _MAX_VARIABLES:
+        return {"error": "too_many", "detail": f"Maximal {_MAX_VARIABLES} Variablen."}
+
+    existing = await get_skill_variables(skill_id)
+    merged: dict[str, str] = {}
+    for name, value in body.variables.items():
+        if not _VARIABLE_NAME_RE.match(name):
+            return {
+                "error": "invalid_name",
+                "detail": f"Ungültiger Variablenname {name!r} — erlaubt sind "
+                          "Buchstaben, Ziffern und Unterstrich (nicht mit einer "
+                          "Ziffer beginnend).",
+            }
+        if value is None:
+            if name not in existing:
+                return {
+                    "error": "unknown_variable",
+                    "detail": f"Variable {name!r} soll unverändert bleiben, "
+                              "existiert aber nicht.",
+                }
+            merged[name] = str(existing[name])
+            continue
+        if len(value) > _MAX_VARIABLE_LENGTH:
+            return {
+                "error": "too_long",
+                "detail": f"Wert von {name!r} überschreitet "
+                          f"{_MAX_VARIABLE_LENGTH} Zeichen.",
+            }
+        merged[name] = value
+
+    try:
+        ok = await set_skill_variables(skill_id, merged)
+    except RuntimeError as exc:
+        return {"error": "db_unavailable", "detail": str(exc)}
+    if not ok:
+        return {"error": "not_found", "detail": f"Skill {skill_id} not found"}
+    return {"status": "ok", "count": len(merged)}
+
+
+# ── Export / Import ──────────────────────────────────────────
+
+
+@router.get("/skills/{use_case}/export")
+async def export_skills(use_case: str, skill_id: str | None = None):
+    """Skills of a use case as one portable JSON document.
+
+    With ``skill_id`` the document holds exactly that one skill — same shape,
+    so a single skill and a whole use case import through the same path.
+
+    Carries the code file, because a skill without it is only half a skill.
+    Carries variable **names** but never their values: an export is a file that
+    lands in someone's download folder, gets mailed around and committed to a
+    repository. A key in there is a leaked key. The names travel so the import
+    side can say which values still have to be filled in.
+    """
+    skills = await list_skills(use_case)
+    if skill_id:
+        skills = [s for s in skills if s.id == skill_id]
+        if not skills:
+            return {"error": "not_found",
+                    "detail": f"Skill {skill_id} gehört nicht zu {use_case}."}
+    by_skill: dict[str, list] = {}
+    for fn in await list_skill_functions(use_case, only_enabled=False):
+        by_skill.setdefault(fn.skill_id, []).append(fn)
+
+    exported: list[dict] = []
+    for skill in skills:
+        entry: dict = {
+            "name": skill.name,
+            "overview": skill.overview,
+            "detailed_task": skill.detailed_task,
+            "enabled": skill.enabled,
+            "position": skill.position,
+        }
+        code = await get_skill_code(skill.id) if skill.has_code else None
+        if code:
+            entry["code_language"] = code[0]
+            entry["code_file_name"] = code[1]
+            entry["code"] = code[2]
+            entry["functions"] = [
+                {"name": f.name, "signature": f.signature,
+                 # Effective flag, plus the admin's choice when one was made.
+                 "ask_for_permission": f.ask_for_permission,
+                 "permission_override": f.permission_override,
+                 "allowed_domains": f.allowed_domains}
+                for f in by_skill.get(skill.id, [])
+            ]
+        if skill.variable_count:
+            names = sorted(await get_skill_variables(skill.id))
+            entry["variable_names"] = names
+        exported.append(entry)
+
+    return {
+        "version": 1,
+        "use_case": use_case,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "note": "Variablenwerte sind absichtlich nicht enthalten.",
+        "skills": exported,
+    }
+
+
+class SkillImport(BaseModel):
+    version: int = 1
+    skills: list[dict] = Field(default_factory=list)
+    overwrite: bool = Field(
+        default=False,
+        description="Bestehende Skills gleichen Namens ersetzen statt überspringen.",
+    )
+
+
+@router.post("/skills/{use_case}/import")
+async def import_skills(use_case: str, body: SkillImport):
+    """Create or update skills from an exported document.
+
+    Importing is importing *code that this platform will execute*, so the
+    result reports exactly what arrived — per skill, which functions now exist,
+    which of them ask before running, which hosts they may reach, and which
+    variables still have no value. An admin should not have to go looking for
+    that after the fact.
+
+    A skill whose name already exists is skipped unless ``overwrite`` is set;
+    that keeps a re-import from silently discarding local edits.
+    """
+    if body.version != 1:
+        return {"error": "unsupported_version",
+                "detail": f"Version {body.version} wird nicht unterstützt."}
+
+    existing = {s.name: s for s in await list_skills(use_case)}
+    created: list[dict] = []
+    updated: list[dict] = []
+    skipped: list[str] = []
+    failed: list[dict] = []
+
+    for entry in body.skills:
+        name = (entry.get("name") or "").strip()
+        if not name:
+            failed.append({"name": "(ohne Namen)", "error": "Kein Name angegeben."})
+            continue
+
+        skill = existing.get(name)
+        if skill is not None and not body.overwrite:
+            skipped.append(name)
+            continue
+
+        source = entry.get("code") or ""
+        file_name = entry.get("code_file_name") or ""
+        parsed = None
+        if source:
+            # Parse before writing anything: an unreadable file must not leave
+            # a half-imported skill behind.
+            try:
+                language = detect_language(file_name or "skill.py")
+                parsed = parse_skill_code(source, language)
+            except SkillCodeError as exc:
+                failed.append({"name": name, "error": str(exc)})
+                continue
+
+        try:
+            if skill is None:
+                skill = await create_skill(
+                    use_case, name,
+                    entry.get("overview", ""), entry.get("detailed_task", ""),
+                    enabled=bool(entry.get("enabled", True)),
+                    position=int(entry.get("position", 0)),
+                )
+                target = created
+            else:
+                await update_skill(
+                    skill.id,
+                    overview=entry.get("overview"),
+                    detailed_task=entry.get("detailed_task"),
+                    enabled=entry.get("enabled"),
+                    position=entry.get("position"),
+                )
+                target = updated
+
+            functions: list[dict] = []
+            if parsed:
+                functions = [
+                    {"name": f.name, "signature": f.signature(),
+                     "description": f.description, "params": list(f.params),
+                     "ask_for_permission": f.ask_for_permission,
+                     "allowed_domains": list(f.allowed_domains)}
+                    for f in parsed
+                ]
+                await set_skill_code(
+                    skill.id, language=language, file_name=file_name,
+                    source=source, functions=functions,
+                )
+
+                # A consent override is not in the source, so it has to travel
+                # in the document — but only in one direction. Adopting
+                # ``true`` re-applies a gate someone deliberately switched on.
+                # Adopting ``false`` would let a hand-edited file *remove* a
+                # gate the source file asks for, which is exactly the thing a
+                # signed-off skill must not be able to lose in transit.
+                declared = {
+                    f.get("name"): f.get("permission_override")
+                    for f in (entry.get("functions") or [])
+                    if isinstance(f, dict)
+                }
+                for fn in functions:
+                    if declared.get(fn["name"]) is True and not fn["ask_for_permission"]:
+                        await set_function_permission(skill.id, fn["name"], True)
+
+            elif skill.has_code and body.overwrite:
+                # The import says this skill has no code; honour that rather
+                # than leaving the previous file silently in place.
+                await clear_skill_code(skill.id)
+
+            # Report the *effective* state, read back from the database rather
+            # than from the parse above. An override carried across the rewrite
+            # is invisible in the parsed list, so reporting that list told an
+            # admin "asks for nothing" while a consent gate was in fact active
+            # — wrong exactly where the report is supposed to be trustworthy.
+            effective = await list_functions_for_skill(skill.id)
+            stored = await get_skill_variables(skill.id)
+            target.append({
+                "name": name,
+                "language": entry.get("code_language") or (
+                    detect_language(file_name) if file_name else None),
+                "functions": [f.signature for f in effective],
+                "needs_permission": [
+                    f.signature for f in effective if f.ask_for_permission
+                ],
+                "reaches_hosts": sorted({
+                    d for f in effective for d in f.allowed_domains
+                }),
+                "missing_variables": [
+                    n for n in (entry.get("variable_names") or []) if not stored.get(n)
+                ],
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skill import failed for %r: %s", name, exc)
+            failed.append({"name": name, "error": str(exc)[:300]})
+
+    return {
+        "status": "ok",
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+@router.get("/skills/{use_case}/executions")
+async def get_skill_executions(use_case: str, limit: int = 50):
+    """Audit trail: recent skill-function executions for a use case."""
+    try:
+        rows = await list_skill_executions(use_case, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": "read_failed", "detail": str(exc), "executions": []}
+    return {"use_case": use_case, "executions": rows}
 
 
 # ── Agent Actions ────────────────────────────────────────────

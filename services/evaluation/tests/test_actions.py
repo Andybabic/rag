@@ -84,6 +84,9 @@ class _FakeClient:
         if url.endswith("/v1/search"):
             has_material = "extra.material_class" in (json.get("filters") or {})
             return _FakeResp({"results": self._search_by_filter(has_material)})
+        if url.endswith("/v1/scroll"):
+            # Rüstunterlagen werden vollständig gelesen, nicht gesucht.
+            return _FakeResp({"points": []})
         raise AssertionError(f"unexpected url {url}")
 
 
@@ -252,3 +255,358 @@ async def test_fixture_programs_do_not_count_as_parts_and_machines_are_named():
     assert "VHM-FRAESER" not in obs
     assert "Maschine(n) Chiron 243" in obs
     assert res["chunks"][0]["metadata"]["machines"] == ["Chiron 243"]
+
+
+class _FilterAwareClient(_FakeClient):
+    """Wie ``_FakeClient``, reicht der Testfunktion aber die kompletten
+    ``filters`` durch – für die Bauteil-Eingrenzung."""
+
+    async def post(self, url, json=None, **kw):
+        if url.endswith("/v1/embed"):
+            return _FakeResp({"vector": [0.1, 0.2, 0.3], "model": "bge-m3"})
+        if url.endswith("/v1/search"):
+            return _FakeResp({"results": self._search_by_filter(json.get("filters") or {})})
+        if url.endswith("/v1/scroll"):
+            return _FakeResp({"points": []})
+        raise AssertionError(f"unexpected url {url}")
+
+
+def _patch_client_filters(search_by_filter):
+    return patch("core.actions.httpx.AsyncClient",
+                 lambda *a, **k: _FilterAwareClient(search_by_filter))
+
+
+@pytest.mark.anyio
+async def test_product_id_scopes_the_search():
+    """Die Bauteilnummer grenzt die Suche ein – auch wenn das Modell sie in
+    ``operation`` steckt, statt sie als ``product_id`` zu übergeben."""
+    own = [_cnc_hit(tool_type="MESSERKOPF", diameter=63.0, product_id="11221.5277",
+                    operation_type="Planfräsen")]
+    foreign = [_cnc_hit(tool_type="VHMI-BOHRER", diameter=5.0, product_id="11221.5805",
+                        operation_type="Bohren")]
+    seen: list[dict] = []
+
+    def by_filter(filters):
+        seen.append(filters)
+        return own if filters.get("extra.product_id") == "11221.5277" else foreign
+
+    with _patch_client_filters(by_filter):
+        res = await action_search_cnc(
+            {"operation": "11221.5277", "material": ""}, use_case="gw_stpoelten"
+        )
+
+    assert seen[0] == {"extra.product_id": "11221.5277"}
+    obs = res["observation"]
+    assert "Bauteil: 11221.5277" in obs
+    assert "MESSERKOPF Ø63 mm" in obs
+    assert "VHMI-BOHRER" not in obs  # fremdes Bauteil
+    assert "ACHTUNG" not in obs
+
+
+@pytest.mark.anyio
+async def test_foreign_products_are_flagged_and_not_recommended():
+    """Ohne Daten zum gefragten Bauteil sind fremde Treffer keine Empfehlung."""
+    foreign = [_cnc_hit(tool_type="MESSERKOPF", diameter=63.0, product_id="11221.5805",
+                        operation_type="Planfräsen")]
+
+    def by_filter(filters):
+        return [] if filters.get("extra.product_id") else foreign
+
+    with _patch_client_filters(by_filter):
+        res = await action_search_cnc(
+            {"operation": "Planfräsen", "product_id": "11221.5277"},
+            use_case="gw_stpoelten",
+        )
+
+    obs = res["observation"]
+    assert "ACHTUNG" in obs and "11221.5277" in obs
+    assert "Empfehlung:" not in obs
+
+
+@pytest.mark.anyio
+async def test_chunks_without_tool_type_are_not_recommended():
+    hits = [
+        _cnc_hit(tool_type=None, diameter=None, product_id="11221.7126",
+                 operation_type="Bohren"),
+        _cnc_hit(tool_type=None, diameter=None, product_id="11221.7238",
+                 operation_type="Planfräsen"),
+        _cnc_hit(tool_type="HB SF", diameter=10.0, product_id="11221.7199",
+                 operation_type="Taschenfräsen"),
+    ]
+    with _patch_client(lambda has_mat: hits):
+        res = await action_search_cnc({"operation": "Taschenfräsen"},
+                                      use_case="gw_stpoelten")
+
+    obs = res["observation"]
+    assert "unbekanntes Werkzeug" not in obs
+    assert "Empfehlung: HB SF Ø10 mm" in obs
+
+
+@pytest.mark.anyio
+async def test_object_args_do_not_crash():
+    """Kleine Modelle liefern für ein Feld auch mal ein Objekt statt Text."""
+    hits = [_cnc_hit(tool_type="HB SF", diameter=10.0, product_id="11221.7126",
+                     operation_type="Taschenfräsen")]
+    with _patch_client(lambda has_mat: hits):
+        res = await action_search_cnc(
+            {"operation": {"value": "Taschenfräsen"},
+             "material": {"bauteil": "11221.7126"},
+             "missing_tool": ["VHM", "Fräser"]},
+            use_case="gw_stpoelten",
+        )
+
+    assert "HB SF Ø10 mm" in res["observation"]
+
+
+# ── Werkzeugnummer aus dem Programm ("T5") ───────────────────
+
+
+def _cnc_hit_tid(tool_id, **kw):
+    hit = _cnc_hit(**kw)
+    hit["metadata"]["extra"]["tool_id"] = tool_id
+    return hit
+
+
+@pytest.mark.anyio
+async def test_tool_number_is_filtered_and_shown():
+    """„Bei 11221.3350 fehlen zu T5 die Schnittdaten" – T5 steht als
+    ``extra.tool_id`` am Schritt, samt Drehzahl und Vorschub."""
+    t5 = [_cnc_hit_tid("T5", tool_type="FASENFRAESER", diameter=8.0,
+                       product_id="11221.3350", operation_type="Fasenfräsen",
+                       spindle_speed=12000, feed=4000)]
+    seen: list[dict] = []
+
+    def by_filter(filters):
+        seen.append(filters)
+        return t5 if filters.get("extra.tool_id") == "T5" else []
+
+    with _patch_client_filters(by_filter):
+        res = await action_search_cnc(
+            {"operation": "T5 Schnittdaten", "product_id": "11221.3350"},
+            use_case="gw_stpoelten",
+        )
+
+    assert seen[0] == {"extra.tool_id": "T5", "extra.product_id": "11221.3350"}
+    obs = res["observation"]
+    assert "Werkzeug-Nr. T5" in obs
+    assert "S 12000" in obs and "F 4000" in obs
+    assert "ACHTUNG" not in obs
+
+
+@pytest.mark.anyio
+async def test_unknown_tool_number_says_so():
+    other = [_cnc_hit_tid("T12", tool_type="MESSERKOPF", diameter=125.0,
+                          product_id="11221.3350", operation_type="Planfräsen")]
+
+    def by_filter(filters):
+        return [] if filters.get("extra.tool_id") else other
+
+    with _patch_client_filters(by_filter):
+        res = await action_search_cnc(
+            {"tool_id": "T99", "product_id": "11221.3350"},
+            use_case="gw_stpoelten",
+        )
+
+    obs = res["observation"]
+    assert "T99" in obs and "ACHTUNG" in obs
+    assert "Werkzeug-Nr. T12" in obs
+
+
+@pytest.mark.anyio
+async def test_the_product_filter_outlives_the_tool_number():
+    """Werkzeugnummern gelten je Programm: „T5" in einem anderen Bauteil ist
+    ein anderes Werkzeug. Deshalb fällt die Nummer vor dem Bauteil."""
+    own = [_cnc_hit_tid("T12", tool_type="MESSERKOPF", diameter=125.0,
+                        product_id="11221.3350", operation_type="Planfräsen")]
+    seen: list[dict] = []
+
+    def by_filter(filters):
+        seen.append(dict(filters))
+        if filters.get("extra.tool_id"):
+            return []
+        return own if filters.get("extra.product_id") else []
+
+    with _patch_client_filters(by_filter):
+        res = await action_search_cnc(
+            {"tool_id": "T5", "product_id": "11221.3350"},
+            use_case="gw_stpoelten",
+        )
+
+    # Nie nach der Werkzeugnummer ohne Bauteil gesucht.
+    assert not any("extra.tool_id" in f and "extra.product_id" not in f for f in seen)
+    assert "11221.3350" in res["observation"]
+
+
+def test_material_state_is_not_a_tool_number():
+    """„EN AW-6005A T6" ist ein Werkstoffzustand, keine Werkzeugnummer.
+
+    Gleiches Muster, gegenteilige Bedeutung – und der Werkstoff kommt in
+    diesem Bestand bei jedem zweiten Bauteil vor.
+    """
+    from core.actions import _TOOL_ID_RE, _without_material_tempers
+
+    assert not _TOOL_ID_RE.findall(_without_material_tempers("EN AW-6005A T6"))
+    assert not _TOOL_ID_RE.findall(_without_material_tempers("6082 T651"))
+    assert _TOOL_ID_RE.findall(_without_material_tempers("Werkzeug T5 fehlt")) == ["5"]
+
+
+def test_material_state_survives_tool_number_stripping():
+    """Der Werkstoff darf beim Herauslösen der Nummer nicht verschwinden."""
+    from core.actions import _strip_tool_ids
+
+    assert "AW-6005A T6" in _strip_tool_ids("Fräsen EN AW-6005A T6 mit Werkzeug T5")
+
+
+# ── Nachprüfbarkeit: Herkunft und Einstellblätter ────────────
+
+
+class _CollectionAwareClient(_FakeClient):
+    """Reicht Collection UND Filter durch – SEARCH_CNC sucht in zweien."""
+
+    async def post(self, url, json=None, **kw):
+        if url.endswith("/v1/embed"):
+            return _FakeResp({"vector": [0.1, 0.2, 0.3], "model": "bge-m3"})
+        if url.endswith("/v1/search"):
+            return _FakeResp({"results": self._search_by_filter(
+                json.get("collection"), json.get("filters") or {})})
+        if url.endswith("/v1/scroll"):
+            # ``scroll`` liefert Payloads statt Treffer – flach, mit text.
+            hits = self._search_by_filter(json.get("collection"),
+                                          json.get("filters") or {})
+            return _FakeResp({"points": [
+                {**(h.get("metadata") or {}), "text": h.get("text", "")}
+                for h in hits
+            ]})
+        raise AssertionError(f"unexpected url {url}")
+
+
+def _patch_client_collections(fn):
+    return patch("core.actions.httpx.AsyncClient",
+                 lambda *a, **k: _CollectionAwareClient(fn))
+
+
+def _ruest_hit():
+    return {
+        "chunk_id": "eb1", "score": 0.7,
+        "text": "[11221.3350 (Chiron 233-1) – Einstellblatt 1.pdf] Identnummer: 11221.3350",
+        "metadata": {
+            "file_name": "11221.3350 (Chiron 233-1) – Einstellblatt 1.pdf",
+            "stored_path": "gw_stpoelten/ab/abcd_Einstellblatt 1.pdf",
+            "page": 1,
+            "extra": {"product_id": "11221.3350", "doc_kind": "einstellblatt"},
+        },
+    }
+
+
+def _cnc_hit_with_source(**kw):
+    hit = _cnc_hit_tid("T5", **kw)
+    hit["text"] = ("Bearbeitungsschritt: Fasenfräsen.\nWerkzeug: FASENFRAESER, "
+                   "Werkzeug-Nr. T5.\nSchnittparameter: Drehzahl 12000, Vorschub 4000.")
+    hit["metadata"]["file_name"] = "112213350"
+    hit["metadata"]["extra"]["program_name"] = "112213350"
+    hit["metadata"]["extra"]["source_line"] = 139
+    return hit
+
+
+@pytest.mark.anyio
+async def test_a_cited_tool_can_be_traced_back_to_its_program():
+    """Ohne Herkunft steht in der Quellenansicht nur „– 1 Projekte"."""
+    def by_col(collection, filters):
+        if collection == "gw_cnc_steps":
+            return [_cnc_hit_with_source(
+                tool_type="FASENFRAESER", diameter=8.0, product_id="11221.3350",
+                operation_type="Fasenfräsen", spindle_speed=12000, feed=4000)]
+        return []
+
+    with _patch_client_collections(by_col):
+        res = await action_search_cnc(
+            {"tool_id": "T5", "product_id": "11221.3350"}, use_case="gw_stpoelten")
+
+    chunk = res["chunks"][0]
+    assert chunk["metadata"]["file_name"] == "112213350"
+    assert chunk["metadata"]["extra"]["source_line"] == 139
+    assert "Drehzahl 12000" in chunk["text"]  # Originalzeile, nicht die Zusammenfassung
+    assert "Programm 112213350" in res["observation"]
+
+
+@pytest.mark.anyio
+async def test_setup_sheets_are_offered_as_the_checkable_source():
+    def by_col(collection, filters):
+        if collection == "gw_cnc_steps":
+            return [_cnc_hit_with_source(
+                tool_type="FASENFRAESER", diameter=8.0, product_id="11221.3350",
+                operation_type="Fasenfräsen")]
+        return [_ruest_hit()]
+
+    with _patch_client_collections(by_col):
+        res = await action_search_cnc(
+            {"tool_id": "T5", "product_id": "11221.3350"}, use_case="gw_stpoelten")
+
+    assert "gw_ruest_data" in res["searched_collections"]
+    assert "Einstellblatt 1.pdf, S. 1" in res["observation"]
+    eb = res["chunks"][-1]
+    assert eb["metadata"]["stored_path"].endswith("Einstellblatt 1.pdf")
+    assert eb["metadata"]["page"] == 1
+
+
+@pytest.mark.anyio
+async def test_without_a_product_no_setup_sheets_are_pulled():
+    """Einstellblätter ohne Bauteilbezug wären die Blätter irgendeines Teils."""
+    seen: list[str] = []
+
+    def by_col(collection, filters):
+        seen.append(collection)
+        return [_cnc_hit_with_source(
+            tool_type="FASENFRAESER", diameter=8.0, product_id="11221.3350",
+            operation_type="Fasenfräsen")]
+
+    with _patch_client_collections(by_col):
+        res = await action_search_cnc({"operation": "Fasenfräsen"},
+                                      use_case="gw_stpoelten")
+
+    assert "gw_ruest_data" not in seen
+    assert res["searched_collections"] == ["gw_cnc_steps"]
+
+
+# ── Werkzeug ohne Typ im Programm ────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_a_tool_known_only_by_its_number_is_still_a_tool():
+    """Im Betrieb der teuerste Fall: Der Dm63 Messerkopf steht im Programm
+    von 11221.5277 als T20 ganz ohne Werkzeugtyp – nur „Planfräsen
+    schruppen", S 7000, F 2000. Ihn zu verwerfen hiess dem Rüster sagen, das
+    Werkzeug werde nicht verwendet, obwohl es im Einstellblatt unter
+    derselben Nummer steht.
+    """
+    hit = _cnc_hit(tool_type=None, diameter=None, product_id="11221.5277",
+                   operation_type="Planfräsen", spindle_speed=7000, feed=2000)
+    hit["metadata"]["extra"]["tool_id"] = "T20"
+    hit["metadata"]["extra"]["operation_label"] = "Planfräsen schruppen"
+
+    with _patch_client(lambda has_mat: [hit]):
+        res = await action_search_cnc({"operation": "Planfräsen",
+                                       "product_id": "11221.5277"},
+                                      use_case="gw_stpoelten")
+
+    obs = res["observation"]
+    assert "Werkzeug-Nr. T20" in obs
+    assert "Typ im Programm nicht hinterlegt" in obs
+    assert "Planfräsen schruppen" in obs  # Bezeichnung als einziger Hinweis
+    assert "S 7000" in obs and "F 2000" in obs
+
+
+@pytest.mark.anyio
+async def test_numberless_typeless_steps_are_still_dropped():
+    """Ohne Typ UND ohne Nummer bleibt nichts, was man rüsten könnte."""
+    junk = _cnc_hit(tool_type=None, diameter=None, product_id="11221.5277",
+                    operation_type="unbekannt")
+    real = _cnc_hit(tool_type="HB SF", diameter=10.0, product_id="11221.5277",
+                    operation_type="Taschenfräsen")
+
+    with _patch_client(lambda has_mat: [junk, real]):
+        res = await action_search_cnc({"operation": "Taschenfräsen"},
+                                      use_case="gw_stpoelten")
+
+    assert "unbekanntes Werkzeug" not in res["observation"]
+    assert "Empfehlung: HB SF Ø10 mm" in res["observation"]

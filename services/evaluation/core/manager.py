@@ -21,10 +21,12 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from config import settings
+from core.actions import product_scope
 from core.agent import run_agent
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import (
@@ -34,9 +36,11 @@ from core.llm import (
     call_llm,
 )
 from core.memory_rag import format_memory, recall, remember
+from core.skill_functions import apply_skill_functions
+from shared.skills import find_calls
 from shared.llm import vision_describe
 from shared.llm.pipeline import get_last_llm_timing, reset_llm_timing
-from shared.usecase_config import resolve_config
+from shared.usecase_config import list_skill_functions, resolve_config
 from core.roles import (
     DEFAULT_ROLE,
     VALID_ROLES,
@@ -130,6 +134,16 @@ REGELN:
 - NIE mehr als 3 Sub-Tasks. Lieber einen weglassen als zwei ähnliche.
 - Jede sub_query muss eigenständig durchsuchbar sein (keine Pronomen,
   keine Bezüge auf andere Sub-Tasks).
+- KEINE Platzhalter in der sub_query. Schreibe nie "(Standort)", "[Name]"
+  oder "<Ort>". Setze den konkreten Wert aus der Anfrage ein; fehlt er,
+  nimm den Ort/Gegenstand aus dem fachlichen Kontext des Use Cases. Eine
+  sub_query mit Platzhalter ist unbeantwortbar — weder die Suche noch ein
+  Werkzeug weiss damit etwas anzufangen, und der Spezialist verbrennt seine
+  Schritte an einer Frage, die niemand stellen wollte.
+- KEIN Sub-Task für reines Allgemeinwissen ("Welche Kleidung trägt man bei
+  Regen?", "Was ist ein Fahrplan?"). Dafür gibt es weder Dokumente noch
+  Werkzeuge; ein solcher Sub-Task kostet eine volle Agenten-Runde und
+  liefert garantiert "keine Information". Lieber ein Sub-Task weniger.
 
 Antworte AUSSCHLIESSLICH mit gültigem JSON in genau diesem Schema:
 
@@ -206,6 +220,88 @@ def _fallback_plan(query: str) -> dict:
     }
 
 
+#: Placeholder tokens the decomposer leaves in a sub_query. Instructing it not
+#: to produce them helps but does not hold — small models reproduce the shape
+#: of the question they were given.
+#:
+#: Square and angle brackets are always placeholders: nobody writes "[Standort]"
+#: meaning a place. Round brackets are not — "(Niederösterreich)", "(Oder)" and
+#: "(Bayern)" are exactly how a German question disambiguates a place name, and
+#: stripping those would damage a perfectly good sub-query. So round brackets
+#: only count when they wrap one of the generic slot words below.
+_PLACEHOLDER_WORDS = (
+    "standort|ort|ortsname|stadt|adresse|name|nummer|datum|zeitpunkt|zeit|"
+    "wert|zahl|betrag|menge|gegenstand|objekt|thema|begriff|platzhalter|"
+    "hier einfügen|einfügen|angeben|bitte angeben|xxx|tbd|todo|x|y|z"
+)
+_PLACEHOLDER_RE = re.compile(
+    r"[\[<]\s*[^\]>]{0,40}\s*[\]>]"                       # [irgendwas], <irgendwas>
+    # "(Standort)" but also "(Standort: [konkreter Ort])" — the decomposer
+    # nests them, and stripping only the inner bracket leaves "(Standort: )".
+    rf"|\(\s*(?:{_PLACEHOLDER_WORDS})\s*(?::[^)]*)?\)",
+    re.IGNORECASE,
+)
+
+
+def _strip_placeholders(sub_query: str, fallback_query: str) -> str:
+    """Remove placeholder tokens from a sub-query, or fall back to the question.
+
+    A sub_query like "Wie wird das Wetter morgen in Gebäude A (Standort)?" is
+    unanswerable by construction: the retrieval has nothing to match and a tool
+    has nothing to pass along. The specialist then spends its whole step budget
+    on a question nobody asked — measured at 30-55 s per occurrence. Left with
+    too little to search for, the user's own wording is the better bet.
+    """
+    if not _PLACEHOLDER_RE.search(sub_query):
+        return sub_query
+    stripped = _PLACEHOLDER_RE.sub("", sub_query)
+    stripped = re.sub(r"\s{2,}", " ", stripped)
+    # Removing "(Standort)" from "... für morgen in (Standort)?" leaves a
+    # dangling "in ?" — worse than the placeholder, because it reads like a
+    # complete question.
+    # Removing the placeholders leaves the words that pointed at them:
+    # "… morgen in (Standort) und (Standort) sein?" becomes "… morgen in und
+    # sein?". Patching that reliably is not worth it — a sub-query with a
+    # dangling preposition is a broken question either way, so the caller
+    # drops it and the remaining sub-tasks do the work.
+    _DANGLING = (
+        r"(?:^|\s)(?:in|im|für|fuer|an|am|bei|beim|zu|zum|zur|von|vom|nach|auf)"
+        r"(?=\s*(?:und|oder|sowie|bzw\.?)?\s*[?.!:,]*\s*$)"
+    )
+    stripped = re.sub(_DANGLING, "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s+(und|oder|sowie)\s*([?.!:,]*)\s*$", r"\2",
+                      stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s{2,}", " ", stripped)
+    stripped = re.sub(r"\s+([?.!,;:])", r"\1", stripped).strip(" ,;:").strip()
+    # Deliberately NOT discarding a sub-query that still reads a little rough
+    # ("… morgen in und sein?"). Tried that: it threw away the weather sub-task
+    # of every run, leaving a single sub-task and no tool call at all. A clumsy
+    # question the agent can still work with beats no question.
+    # Fewer than a handful of real words left means the placeholder *was* the
+    # question. Returning the user's original would be a reasonable stand-in
+    # for one sub-task — but the decomposer emits several, and two of them
+    # collapsing onto the same fallback produced three near-identical sub-tasks
+    # that all searched for the same thing. An empty string tells the caller to
+    # drop the sub-task instead; one good sub-task beats three copies.
+    if len(stripped.split()) < 4:
+        return ""
+    return stripped
+
+
+def _with_product_scope(sub_query: str, scoped_product: str | None) -> str:
+    """Die Bauteilnummer der Nutzerfrage in jeder sub_query festhalten.
+
+    Die Bauteil-Eingrenzung der Suche liest die Nummer aus der Frage, die der
+    Sub-Agent stellt – und die schreibt der Planer neu. Aus „11221.5277, der
+    Dm63 Messerkopf fehlt" wird „Ist der Messerkopf Dm63 verfügbar?", die
+    Eingrenzung entfällt lautlos, und der Sub-Agent antwortet mit den
+    Rüstdaten eines fremden Bauteils.
+    """
+    if not scoped_product or scoped_product in sub_query:
+        return sub_query
+    return f"{sub_query} (Bauteil {scoped_product})"
+
+
 def _normalise_plan(raw: dict, fallback_query: str) -> dict:
     """Validate + clamp the decomposer output. Always returns a usable plan."""
     if not isinstance(raw, dict):
@@ -222,6 +318,20 @@ def _normalise_plan(raw: dict, fallback_query: str) -> dict:
         role = st.get("role") if st.get("role") in VALID_ROLES else DEFAULT_ROLE
         sub_query = (st.get("sub_query") or "").strip()
         if not sub_query:
+            continue
+        cleaned_query = _strip_placeholders(sub_query, fallback_query)
+        if cleaned_query != sub_query:
+            logger.info(
+                "Removed placeholders from a sub-query: %r → %r",
+                sub_query, cleaned_query or "(verworfen)",
+            )
+            if not cleaned_query:
+                continue
+            sub_query = cleaned_query
+        # Two sub-tasks asking the same thing double the cost and add nothing;
+        # stripping placeholders can make previously distinct queries collide.
+        if any(c["sub_query"].casefold() == sub_query.casefold() for c in cleaned):
+            logger.info("Dropped a duplicate sub-query: %r", sub_query)
             continue
         focus = (st.get("focus") or "").strip()
         cleaned.append({"role": role, "sub_query": sub_query, "focus": focus})
@@ -326,6 +436,7 @@ async def plan_subtasks(
     image_context: str = "",
     memory: str = "",
     domain_prompt: str = "",
+    skill_functions: list | None = None,
 ) -> dict:
     """Ask the manager LLM to decompose the query.
 
@@ -365,6 +476,44 @@ async def plan_subtasks(
             user_msg_parts.extend(f"- {m}" for m in prior_user)
 
     system = _DECOMPOSER_SYSTEM
+
+    # Without this the planner only knows how to search documents, so a part of
+    # the question that only a tool can answer is dropped during decomposition
+    # — and once a sub-task for it does not exist, no sub-agent can rescue it.
+    # Observed: "wird es regnen? welchen Bus…" produced two bus sub-tasks and
+    # silently lost the weather half.
+    if skill_functions:
+        lines = [
+            "",
+            "ZUSÄTZLICHE WERKZEUGE (kein Dokumentenbestand):",
+            "Für diesen Use Case stehen den Spezialisten ausserdem diese "
+            "Funktionen zur Verfügung. Sie liefern Live-Daten, die in KEINEM "
+            "Dokument stehen können:",
+        ]
+        by_skill: dict[str, list] = {}
+        for fn in skill_functions:
+            by_skill.setdefault(fn.skill_name, []).append(fn)
+        for skill_name, fns in by_skill.items():
+            overview = (fns[0].skill_overview or "").strip()
+            lines.append(f"- {skill_name}" + (f" — {overview}" if overview else ""))
+            for fn in fns:
+                description = f": {fn.description}" if fn.description else ""
+                lines.append(f"    {skill_name}.{fn.signature or fn.name}{description}")
+        lines += [
+            "",
+            "REGEL: Wenn ein Teil der Anfrage von einem dieser Werkzeuge "
+            "beantwortet werden kann, MUSS dieser Teil einen EIGENEN Sub-Task "
+            "bekommen — auch dann, wenn die Dokumente dazu nichts hergeben. "
+            "Genau dafür sind die Werkzeuge da.",
+            "Lass NIE einen Teil der Anfrage weg, nur weil er nicht nach "
+            "Dokumenten klingt. Eine Frage nach Wetter, Messwerten oder "
+            "aktuellen Zuständen ist ein vollwertiger Sub-Task.",
+            "Formuliere solche sub_queries als die Frage selbst (z.B. "
+            "„Wie wird das Wetter morgen in St. Pölten?“), nicht als "
+            "Suchbegriffe — der Spezialist ruft damit das Werkzeug auf.",
+        ]
+        system += "\n".join(lines) + "\n"
+
     if domain_prompt.strip():
         if len(domain_prompt.strip()) > _DOMAIN_BRIEF_CHARS:
             # Silence here would look like the planner ignoring the domain: a
@@ -423,13 +572,30 @@ def _build_sub_system_prompt(base_prompt: str, role: RoleConfig, focus: str) -> 
     return f"{base_prompt}\n{role.prompt_suffix}{focus_block}"
 
 
+#: Events that must reach the client unwrapped. A sub-agent event is normally
+#: a trace entry the UI groups under its agent; these four drive a dialog the
+#: user has to answer and a live status line, and the frontend matches them on
+#: the top-level ``type``.
+_PASSTHROUGH_EVENTS = frozenset({
+    "permission_request", "permission_resolved",
+    "function_started", "function_result",
+})
+
+
 def _wrap_event(
-    on_event: StepCallback, *, sub_id: str, role: str
+    on_event: StepCallback, *, sub_id: str, role: str, deadline=None
 ) -> StepCallback:
     """Wrap an ``on_event`` callback so sub-agent events are tagged.
 
     Returns ``None`` if the caller didn't supply a callback — keeps the
     ``run_agent`` signature happy.
+
+    *deadline* is the sub-agent's :func:`asyncio.timeout` context. When a
+    permission prompt goes out, the agent stops working and a human starts
+    thinking — and that time must not count against a budget meant for the
+    agent's own work. Without pushing the deadline out, a user who takes 60 s
+    to decide leaves the specialist 90 s to finish, and one who takes longer
+    than the budget kills it outright.
     """
     if on_event is None:
         return None
@@ -440,6 +606,25 @@ def _wrap_event(
         # the inner loop — the manager emits its own lifecycle events.
         inner_type = event.get("type")
         if inner_type in ("started", "final"):
+            return
+        if inner_type == "permission_request" and deadline is not None:
+            try:
+                deadline.reschedule(
+                    asyncio.get_running_loop().time()
+                    + settings.SUBAGENT_TIMEOUT_S
+                    + float(event.get("timeout_s") or 0)
+                )
+            except (RuntimeError, AttributeError) as exc:  # already expired
+                logger.debug("Could not extend the sub-agent deadline: %s", exc)
+
+        if inner_type in _PASSTHROUGH_EVENTS:
+            # These are not trace entries, they are a conversation with the
+            # user. Wrapping a permission_request made it invisible to the
+            # frontend, which matches on the top-level type — so the dialog
+            # never appeared, the request timed out as "denied" after 120 s,
+            # and the sub-agent then burned its whole 150 s budget waiting.
+            await on_event({**event, "subagent_id": sub_id,
+                            "subagent_role": role})
             return
         await on_event({
             "type": "subagent_step",
@@ -467,6 +652,8 @@ async def _run_one_subagent(
     images: list[str] | None,
     image_context: str,
     on_event: StepCallback,
+    request_id: str | None = None,
+    username: str | None = None,
 ) -> dict:
     """Run a single sub-agent. Wraps ``run_agent`` with the role config."""
     _t0 = time.perf_counter()
@@ -488,8 +675,8 @@ async def _run_one_subagent(
         # stuck on an unresponsive LLM call would otherwise define the whole
         # phase duration. Cutting it loose lets the healthy specialists' output
         # reach the synthesizer instead of the request stalling on the slowest.
-        result = await asyncio.wait_for(
-            run_agent(
+        async with asyncio.timeout(settings.SUBAGENT_TIMEOUT_S) as _deadline:
+            result = await run_agent(
                 query=sub_query,
                 use_case=use_case,
                 session_id=session_id,
@@ -502,10 +689,12 @@ async def _run_one_subagent(
                 images=images,
                 image_context=image_context,
                 persist_memory=False,  # the manager owns the moderated memory update
-                on_event=_wrap_event(on_event, sub_id=sub_id, role=role.name),
-            ),
-            timeout=settings.SUBAGENT_TIMEOUT_S,
-        )
+                request_id=request_id,
+                username=username,
+                on_event=_wrap_event(
+                    on_event, sub_id=sub_id, role=role.name, deadline=_deadline
+                ),
+            )
     except asyncio.TimeoutError:
         logger.warning(
             f"Sub-agent {sub_id} ({role.name}) exceeded "
@@ -575,10 +764,28 @@ Antwort eines dokumenten-fokussierten RAG-Systems gegen den globalen
 Chunk-Pool. Du veränderst die Antwort NICHT — du gibst nur ein Urteil ab.
 
 PRÜFKRITERIEN:
-1. Citation-Coverage: Wird jede Tatsachenbehauptung mit [n] belegt?
+1. Citation-Coverage: Wird jede Tatsachenbehauptung belegt — mit [n] oder durch
+   einen Skill-Funktionsaufruf (siehe unten)?
 2. Quellenechtheit: Belegen die referenzierten Chunks die Aussage tatsächlich?
-3. Halluzination: Enthält die Antwort Fakten, die in keinem Chunk stehen?
+3. Halluzination: Enthält die Antwort Fakten, die weder in einem Chunk stehen
+   noch aus einem Skill-Aufruf stammen?
 4. Use-Case-Policy: Wenn der System-Prompt Regeln nennt, werden sie eingehalten?
+
+SKILL-FUNKTIONSAUFRUFE (zweite zulässige Quelle):
+- Ein Ausdruck der Form skill.funktion("argument") im Antworttext ist KEINE
+  Halluzination und KEIN fehlender Beleg. Es ist ein Platzhalter: die Plattform
+  führt die Funktion nach deiner Prüfung aus und ersetzt ihn durch das echte
+  Ergebnis. Der Wert stammt also nicht vom Modell.
+- Solche Aufrufe brauchen KEIN [n]. Sie stehen naturgemäss in keinem Chunk —
+  das ist erwartet und darf NIEMALS beanstandet werden.
+- Eine Antwort, die nur aus Text plus solchen Aufrufen besteht, ist "OK", auch
+  wenn der Chunk-Pool leer ist oder kein einziges [n] vorkommt.
+- Ein Satz wie „laut Skill wetter" ist die korrekte Quellenangabe dafür.
+- Werte aus einer OBSERVATION eines Skill-Aufrufs sind ebenso belegt. Sie
+  stehen in keinem Chunk — das ist erwartet und nie ein Mangel. Erkennbar an
+  einer Herkunftsangabe im Satz wie „laut Skill wetter".
+- Ein solcher Wert braucht KEIN [n], und ein [n] dahinter ist sogar falsch:
+  es verweist auf ein Dokument, das ihn nicht belegt. Beanstande das ruhig.
 
 VORGEHEN (verbindlich):
 - Lies den zitierten Chunk VOLLSTÄNDIG, bis zum letzten Zeichen, bevor du
@@ -673,12 +880,26 @@ REGELN (hart):
 - Verwende AUSSCHLIESSLICH die globalen Chunks aus dem GLOBAL_CHUNK_POOL
   als Faktenquelle. Die Antwort-Fragmente der Spezialisten sind nur
   Vorschläge — prüfe gegen den Pool.
+- AUSNAHME: Werte aus einer ausgeführten Skill-Funktion. Erkennbar an einer
+  Herkunftsangabe, die BEREITS IM FRAGMENT STEHT, z.B. „laut Skill wetter".
+  Schreibe diese Formel NIEMALS selbst hin. Steht sie in keinem Fragment, gab
+  es keinen Skill-Aufruf — dann ist jeder Wert, den du ihm zuschreibst, frei
+  erfunden. Das ist der schwerste Fehler, den du machen kannst. Sie stammen aus einer
+  definierten Quelle, nicht vom Modell, und stehen naturgemäss in KEINEM
+  Chunk. Übernimm sie unverändert in die Antwort und behalte die
+  Herkunftsangabe bei. Sie brauchen KEIN [n] — ein [n] dahinter wäre sogar
+  falsch, weil es auf ein Dokument zeigt, das den Wert nicht belegt.
+- Ein solcher Wert ist eine vollwertige Antwort auf seinen Teil der Frage.
+  Schreibe NIE „dazu enthalten die Dokumente keine Information", wenn ein
+  Fragment den Wert bereits geliefert hat — das verwirft eine korrekte
+  Auskunft und ist der schlimmere Fehler.
 - Jede Tatsachenbehauptung muss mit [n] belegt sein, wobei n die globale
   Chunk-Nummer ist (nicht die lokale Nummerierung der Spezialisten).
 - Der GLOBAL_CHUNK_POOL nennt dir den gültigen Nummernbereich. Zitiere
   AUSSCHLIESSLICH Nummern aus diesem Bereich; eine Nummer ausserhalb wird
   nachträglich entfernt. Das ist KEIN Grund, seltener zu zitieren: eine
-  Antwort ganz ohne [n] ist immer falsch. Im Zweifel nimm die Nummer des
+  Antwort ganz ohne [n] ist falsch — es sei denn, sie besteht ausschliesslich
+  aus Skill-Werten (siehe Ausnahme oben). Im Zweifel nimm die Nummer des
   Chunks, aus dem die Aussage stammt.
 - PLATZIERUNG: Das [n] steht DIREKT bei der Aussage, die es belegt — am
   Ende des jeweiligen Satzes oder Listenpunkts, mitten im Text. So sieht
@@ -891,6 +1112,305 @@ def _format_fragments(subagents: list[dict]) -> str:
             body = _LOCAL_REF_RE.sub("", body).strip()
         lines.append(f"{header}\n{body}")
     return "\n\n".join(lines)
+
+
+# ── Nachrecherche: eine gezielte zweite Runde ───────────────────────────────
+
+async def _run_gap_round(
+    query: str,
+    *,
+    use_case: str,
+    session_id: str,
+    use_case_prompt: str,
+    available_actions: list[str],
+    collection: str,
+    filters: dict | None,
+    images: list[str] | None,
+    image_context: str,
+    subagents: list[dict],
+    elapsed_s: float,
+    on_event: StepCallback,
+    request_id: str | None,
+    username: str | None,
+) -> tuple[list[dict], dict | None]:
+    """Eine gezielte zweite Runde, wenn Runde 1 ein benennbares Loch liess.
+
+    Gibt ``(zusätzliche Sub-Agents, Phasen-Eintrag)`` zurück; ohne Lücke oder
+    ohne brauchbaren Vorschlag bleibt beides leer — der Normalfall.
+    """
+    if not settings.MANAGER_GAP_ROUND:
+        return [], None
+    if elapsed_s > settings.GAP_ROUND_DEADLINE_S:
+        logger.info(
+            "Gap round skipped: %.0fs already spent (limit %.0fs)",
+            elapsed_s, settings.GAP_ROUND_DEADLINE_S,
+        )
+        return [], None
+
+    global_chunks = _merge_chunks(subagents)
+    gaps = _find_gaps(query, use_case=use_case, subagents=subagents,
+                      global_chunks=global_chunks)
+    if not gaps:
+        return [], None
+
+    _t0 = time.perf_counter()
+    try:
+        # Harte Obergrenze über Vorschlag UND Ausführung. Ohne sie hing die
+        # Runde am selben langsamen LLM wie alles andere und hat die Anfrage
+        # glatt verdoppelt: gemessen 87 s Nachrecherche auf 66 s Hauptlauf.
+        # Lieber eine Antwort ohne Nachschlag als eine, auf die niemand wartet.
+        async with asyncio.timeout(settings.GAP_ROUND_TIMEOUT_S):
+            return await _gap_round_inner(
+                query, use_case=use_case, session_id=session_id,
+                use_case_prompt=use_case_prompt,
+                available_actions=available_actions, collection=collection,
+                filters=filters, images=images, image_context=image_context,
+                subagents=subagents, gaps=gaps, global_chunks=global_chunks,
+                started_at=_t0, on_event=on_event, request_id=request_id,
+                username=username,
+            )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Gap round exceeded %.0fs — dropped, answering with round 1",
+            settings.GAP_ROUND_TIMEOUT_S,
+        )
+        return [], None
+
+
+async def _gap_round_inner(
+    query: str,
+    *,
+    use_case: str,
+    session_id: str,
+    use_case_prompt: str,
+    available_actions: list[str],
+    collection: str,
+    filters: dict | None,
+    images: list[str] | None,
+    image_context: str,
+    subagents: list[dict],
+    gaps: list[str],
+    global_chunks: list[dict],
+    started_at: float,
+    on_event: StepCallback,
+    request_id: str | None,
+    username: str | None,
+) -> tuple[list[dict], dict | None]:
+    """Vorschlag + Ausführung der Nachrunde, unter der Zeitgrenze des Aufrufers."""
+    _t0 = started_at
+    new_subtasks = await propose_gap_subtasks(
+        query, use_case=use_case, gaps=gaps, subagents=subagents,
+        global_chunks=global_chunks,
+    )
+    if not new_subtasks:
+        logger.info("Gap round: %d gap(s), no promising follow-up query", len(gaps))
+        return [], None
+
+    logger.info(
+        "Gap round: %d gap(s) → %s",
+        len(gaps), [st["sub_query"] for st in new_subtasks],
+    )
+    # Knappes Schritt-Budget: Die Nachrunde hat genau eine Suche plus Antwort
+    # zu leisten. Wer hier nochmal frei herumsucht, kostet die Zeit, die die
+    # Runde einsparen sollte.
+    role = replace(get_role("facts"), max_steps=_GAP_STEP_BUDGET)
+    offset = len(subagents)
+    extra = await asyncio.gather(*[
+        _run_one_subagent(
+            sub_id=f"sub-{offset + i}-{role.name}",
+            sub_query=st["sub_query"],
+            role=role,
+            focus=st.get("focus", ""),
+            use_case=use_case,
+            session_id=session_id,
+            use_case_prompt=use_case_prompt,
+            available_actions=available_actions,
+            collection=collection,
+            filters=filters,
+            images=images,
+            image_context=image_context,
+            on_event=on_event,
+            request_id=request_id,
+            username=username,
+        )
+        for i, st in enumerate(new_subtasks, 1)
+    ])
+    extra = list(extra)
+    phase = {
+        "id": "gap_round",
+        "label": "Nachrecherche",
+        "ms": round((time.perf_counter() - _t0) * 1000),
+        "children": subagent_phase_children(extra),
+    }
+    return extra, phase
+
+
+#: Eine Runde, höchstens zwei Spezialisten, knappes Schritt-Budget. Mehr macht
+#: aus dem Nachschlag eine zweite Anfrage — und die Wartezeit verdoppelt sich.
+_MAX_GAP_SUBTASKS = 2
+_GAP_STEP_BUDGET = 2
+#: So viele Fundstellen aus Runde 1 gehen als Vokabelliste in den Vorschlag.
+_GAP_VOCAB_CHUNKS = 8
+_GAP_VOCAB_CHARS = 220
+
+_GAP_SYSTEM = """Du planst eine gezielte Nachrecherche.
+
+Die erste Runde Spezialisten ist gelaufen. Ein Teil der Frage ist offen
+geblieben. Du siehst, WAS gefunden wurde und WO die Lücke ist.
+
+Deine Aufgabe: höchstens 2 neue Teilfragen, die diese Lücke schliessen können.
+
+REGELN:
+- Nutze die Vokabeln aus den Fundstellen, nicht die des Nutzers. Steht dort
+  "DM=63/45GRAD MESSERKOPF", suche danach — nicht nach "Dm63 Messerkopf".
+- Suche woanders als Runde 1: andere Unterlagenart, anderer Begriff, andere
+  Granularität. Eine Wiederholung der ersten Suche bringt dieselben Treffer.
+- Verspricht keine neue Formulierung etwas, gib eine leere Liste zurück. Das
+  ist die richtige Antwort, wenn der Bestand die Lücke nicht füllen kann.
+- Erfinde keine Begriffe, die weder Anfrage noch Fundstellen hergeben.
+- Schreibe jede Teilfrage als normalen deutschen Satz, höchstens 20 Wörter.
+  KEINE Action-Aufrufe, keine Filter- oder Shell-Syntax, kein Markdown.
+  Falsch: SEARCH_CNC(article=11221.5805) | grep 'Ø10'
+  Richtig: Welche VHM-Fräser mit 10 mm Durchmesser nutzt Bauteil 11221.5805?
+
+Antworte NUR mit JSON:
+{"subtasks": [{"sub_query": "...", "focus": "..."}]}
+"""
+
+
+#: Eine sub_query, die keine Frage ist, sondern ein Aufruf. Im Betrieb kam vom
+#: Planer wörtlich zurück: "SEARCH_CNC(product_family=11221.5*) | grep -i 'Ø10'".
+#: So etwas geht als Suchtext in die Einbettung und trifft nichts.
+_PSEUDO_QUERY_RE = re.compile(r"[|`]|\bgrep\b|[A-Z][A-Z_]{2,}\s*\(")
+_MAX_GAP_QUERY_CHARS = 200
+
+
+def _clean_gap_query(sub_query: str) -> str:
+    """Eine brauchbare Teilfrage – oder Leerstring, wenn sie zu verwerfen ist."""
+    cleaned = re.sub(r"[*#]+", "", sub_query or "").strip()
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    if not cleaned or len(cleaned) > _MAX_GAP_QUERY_CHARS:
+        return ""
+    if _PSEUDO_QUERY_RE.search(cleaned) or len(cleaned.split()) < 3:
+        return ""
+    return cleaned
+
+
+def _chunk_product_id(chunk: dict) -> str:
+    meta = chunk.get("metadata") or {}
+    extra = meta.get("extra")
+    if isinstance(extra, dict) and extra.get("product_id"):
+        return str(extra["product_id"])
+    return str(meta.get("product_id") or "")
+
+
+def _find_gaps(query: str, *, use_case: str, subagents: list[dict],
+               global_chunks: list[dict]) -> list[str]:
+    """Konkrete Löcher nach Runde 1 – deterministisch, ohne LLM-Aufruf.
+
+    Bewusst eng: nur ein Loch, das man benennen kann, rechtfertigt die Zeit
+    einer zweiten Runde. Eine Antwort, die auf Treffern steht und einen Aspekt
+    offen lässt, ist kein Loch — sie ist eine belegte Antwort.
+
+    Eine einzelne leer ausgegangene Teilfrage zählt deshalb NUR, wenn auch
+    sonst nichts gefunden wurde. Der Planer erfindet regelmässig Facetten, die
+    der Bestand gar nicht führen kann („Gibt es dazu technische Zeichnungen?"),
+    und im Betrieb hat das die Nachrunde bei fast jeder Anfrage ausgelöst —
+    gemessen 87 s, während die übrigen Spezialisten längst geliefert hatten.
+    """
+    gaps: list[str] = []
+
+    # Der teuerste Fehler im Betrieb: Die Frage nennt ein Bauteil, die Treffer
+    # stammen sämtlich aus anderen. Antwortet der Synthesizer darauf, liest
+    # der Rüster Werte eines fremden Teils.
+    scoped = product_scope(query, use_case)
+    if scoped and not any(_chunk_product_id(c) == scoped for c in global_chunks):
+        gaps.append(
+            f"Zu Bauteil {scoped} liegt kein einziger Treffer vor — alle "
+            f"Fundstellen stammen aus anderen Bauteilen."
+        )
+
+    for sub in subagents:
+        if sub.get("error"):
+            gaps.append(
+                f"Die Teilfrage „{sub['sub_query']}“ ist fehlgeschlagen: "
+                f"{sub['error']}"
+            )
+        elif not sub.get("chunks") and not global_chunks:
+            gaps.append(
+                f"Die Teilfrage „{sub['sub_query']}“ blieb ohne Treffer."
+            )
+    return gaps
+
+
+def _gap_vocabulary(global_chunks: list[dict]) -> str:
+    """Die Vokabeln, die Runde 1 zutage gefördert hat.
+
+    Der Grund, warum die Nachrunde überhaupt klüger sein kann als die blinde
+    Zweitsuche im Agent-Loop: Hier steht, wie der Bestand die Sache nennt.
+    """
+    lines = []
+    for chunk in global_chunks[:_GAP_VOCAB_CHUNKS]:
+        text = " ".join((chunk.get("text") or "").split())
+        if text:
+            lines.append(f"- {text[:_GAP_VOCAB_CHARS]}")
+    return "\n".join(lines)
+
+
+async def propose_gap_subtasks(
+    query: str,
+    *,
+    use_case: str,
+    gaps: list[str],
+    subagents: list[dict],
+    global_chunks: list[dict],
+) -> list[dict]:
+    """Bis zu zwei neue Teilfragen für die Lücke – oder eine leere Liste."""
+    done = {s["sub_query"].casefold() for s in subagents}
+    user_parts = [
+        f"Nutzer-Anfrage: {query}",
+        "Offene Lücke(n):",
+        *(f"- {g}" for g in gaps),
+        "Bereits gestellte Teilfragen (nicht wiederholen):",
+        *(f"- {s['sub_query']}" for s in subagents),
+    ]
+    if vocab := _gap_vocabulary(global_chunks):
+        user_parts += ["Fundstellen aus Runde 1 (Vokabular des Bestands):", vocab]
+
+    try:
+        raw = await call_llm(
+            [{"role": "system", "content": _GAP_SYSTEM},
+             {"role": "user", "content": "\n".join(user_parts)}],
+            use_case=use_case,
+            max_tokens=TOKENS_PLAN,
+        )
+    except Exception as exc:
+        logger.warning(f"Gap-round planner LLM failed: {exc}")
+        return []
+
+    parsed = _extract_json(raw) or {}
+    proposed = parsed.get("subtasks")
+    if not isinstance(proposed, list):
+        return []
+
+    cleaned: list[dict] = []
+    for st in proposed:
+        if not isinstance(st, dict):
+            continue
+        sub_query = _clean_gap_query(
+            _strip_placeholders((st.get("sub_query") or "").strip(), query)
+        )
+        if not sub_query or sub_query.casefold() in done:
+            continue
+        done.add(sub_query.casefold())
+        cleaned.append({
+            "role": "facts",
+            "sub_query": sub_query,
+            "focus": (st.get("focus") or "").strip(),
+        })
+        if len(cleaned) == _MAX_GAP_SUBTASKS:
+            break
+    return cleaned
 
 
 async def synthesize(
@@ -1144,6 +1664,14 @@ async def _classify_compliance_issues(issues: list[str]) -> list[dict]:
     return results
 
 
+#: A claim attributed to a skill: "laut Skill wetter", "Laut **Skill** wetter".
+#: Markdown emphasis lands between the words often enough that ignoring it
+#: would make the check trivially easy to slip past.
+_SKILL_ATTRIBUTION_RE = re.compile(
+    r"laut\s+[*_`]{0,2}\s*Skill\b", re.IGNORECASE
+)
+
+
 async def check_compliance(
     *,
     answer: str,
@@ -1151,6 +1679,7 @@ async def check_compliance(
     use_case_prompt: str,
     use_case: str,
     on_event: StepCallback,
+    executed_skills: list[str] | None = None,
 ) -> dict:
     """Run a compliance check on the synthesized answer.
 
@@ -1170,7 +1699,51 @@ async def check_compliance(
     # the statement it supports; collected at the end it tells the reader
     # nothing about which claim rests on what. No judgement needed, so this is
     # decided in code rather than asked of the model.
-    if global_chunks and not has_inline_citations(answer):
+    # A skill call is a citation of a different kind, so an answer carrying one
+    # is not "unsourced" — it is sourced by something that has not run yet.
+    # Without this the deterministic check below rewrites exactly the answers
+    # the plugin layer is supposed to produce.
+    skill_calls: list = []
+    try:
+        known = {f.skill_name.lower() for f in await list_skill_functions(use_case)}
+        if known:
+            skill_calls = find_calls(answer, known_skills=known)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not check the answer for skill calls: %s", exc)
+
+    # A source that was never consulted is the worst kind of citation: it reads
+    # as evidence and is not. Teaching the synthesiser that "laut Skill X" is a
+    # valid attribution also taught it the phrase — and it used it for a weather
+    # claim while no skill had run. The checker passed that as OK, so this is
+    # decided in code: whether a function ran is a fact, not a judgement.
+    if _SKILL_ATTRIBUTION_RE.search(answer) and not executed_skills:
+        issue = (
+            "Die Antwort schreibt eine Aussage einem Skill zu („laut Skill …“), "
+            "obwohl für diese Anfrage keine Skill-Funktion ausgeführt wurde. "
+            "Der Wert ist damit frei erfunden."
+        )
+        logger.warning("Compliance short-circuit: fabricated skill attribution")
+        result = {
+            "verdict": "REWRITE",
+            "issues": [issue],
+            "classified_issues": [],
+            "guidance": (
+                "Entferne jede Aussage, die sich auf einen Skill beruft, und "
+                "jeden daraus abgeleiteten Wert. Es wurde keine Skill-Funktion "
+                "ausgeführt. Sage stattdessen ausdrücklich, dass die "
+                "Information nicht vorliegt."
+            ),
+        }
+        if on_event:
+            await on_event({"type": "compliance", "phase": "done", **result})
+        return result
+
+    if (
+        global_chunks
+        and not has_inline_citations(answer)
+        and not skill_calls
+        and not executed_skills
+    ):
         issue = (
             "Die Antwort belegt keine einzige Aussage im Fliesstext mit [n] "
             f"(Chunk-Pool: {len(global_chunks)} Chunks). Verweise stehen "
@@ -1191,10 +1764,29 @@ async def check_compliance(
             await on_event({"type": "compliance", "phase": "done", **result})
         return result
 
+    skill_note = ""
+    if skill_calls:
+        listed = ", ".join(sorted({c.label() for c in skill_calls}))
+        skill_note = (
+            "\nHINWEIS — die Antwort enthält diese Skill-Funktionsaufrufe: "
+            f"{listed}\nDas sind Platzhalter, die nach deiner Prüfung durch "
+            "echte Werte ersetzt werden. Sie sind belegt und brauchen kein "
+            "[n]. Beanstande sie nicht.\n"
+        )
+    if executed_skills:
+        skill_note += (
+            "\nHINWEIS — für diese Antwort wurden Skill-Funktionen ausgeführt: "
+            f"{', '.join(executed_skills)}\nDie Werte daraus stehen bereits im "
+            "Text und stammen aus einer definierten Quelle, nicht vom Modell. "
+            "Sie stehen in KEINEM Chunk — das ist erwartet — und brauchen kein "
+            "[n]. Eine Antwort, die nur aus solchen Werten besteht, ist „OK“, "
+            "auch wenn der Chunk-Pool leer ist.\n"
+        )
     user = (
         f"USE-CASE-POLICY (aus dem System-Prompt):\n{use_case_prompt}\n\n"
         f"GLOBAL_CHUNK_POOL:\n{_format_global_chunks(global_chunks)}\n\n"
-        f"FINALE ANTWORT:\n{answer}\n\n"
+        f"FINALE ANTWORT:\n{answer}\n"
+        f"{skill_note}\n"
         "Beurteile die Antwort."
     )
     try:
@@ -1515,6 +2107,8 @@ async def run_manager(
     filters: dict | None = None,
     history: list[dict] | None = None,
     images: list[str] | None = None,
+    request_id: str | None = None,
+    username: str | None = None,
     on_event: StepCallback = None,
 ) -> dict:
     """Top-level orchestration: plan → fan-out → synthesize.
@@ -1568,11 +2162,23 @@ async def run_manager(
                 "ms": round((time.perf_counter() - _mem_t) * 1000),
             })
 
+    # What this use case can do beyond searching documents. The planner needs
+    # it, and so do the sub-agents: SKILL exists exactly when there are
+    # functions to call, so nobody has to switch it on separately.
+    try:
+        skill_functions = await list_skill_functions(use_case)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not load skill functions for {use_case}: {exc}")
+        skill_functions = []
+    if skill_functions and "SKILL" not in available_actions:
+        available_actions = [*available_actions, "SKILL"]
+
     _plan_t = time.perf_counter()
     plan = await plan_subtasks(
         query, use_case=use_case, history=history,
         image_context=image_context, memory=memory,
         domain_prompt=use_case_prompt,
+        skill_functions=skill_functions,
     )
     _plan_llm_timing = get_last_llm_timing()
     _plan_dur = round((time.perf_counter() - _plan_t) * 1000)
@@ -1590,13 +2196,14 @@ async def run_manager(
     # Reset timing: sub-agents will fill it with their own LLM calls;
     # we want the synthesize timing to be clean afterwards.
     subagent_coros = []
+    scoped_product = product_scope(query, use_case)
     for i, st in enumerate(plan["subtasks"], 1):
         role = get_role(st["role"])
         sub_id = f"sub-{i}-{role.name}"
         subagent_coros.append(
             _run_one_subagent(
                 sub_id=sub_id,
-                sub_query=st["sub_query"],
+                sub_query=_with_product_scope(st["sub_query"], scoped_product),
                 role=role,
                 focus=st.get("focus", ""),
                 use_case=use_case,
@@ -1608,17 +2215,42 @@ async def run_manager(
                 images=images,
                 image_context=image_context,
                 on_event=on_event,
+                request_id=request_id,
+                username=username,
             )
         )
     _subs_t = time.perf_counter()
-    subagents = await asyncio.gather(*subagent_coros)
+    subagents = list(await asyncio.gather(*subagent_coros))
     _subs_dur = round((time.perf_counter() - _subs_t) * 1000)
     phases.append({
         "id": "subagents",
         "label": "Sub-Agents (parallel)",
         "ms": _subs_dur,
-        "children": subagent_phase_children(list(subagents)),
+        "children": subagent_phase_children(subagents),
     })
+
+    # Blieb ein benennbares Loch, darf genau eine gezielte Runde nachlegen —
+    # mit den Vokabeln aus Runde 1. Das ist der Platz dafür: Der Manager sieht
+    # alle Fragmente, ein einzelner Spezialist immer nur seinen Ausschnitt.
+    gap_subagents, gap_phase = await _run_gap_round(
+        query,
+        use_case=use_case,
+        session_id=session_id,
+        use_case_prompt=use_case_prompt,
+        available_actions=available_actions,
+        collection=collection,
+        filters=filters,
+        images=images,
+        image_context=image_context,
+        subagents=subagents,
+        elapsed_s=time.perf_counter() - _t0,
+        on_event=on_event,
+        request_id=request_id,
+        username=username,
+    )
+    if gap_subagents:
+        subagents += gap_subagents
+        phases.append(gap_phase)
 
     # Synthesize
     _synth_start = time.perf_counter()
@@ -1626,7 +2258,7 @@ async def run_manager(
     final_answer, global_chunks = await synthesize(
         query=query,
         plan=plan,
-        subagents=list(subagents),
+        subagents=subagents,
         use_case=use_case,
         on_event=on_event,
     )
@@ -1642,11 +2274,24 @@ async def run_manager(
     # Compliance check + optional one-shot rewrite
     _compliance_start = time.perf_counter()
     reset_llm_timing()  # guard against compliance skipping the LLM call
+    # Which functions the sub-agents actually ran. With the SKILL action the
+    # call no longer appears in the answer text — the value is already
+    # substituted — so scanning the text for it finds nothing, and a pure
+    # live-data answer looked entirely unsourced to the checker.
+    executed_skills = sorted({
+        f"{(st.get('args') or {}).get('skill', '?')}."
+        f"{(st.get('args') or {}).get('function', '?')}"
+        for sub in subagents
+        for st in (sub.get("agent_steps") or [])
+        if st.get("action") == "SKILL"
+    })
+
     compliance = await check_compliance(
         answer=final_answer,
         global_chunks=global_chunks,
         use_case_prompt=use_case_prompt,
         use_case=use_case,
+        executed_skills=executed_skills,
         on_event=on_event,
     )
     _compliance_llm_timing = get_last_llm_timing()
@@ -1672,7 +2317,7 @@ async def run_manager(
         final_answer, _ = await synthesize(
             query=query,
             plan=plan,
-            subagents=list(subagents),
+            subagents=subagents,
             use_case=use_case,
             on_event=on_event,
             compliance_guidance=compliance.get("guidance", "") or
@@ -1696,6 +2341,37 @@ async def run_manager(
             "Bitte präzisieren Sie Ihre Frage oder laden Sie zusätzliche "
             "Dokumente hoch."
         )
+
+    # ── Plugin layer: execute skill functions the model called ──────────────
+    #
+    # Before citation mapping on purpose: everything downstream — [n] refs,
+    # [BILD:] markers, answer_length — should see the text the user will
+    # actually read, not a draft still containing `wetter.aktuell("…")`.
+    #
+    # Compliance has already run at this point, and that ordering is
+    # deliberate too: it judges what the *model* asserted. A value produced by
+    # a function is retrieved data, not a claim to be checked for
+    # hallucination.
+    _skill_fn_t = time.perf_counter()
+    skill_function_calls: list[dict] = []
+    try:
+        final_answer, skill_function_calls = await apply_skill_functions(
+            final_answer,
+            use_case=use_case,
+            session_id=session_id,
+            request_id=request_id,
+            username=username,
+            on_event=on_event,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # The answer is finished; a broken plugin layer must not cost it.
+        logger.warning(f"Skill function step failed: {exc}")
+    if skill_function_calls:
+        phases.append({
+            "id": "skill_functions",
+            "label": "Skill-Funktionen",
+            "ms": round((time.perf_counter() - _skill_fn_t) * 1000),
+        })
 
     _post_t = time.perf_counter()
     citations = map_citations(final_answer, global_chunks)
@@ -1787,6 +2463,19 @@ async def run_manager(
         "duration_ms": _synth_dur,
         "llm_timing": _synth_llm_timing if _synth_llm_timing else None,
     })
+    if skill_function_calls:
+        flat_steps.append({
+            "step": len(flat_steps),
+            "thought": "Ausführbare Skill-Funktionen im Antworttext erkannt",
+            "action": "SKILL_FUNCTIONS",
+            "args": {"calls": skill_function_calls},
+            "observation": ", ".join(
+                f"{c['skill']}.{c['function']} → {c['status']}"
+                for c in skill_function_calls
+            ),
+            "chunks": [],
+            "duration_ms": round((_post_t - _skill_fn_t) * 1000),
+        })
     flat_steps.append({
         "step": len(flat_steps),
         "thought": f"Prüfe Antwort auf Halluzinationen, Citation-Coverage und Policy-Verstöße",
@@ -1831,6 +2520,11 @@ async def run_manager(
     _audit["merge_strategy"] = plan["merge_strategy"]
     _audit["sufficient"] = sufficient
     _audit["searched_collections_count"] = len(searched)
+    if skill_function_calls:
+        _audit["skill_function_calls"] = len(skill_function_calls)
+        _audit["skill_function_statuses"] = [
+            c["status"] for c in skill_function_calls
+        ]
 
     # Store this Q&A as one chunk in the memory RAG (background, non-blocking).
     # Skip refusals/empty answers so the memory isn't polluted with non-answers.
@@ -1856,6 +2550,7 @@ async def run_manager(
         "searched_collections": sorted(searched),
         "available_images": available_images,
         "images_used": images_used,
+        "skill_function_calls": skill_function_calls,
     }
     if on_event:
         await on_event({"type": "final", **result})

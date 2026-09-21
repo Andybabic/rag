@@ -9,7 +9,9 @@
 		type SynthesizerTrace,
 		type ComplianceTrace,
 		type AuditInfo,
-		type TimingReport
+		type TimingReport,
+		type SkillFunctionCall,
+		type PermissionPrompt
 	} from '$lib/state.svelte';
 	import { streamQuery } from '$lib/api';
 	import { getUseCaseBySlug } from '$lib/use-cases';
@@ -309,6 +311,50 @@
 										? 'Compliance: abgelehnt'
 										: 'Compliance: OK';
 						updateMsg({ compliance: comp, currentPhase: phaseLabel });
+					} else if (type === 'permission_request') {
+						// The server is blocked on this until the user answers or
+						// the request times out, so it has to be visible now —
+						// not folded into the finished answer afterwards.
+						const prompt: PermissionPrompt = {
+							call_id: event.call_id as string,
+							skill: event.skill as string,
+							function: event.function as string,
+							signature: event.signature as string | undefined,
+							description: event.description as string | undefined,
+							args: (event.args as unknown[]) ?? [],
+							allowed_domains: (event.allowed_domains as string[]) ?? [],
+							timeout_s: event.timeout_s as number | undefined
+						};
+						updateMsg({
+							permissionPrompts: [...(msg.permissionPrompts ?? []), prompt],
+							currentPhase: `Freigabe erforderlich: ${prompt.skill}.${prompt.function}`
+						});
+					} else if (type === 'permission_resolved') {
+						// Covers the case the click path cannot: a timeout, decided
+						// by the server rather than by the user.
+						const prompts = (msg.permissionPrompts ?? []).map((p) =>
+							p.call_id === event.call_id
+								? { ...p, approved: event.approved as boolean, submitting: false }
+								: p
+						);
+						updateMsg({ permissionPrompts: prompts });
+					} else if (type === 'function_started') {
+						updateMsg({
+							currentPhase: `Führe ${event.skill}.${event.function}() aus …`
+						});
+					} else if (type === 'function_result') {
+						const call: SkillFunctionCall = {
+							skill: event.skill as string,
+							function: event.function as string,
+							args: [],
+							status: event.status as string,
+							result_preview: event.preview as string,
+							duration_ms: event.duration_ms as number
+						};
+						updateMsg({
+							skillFunctionCalls: [...(msg.skillFunctionCalls ?? []), call],
+							currentPhase: `${event.skill}.${event.function}: ${event.status}`
+						});
 					} else if (type === 'synthesizer') {
 						const synth: SynthesizerTrace = {
 							phase: event.phase as SynthesizerTrace['phase'],
@@ -357,6 +403,9 @@
 					(result.timing as TimingReport | undefined) ??
 					((result.audit as AuditInfo | undefined)?.timing),
 				imagesUsed: (result.images_used as Message['imagesUsed']) ?? [],
+				skillFunctionCalls:
+					(result.skill_function_calls as SkillFunctionCall[] | undefined) ??
+					app.messages[assistantIdx].skillFunctionCalls,
 				durationMs: Math.round(performance.now() - startedAt),
 				streaming: false,
 				currentPhase: undefined

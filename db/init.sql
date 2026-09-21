@@ -102,11 +102,74 @@ CREATE TABLE usecase_skills (
     detailed_task TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     position INTEGER NOT NULL DEFAULT 0,
+    -- Plugin-Layer: optional GENAU EINE Code-Datei pro Skill (.py oder .js,
+    -- nicht gemischt). Alles nullable — Skills ohne Funktionsteil laufen
+    -- unveraendert weiter.
+    code_language VARCHAR(20)
+        CHECK (code_language IS NULL OR code_language IN ('python', 'javascript')),
+    code_file_name VARCHAR(255),
+    code TEXT,
+    -- Skill-Variablen: dynamische Name/Wert-Paare, frei pro Skill definierbar.
+    -- NICHT ueber die normale Skill-Liste ausgeliefert — die Werte verlassen
+    -- die DB nur im Ausfuehrungsschritt und ueber den Admin-Endpoint.
+    variables JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE (use_case, name)
 );
 CREATE INDEX idx_usecase_skills_use_case ON usecase_skills(use_case);
+
+-- ── Plugin-Layer: ausfuehrbare Skill-Funktionen ───────────────────────────
+-- Eine Zeile pro aufrufbarer Funktion, beim Speichern der Code-Datei aus dem
+-- Quelltext abgeleitet. Das Permission-Flag wird hier EINMAL festgeschrieben:
+-- die Ausfuehrung liest es aus dieser Zeile, nie erneut aus dem Quelltext.
+CREATE TABLE usecase_skill_functions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    skill_id UUID NOT NULL REFERENCES usecase_skills(id) ON DELETE CASCADE,
+    name VARCHAR(100) NOT NULL,
+    signature TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    params JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- Was die Code-Datei deklariert (aus '# ask for permission' abgeleitet).
+    ask_for_permission BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Was ein Admin im Dashboard entschieden hat. NULL = der Datei folgen.
+    -- Getrennt gehalten, weil das Speichern der Code-Datei die Funktionszeilen
+    -- neu schreibt: mit nur einer Spalte ginge eine im UI eingeschaltete
+    -- Rueckfrage beim naechsten Speichern still verloren.
+    permission_override BOOLEAN,
+    -- Leere Liste = kein Netzzugriff (Container laeuft mit --network none).
+    allowed_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
+    timeout_ms INTEGER NOT NULL DEFAULT 10000,
+    memory_mb INTEGER NOT NULL DEFAULT 256,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE (skill_id, name)
+);
+CREATE INDEX idx_skill_functions_skill ON usecase_skill_functions(skill_id);
+
+-- Minimale Nachvollziehbarkeit (Abschnitt 6): wer/was/wann, Ergebnis nur als
+-- Groesse und Status — keine Nutzdaten, keine Variablenwerte.
+CREATE TABLE skill_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    skill_id UUID REFERENCES usecase_skills(id) ON DELETE SET NULL,
+    use_case VARCHAR(50) NOT NULL,
+    skill_name VARCHAR(100) NOT NULL,
+    function_name VARCHAR(100) NOT NULL,
+    session_id UUID,
+    request_id UUID,
+    username VARCHAR(100),
+    args JSONB NOT NULL DEFAULT '[]'::jsonb,
+    permission_required BOOLEAN NOT NULL DEFAULT FALSE,
+    permission_granted BOOLEAN,
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('ok', 'error', 'denied', 'timeout', 'unresolved')),
+    error TEXT,
+    result_bytes INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX idx_skill_executions_use_case ON skill_executions(use_case, created_at);
+CREATE INDEX idx_skill_executions_session ON skill_executions(session_id);
 
 -- DB-gestuetzte Use-Case-Registry. Wird aus config/use_cases.json geseedet
 -- und danach ueber das Dashboard editierbar. 'id' = API-Id (use_case-Key

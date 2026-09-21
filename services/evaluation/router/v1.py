@@ -9,6 +9,7 @@ import asyncpg
 from core.citations import map_citations
 from core.database import get_pool
 from core.evaluator import evaluate_chunks
+from core import permissions
 from core.manager import run_manager
 from core.reranker import rerank_chunks
 from core.use_cases import (
@@ -20,6 +21,7 @@ from core.use_cases import (
 import httpx
 from config import settings
 from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse, StreamingResponse
 from models import (
     AgentQueryRequest,
@@ -31,6 +33,19 @@ from models import (
 )
 from shared.usecase_config import list_use_cases
 from shared.phoenix import get_tracer, log_evaluation_to_phoenix
+
+
+def _actor(request: Request) -> str | None:
+    """Who is asking, for the skill-execution audit trail.
+
+    The evaluation service has no session of its own — the SvelteKit frontend
+    owns login and proxies every chat request, so it forwards the logged-in
+    name in ``X-User``. This header is trusted the same way the rest of the
+    internal service mesh is: the service is not publicly reachable, and the
+    gate in ``hooks.server.ts`` is what decides whether a request gets this far.
+    """
+    name = (request.headers.get("x-user") or "").strip()
+    return name[:100] or None
 
 
 def _best_rerank_metric(chunks):
@@ -154,6 +169,8 @@ async def agent_query(body: AgentQueryRequest, request: Request):
             filters=body.config.filters,
             history=history,
             images=body.images,
+            request_id=request_id,
+            username=_actor(request),
         )
 
         # Persist query to database (non-blocking)
@@ -207,6 +224,46 @@ async def agent_query(body: AgentQueryRequest, request: Request):
     return {**result, "request_id": request_id}
 
 
+class PermissionDecision(BaseModel):
+    """A user's answer to one ``permission_request`` event."""
+
+    approved: bool = Field(description="True only on an explicit 'Erlauben'")
+    session_id: str = Field(
+        default="",
+        description="The session the request was issued in. Checked against "
+                    "the pending request so one conversation cannot approve "
+                    "code execution in another.",
+    )
+
+
+@router.post("/agent/permission/{call_id}")
+async def agent_permission(call_id: str, body: PermissionDecision, request: Request):
+    """Answer a pending permission request from a live stream.
+
+    The stream that asked is still open and blocked on this. A 404 here means
+    the request already timed out or the stream is gone — in both cases the
+    function was not executed, which is the safe outcome and is reported as
+    such rather than as a failure the user needs to act on.
+    """
+    resolved = permissions.resolve(
+        call_id,
+        bool(body.approved),
+        session_id=body.session_id,
+        username=_actor(request),
+    )
+    if not resolved:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_pending",
+                "detail": "Diese Freigabe-Anfrage ist abgelaufen oder wurde "
+                          "bereits beantwortet. Die Funktion wurde nicht "
+                          "ausgeführt.",
+            },
+        )
+    return {"status": "ok", "call_id": call_id, "approved": bool(body.approved)}
+
+
 @router.post("/agent/query/stream")
 async def agent_query_stream(body: AgentQueryRequest, request: Request):
     """Server-Sent-Events stream of agent progress.
@@ -257,6 +314,8 @@ async def agent_query_stream(body: AgentQueryRequest, request: Request):
                 filters=body.config.filters,
                 history=history,
                 images=body.images,
+                request_id=request_id,
+                username=_actor(request),
                 on_event=on_event,
             )
             # Persist query (best-effort, same as non-streaming endpoint)
