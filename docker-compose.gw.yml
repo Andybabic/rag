@@ -1,16 +1,16 @@
 # ══════════════════════════════════════════════════════════════
-# Single-Server Hosting – alles per Docker-Build (ohne npm auf dem Host)
-# Frontend wird in Dockerfile.frontend gebaut; kein Hot-Reload.
-# Ollama extern via OLLAMA_BASE_URL in .env (Profil local-ollama optional).
-# Keine Host-Port-Mappings – Services sprechen intern im Docker-Netzwerk;
-# externer Zugriff erfolgt über Coolify/Reverse-Proxy.
+# Usecase-Stack: gw
 #
-# Persistente Daten: Named Volumes (Coolify-kompatibel – Env-Vars in Bind-Mounts
-# werden von Coolify nicht zuverlaessig aufgeloest).
-# Kein zusaetzliches Persistent Storage in der Coolify-UI noetig.
-# Beim Loeschen der Resource in Coolify: „Keep Volumes“ waehlen, sonst Daten weg.
-# Postgres-Schema (db/init.sql) ist in Dockerfile.postgres eingebaut – kein
-# Bind-Mount fuer init.sql auf Coolify verwenden.
+# GENERIERT aus docker-compose.yml von scripts/gen_usecases.py.
+# Nicht von Hand editieren – Aenderungen gehoeren in docker-compose.yml,
+# danach `python3 scripts/gen_usecases.py` ausfuehren.
+#
+# Einziger Unterschied zum Basis-Stack: alle persistenten Volumes und das
+# Skill-Egress-Netz tragen den Praefix `kermit_gw_`, damit mehrere
+# Usecases auf demselben Coolify-Server datentechnisch getrennt bleiben.
+#
+# Pro Usecase in Coolify eigene .env setzen: ORIGIN, AUTH_SECRET,
+# SANDBOX_TOKEN, POSTGRES_PASSWORD.
 # ══════════════════════════════════════════════════════════════
 
 services:
@@ -27,7 +27,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
-      - kermit_postgres:/var/lib/postgresql/data
+      - kermit_gw_postgres:/var/lib/postgresql/data
     healthcheck:
       # SELECT 1 in addition to pg_isready so the container is healthy only when
       # it truly serves queries (avoids the 57P03 "starting up" startup race).
@@ -43,7 +43,11 @@ services:
       dockerfile: Dockerfile.qdrant
     restart: unless-stopped
     volumes:
-      - kermit_wrnlinien_qdrant:/var/lib/qdrant
+      - kermit_gw_qdrant:/var/lib/qdrant
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
@@ -57,7 +61,7 @@ services:
   #   ports:
   #     - "11434:11434"
   #   volumes:
-  #     - kermit_ollama:/root/.ollama
+  #     - kermit_gw_ollama:/root/.ollama
   #   profiles:
   #     - local-ollama
 
@@ -73,7 +77,7 @@ services:
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8001
     volumes:
-      - kermit_wrnlinien_documents:/data/documents
+      - kermit_gw_documents:/data/documents
     env_file: .env
     depends_on:
       postgres:
@@ -152,11 +156,13 @@ services:
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8005
     volumes:
-      - kermit_hf_cache:/home/appuser/.cache
+      - kermit_gw_hf_cache:/home/appuser/.cache
     environment:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
+      SANDBOX_SERVICE_URL: http://sandbox:8007
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
     env_file: .env
     depends_on:
       postgres:
@@ -169,6 +175,44 @@ services:
       timeout: 5s
       retries: 5
       start_period: 40s
+
+  # ── Skill-Plugin-Layer: Sandbox ──────────────────────────
+  #
+  # Der einzige Container mit Zugriff auf den Docker-Socket. Er startet pro
+  # Funktionsaufruf einen kurzlebigen Runner-Container (`docker run --rm`) und
+  # betreibt den Egress-Proxy, ueber den ein Runner mit Domain-Allowlist nach
+  # aussen kommt.
+  #
+  # Der Socket ist root-aequivalent auf dem Host. Deshalb liegt er hier und
+  # NICHT im evaluation-Service, der LLM-Ausgaben verarbeitet. Der Service ist
+  # nicht nach aussen gemappt; einziger Client ist evaluation, authentifiziert
+  # ueber SANDBOX_TOKEN.
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      SKILL_RUNNER_IMAGE: ${SKILL_RUNNER_IMAGE:-kermit-skill-runner:latest}
+      SKILL_EGRESS_NETWORK: ${SKILL_EGRESS_NETWORK:-kermit_gw_skill_egress}
+      # Der Runner erreicht den Proxy unter diesem Namen im Egress-Netz.
+      SKILL_PROXY_HOST: ${SKILL_PROXY_HOST:-sandbox}
+      SKILL_PROXY_PORT: "8888"
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+    env_file: .env
+    networks:
+      - default
+      # `internal: true` — Runner-Container haengen NUR hier und haben damit
+      # keine Route ins Internet. Der Proxy ist ihr einziger erreichbarer Peer.
+      - skill_egress
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8007/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     build:
@@ -208,8 +252,16 @@ services:
       start_period: 40s
 
 volumes:
-  kermit_postgres:
-  kermit_wrnlinien_qdrant:
-  kermit_wrnlinien_documents:
-  kermit_hf_cache:
-  kermit_ollama:
+  kermit_gw_postgres:
+  kermit_gw_qdrant:
+  kermit_gw_documents:
+  kermit_gw_hf_cache:
+  kermit_gw_ollama:
+
+networks:
+  default:
+  # Internes Netz fuer Skill-Runner mit Domain-Allowlist. Ohne Route nach
+  # aussen: was nicht ueber den Egress-Proxy laeuft, kommt nicht raus.
+  skill_egress:
+    name: ${SKILL_EGRESS_NETWORK:-kermit_gw_skill_egress}
+    internal: true

@@ -1,0 +1,267 @@
+# ══════════════════════════════════════════════════════════════
+# Usecase-Stack: neumann
+#
+# GENERIERT aus docker-compose.yml von scripts/gen_usecases.py.
+# Nicht von Hand editieren – Aenderungen gehoeren in docker-compose.yml,
+# danach `python3 scripts/gen_usecases.py` ausfuehren.
+#
+# Einziger Unterschied zum Basis-Stack: alle persistenten Volumes und das
+# Skill-Egress-Netz tragen den Praefix `kermit_neumann_`, damit mehrere
+# Usecases auf demselben Coolify-Server datentechnisch getrennt bleiben.
+#
+# Pro Usecase in Coolify eigene .env setzen: ORIGIN, AUTH_SECRET,
+# SANDBOX_TOKEN, POSTGRES_PASSWORD.
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ragplatform}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - kermit_neumann_postgres:/var/lib/postgresql/data
+    healthcheck:
+      # SELECT 1 in addition to pg_isready so the container is healthy only when
+      # it truly serves queries (avoids the 57P03 "starting up" startup race).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -q && psql -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -tAc 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  qdrant:
+    build:
+      context: .
+      dockerfile: Dockerfile.qdrant
+    restart: unless-stopped
+    volumes:
+      - kermit_neumann_qdrant:/var/lib/qdrant
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 40s
+
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - kermit_neumann_ollama:/root/.ollama
+  #   profiles:
+  #     - local-ollama
+
+  # ── Application Services ──────────────────────────────────
+
+  cleaning:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/cleaning
+        SERVICE_PORT: "8001"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    volumes:
+      - kermit_neumann_documents:/data/documents
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  data_structure:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/data_structure
+        SERVICE_PORT: "8002"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/embedding
+        SERVICE_PORT: "8003"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+    env_file: .env
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  vectordb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/vectordb
+        SERVICE_PORT: "8004"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8004
+    env_file: .env
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  evaluation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/evaluation
+        SERVICE_PORT: "8005"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8005
+    volumes:
+      - kermit_neumann_hf_cache:/home/appuser/.cache
+    environment:
+      HF_HOME: /home/appuser/.cache/huggingface
+      TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
+      SANDBOX_SERVICE_URL: http://sandbox:8007
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ── Skill-Plugin-Layer: Sandbox ──────────────────────────
+  #
+  # Der einzige Container mit Zugriff auf den Docker-Socket. Er startet pro
+  # Funktionsaufruf einen kurzlebigen Runner-Container (`docker run --rm`) und
+  # betreibt den Egress-Proxy, ueber den ein Runner mit Domain-Allowlist nach
+  # aussen kommt.
+  #
+  # Der Socket ist root-aequivalent auf dem Host. Deshalb liegt er hier und
+  # NICHT im evaluation-Service, der LLM-Ausgaben verarbeitet. Der Service ist
+  # nicht nach aussen gemappt; einziger Client ist evaluation, authentifiziert
+  # ueber SANDBOX_TOKEN.
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      SKILL_RUNNER_IMAGE: ${SKILL_RUNNER_IMAGE:-kermit-skill-runner:latest}
+      SKILL_EGRESS_NETWORK: ${SKILL_EGRESS_NETWORK:-kermit_neumann_skill_egress}
+      # Der Runner erreicht den Proxy unter diesem Namen im Egress-Netz.
+      SKILL_PROXY_HOST: ${SKILL_PROXY_HOST:-sandbox}
+      SKILL_PROXY_PORT: "8888"
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+    env_file: .env
+    networks:
+      - default
+      # `internal: true` — Runner-Container haengen NUR hier und haben damit
+      # keine Route ins Internet. Der Proxy ist ihr einziger erreichbarer Peer.
+      - skill_egress
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8007/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    command: node build/index.js
+    environment:
+      PORT: "3000"
+      ORIGIN: "${ORIGIN:-http://localhost:3000}"
+      BODY_SIZE_LIMIT: "52428800"
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET muss gesetzt sein (Cookie-Signatur; python -c \"import secrets; print(secrets.token_urlsafe(48))\")}"
+      EVALUATION_SERVICE_URL: "${EVALUATION_SERVICE_URL:-http://evaluation:8005}"
+      CLEANING_SERVICE_URL: "${CLEANING_SERVICE_URL:-http://cleaning:8001}"
+      DATA_STRUCTURE_SERVICE_URL: "${DATA_STRUCTURE_SERVICE_URL:-http://data_structure:8002}"
+      EMBEDDING_SERVICE_URL: "${EMBEDDING_SERVICE_URL:-http://embedding:8003}"
+      VECTORDB_SERVICE_URL: "${VECTORDB_SERVICE_URL:-http://vectordb:8004}"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cleaning:
+        condition: service_healthy
+      data_structure:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      vectordb:
+        condition: service_healthy
+      evaluation:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  kermit_neumann_postgres:
+  kermit_neumann_qdrant:
+  kermit_neumann_documents:
+  kermit_neumann_hf_cache:
+  kermit_neumann_ollama:
+
+networks:
+  default:
+  # Internes Netz fuer Skill-Runner mit Domain-Allowlist. Ohne Route nach
+  # aussen: was nicht ueber den Egress-Proxy laeuft, kommt nicht raus.
+  skill_egress:
+    name: ${SKILL_EGRESS_NETWORK:-kermit_neumann_skill_egress}
+    internal: true

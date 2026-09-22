@@ -44,6 +44,10 @@ services:
     restart: unless-stopped
     volumes:
       - kermit_qdrant:/var/lib/qdrant
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
       interval: 10s
