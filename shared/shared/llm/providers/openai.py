@@ -57,6 +57,18 @@ def _normalize_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _rejects_template_kwargs(exc: httpx.HTTPStatusError) -> bool:
+    """vLLM refuses ``chat_template_kwargs`` for models served with a
+    Mistral tokenizer (Ministral, Magistral, …) with a 400 mentioning
+    ``chat_template``."""
+    return exc.response.status_code == 400 and "chat_template" in exc.response.text
+
+
+# (base_url, model) pairs whose backend rejected ``chat_template_kwargs``;
+# later calls skip the kwargs instead of paying for a failed request.
+_NO_TEMPLATE_KWARGS: set[tuple[str, str]] = set()
+
+
 @register("openai")
 class OpenAIProvider(LLMProvider):
     def _headers(self) -> dict[str, str]:
@@ -91,24 +103,46 @@ class OpenAIProvider(LLMProvider):
             body["temperature"] = 0.2
         if "max_tokens" in options:
             body["max_tokens"] = options["max_tokens"]
-        body.update(openai_thinking_kwargs(self.config.enable_thinking))
 
+        data = await self._chat_completion(body, timeout=self.config.chat_timeout)
+        usage = data.get("usage") or {}
+        self.last_token_counts = {
+            "prompt_eval_count": usage.get("prompt_tokens", 0) or 0,
+            "eval_count": usage.get("completion_tokens", 0) or 0,
+        }
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        return extract_assistant_text(message)
+
+    async def _chat_completion(self, body: dict, *, timeout: float) -> dict:
+        """POST ``/chat/completions`` with the thinking kwargs attached.
+
+        Backends that reject ``chat_template_kwargs`` (vLLM + Mistral
+        tokenizer) get one retry without them, and are remembered.
+        """
+        key = (self.config.openai_base_url, body["model"])
+        send_kwargs = key not in _NO_TEMPLATE_KWARGS
         try:
-            async with httpx.AsyncClient(timeout=self.config.chat_timeout) as client:
-                resp = await client.post(
-                    self._url("/chat/completions"),
-                    headers=self._headers(),
-                    json=body,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                usage = data.get("usage") or {}
-                self.last_token_counts = {
-                    "prompt_eval_count": usage.get("prompt_tokens", 0) or 0,
-                    "eval_count": usage.get("completion_tokens", 0) or 0,
-                }
-                message = (data.get("choices") or [{}])[0].get("message") or {}
-                return extract_assistant_text(message)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                while True:
+                    payload = (
+                        {**body, **openai_thinking_kwargs(self.config.enable_thinking)}
+                        if send_kwargs
+                        else body
+                    )
+                    resp = await client.post(
+                        self._url("/chat/completions"),
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if send_kwargs and _rejects_template_kwargs(exc):
+                            _NO_TEMPLATE_KWARGS.add(key)
+                            send_kwargs = False
+                            continue
+                        raise
+                    return resp.json()
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             raise LLMUnavailableError(
                 f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
@@ -122,7 +156,9 @@ class OpenAIProvider(LLMProvider):
                 resp = await client.post(
                     self._url("/embeddings"),
                     headers=self._headers(),
-                    json={"model": model, "input": text},
+                    # LiteLLM forwards an unset encoding_format as null, which
+                    # vLLM rejects — always send it explicitly.
+                    json={"model": model, "input": text, "encoding_format": "float"},
                 )
                 resp.raise_for_status()
                 return resp.json()["data"][0]["embedding"]
@@ -171,24 +207,9 @@ class OpenAIProvider(LLMProvider):
                 ],
             }
         ]
-        try:
-            async with httpx.AsyncClient(timeout=self.config.vision_timeout) as client:
-                resp = await client.post(
-                    self._url("/chat/completions"),
-                    headers=self._headers(),
-                    json={
-                        "model": model,
-                        "messages": messages,
-                        "stream": False,
-                        **openai_thinking_kwargs(self.config.enable_thinking),
-                    },
-                )
-                resp.raise_for_status()
-                message = (resp.json().get("choices") or [{}])[0].get("message") or {}
-                return extract_assistant_text(message)
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            raise LLMUnavailableError(
-                f"OpenAI not reachable / timed out at {self.config.openai_base_url}: {exc}"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise self._http_error(exc) from exc
+        data = await self._chat_completion(
+            {"model": model, "messages": messages, "stream": False},
+            timeout=self.config.vision_timeout,
+        )
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        return extract_assistant_text(message)

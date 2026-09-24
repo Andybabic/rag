@@ -109,3 +109,71 @@ async def test_openai_chat_sends_enable_thinking_false(mock_client_cls):
     await provider.chat([{"role": "user", "content": "hallo"}], model="nemotron")
     body = mock_client.post.call_args.kwargs["json"]
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def _mock_client(mock_client_cls, responses):
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = responses
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client_cls.return_value = mock_client
+    return mock_client
+
+
+def _ok_response(payload):
+    resp = MagicMock()
+    resp.json.return_value = payload
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _mistral_reject_response():
+    import httpx
+
+    request = httpx.Request("POST", "https://mistral.test/v1/chat/completions")
+    response = httpx.Response(
+        400,
+        request=request,
+        text='{"error": "chat_template is not supported for Mistral tokenizers."}',
+    )
+    resp = MagicMock()
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "400", request=request, response=response
+    )
+    return resp
+
+
+@pytest.mark.anyio
+@patch("shared.llm.providers.openai.httpx.AsyncClient")
+async def test_openai_chat_retries_without_template_kwargs_for_mistral(mock_client_cls):
+    ok = {"choices": [{"message": {"content": "hallo"}}], "usage": {}}
+    mock_client = _mock_client(
+        mock_client_cls,
+        [_mistral_reject_response(), _ok_response(ok), _ok_response(ok)],
+    )
+    provider = OpenAIProvider(
+        LLMConfig(openai_api_key="sk-test", openai_base_url="https://mistral.test/v1")
+    )
+
+    assert await provider.chat([{"role": "user", "content": "hi"}], model="ministral-3-8b") == "hallo"
+    first, retry = (c.kwargs["json"] for c in mock_client.post.call_args_list)
+    assert "chat_template_kwargs" in first
+    assert "chat_template_kwargs" not in retry
+
+    # Remembered: the next call goes out without the kwargs straight away.
+    await provider.chat([{"role": "user", "content": "hi"}], model="ministral-3-8b")
+    assert mock_client.post.call_count == 3
+    assert "chat_template_kwargs" not in mock_client.post.call_args.kwargs["json"]
+
+
+@pytest.mark.anyio
+@patch("shared.llm.providers.openai.httpx.AsyncClient")
+async def test_openai_embed_sends_float_encoding_format(mock_client_cls):
+    mock_client = _mock_client(
+        mock_client_cls, [_ok_response({"data": [{"embedding": [0.1, 0.2]}]})]
+    )
+    provider = OpenAIProvider(
+        LLMConfig(openai_api_key="sk-test", openai_base_url="https://example.test/v1")
+    )
+    assert await provider.embed("text", model="bge-m3") == [0.1, 0.2]
+    assert mock_client.post.call_args.kwargs["json"]["encoding_format"] == "float"
