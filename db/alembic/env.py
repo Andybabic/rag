@@ -32,7 +32,7 @@ def _get_url() -> str:
         host = os.getenv("POSTGRES_HOST", "localhost")
         port = os.getenv("POSTGRES_PORT", "5432")
         db = os.getenv("POSTGRES_DB", "ragplatform")
-        return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
     return config.get_main_option("sqlalchemy.url", "")
 
 

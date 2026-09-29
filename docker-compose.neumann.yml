@@ -146,6 +146,29 @@ services:
       retries: 5
       start_period: 40s
 
+  # ── DB-Migrationen ────────────────────────────────────────
+  #
+  # Einmal-Container: wendet bei jedem Deploy ausstehende Alembic-Migrationen
+  # an (db/migrate.py) und beendet sich. evaluation startet erst danach, so
+  # braucht ein Deploy (z. B. Coolify) keinen manuellen `make migrate`.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: db
+    restart: "no"
+    command: python migrate.py
+    env_file: .env
+    environment:
+      # Im Docker-Netz spricht Postgres immer auf 5432; POSTGRES_PORT in der
+      # .env ist der Host-Port.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   evaluation:
     build:
       context: .
@@ -169,6 +192,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
       interval: 10s
