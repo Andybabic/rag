@@ -1,0 +1,215 @@
+# ══════════════════════════════════════════════════════════════
+# Single-Server Hosting – alles per Docker-Build (ohne npm auf dem Host)
+# Frontend wird in Dockerfile.frontend gebaut; kein Hot-Reload.
+# Ollama extern via OLLAMA_BASE_URL in .env (Profil local-ollama optional).
+# Keine Host-Port-Mappings – Services sprechen intern im Docker-Netzwerk;
+# externer Zugriff erfolgt über Coolify/Reverse-Proxy.
+#
+# Persistente Daten: Named Volumes (Coolify-kompatibel – Env-Vars in Bind-Mounts
+# werden von Coolify nicht zuverlaessig aufgeloest).
+# Kein zusaetzliches Persistent Storage in der Coolify-UI noetig.
+# Beim Loeschen der Resource in Coolify: „Keep Volumes“ waehlen, sonst Daten weg.
+# Postgres-Schema (db/init.sql) ist in Dockerfile.postgres eingebaut – kein
+# Bind-Mount fuer init.sql auf Coolify verwenden.
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ragplatform}
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - kermit_postgres:/var/lib/postgresql/data
+    healthcheck:
+      # SELECT 1 in addition to pg_isready so the container is healthy only when
+      # it truly serves queries (avoids the 57P03 "starting up" startup race).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -q && psql -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragplatform} -tAc 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  qdrant:
+    build:
+      context: .
+      dockerfile: Dockerfile.qdrant
+    restart: unless-stopped
+    volumes:
+      - kermit_wrnlinien_qdrant:/var/lib/qdrant
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 40s
+
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - kermit_ollama:/root/.ollama
+  #   profiles:
+  #     - local-ollama
+
+  # ── Application Services ──────────────────────────────────
+
+  cleaning:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/cleaning
+        SERVICE_PORT: "8001"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    volumes:
+      - kermit_wrnlinien_documents:/data/documents
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  data_structure:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/data_structure
+        SERVICE_PORT: "8002"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/embedding
+        SERVICE_PORT: "8003"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+    env_file: .env
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  vectordb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/vectordb
+        SERVICE_PORT: "8004"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8004
+    env_file: .env
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  evaluation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_DIR: services/evaluation
+        SERVICE_PORT: "8005"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8005
+    volumes:
+      - kermit_hf_cache:/home/appuser/.cache
+    environment:
+      HF_HOME: /home/appuser/.cache/huggingface
+      TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    command: node build/index.js
+    environment:
+      PORT: "3000"
+      ORIGIN: "${ORIGIN:-http://localhost:3000}"
+      BODY_SIZE_LIMIT: "52428800"
+      AUTH_SECRET: "${AUTH_SECRET:?AUTH_SECRET muss gesetzt sein (Cookie-Signatur; python -c \"import secrets; print(secrets.token_urlsafe(48))\")}"
+      EVALUATION_SERVICE_URL: "${EVALUATION_SERVICE_URL:-http://evaluation:8005}"
+      CLEANING_SERVICE_URL: "${CLEANING_SERVICE_URL:-http://cleaning:8001}"
+      DATA_STRUCTURE_SERVICE_URL: "${DATA_STRUCTURE_SERVICE_URL:-http://data_structure:8002}"
+      EMBEDDING_SERVICE_URL: "${EMBEDDING_SERVICE_URL:-http://embedding:8003}"
+      VECTORDB_SERVICE_URL: "${VECTORDB_SERVICE_URL:-http://vectordb:8004}"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cleaning:
+        condition: service_healthy
+      data_structure:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      vectordb:
+        condition: service_healthy
+      evaluation:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  kermit_postgres:
+  kermit_wrnlinien_qdrant:
+  kermit_wrnlinien_documents:
+  kermit_hf_cache:
+  kermit_ollama:
