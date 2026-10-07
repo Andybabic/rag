@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "qwen2.5:14b"
     EMBEDDING_SERVICE_URL: str
     VECTORDB_SERVICE_URL: str
+    # Use-case transfer reads and writes the stored originals through the
+    # cleaning service (the only service with the documents volume).
+    CLEANING_SERVICE_URL: str = "http://cleaning:8001"
+    # Export archives and import uploads while they are in flight. Removed
+    # after 24 h; needs room for the largest use case you move.
+    TRANSFER_DIR: str = "/tmp/kermit-transfer"
     DATABASE_URL: str
     AGENT_MAX_STEPS: int = 5
     MEMORY_MAX_CHARS: int = 4000

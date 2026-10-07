@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from core.qdrant import (
+    CollectionExistsError,
     EmbeddingModelMismatchError,
     QdrantUnavailableError,
     cross_search,
     delete_collection,
     delete_points_by_filter,
+    export_points,
+    import_points,
     list_collections,
     scroll_payloads,
     search_vectors,
@@ -16,6 +19,8 @@ from fastapi.responses import JSONResponse
 from models import (
     CrossSearchRequest,
     DeletePointsRequest,
+    ExportPointsRequest,
+    ImportPointsRequest,
     ScrollRequest,
     SearchRequest,
     UpsertRequest,
@@ -208,3 +213,49 @@ async def collection_delete(name: str, request: Request):
         "deleted": name,
         "request_id": request_id,
     }
+
+
+@router.post("/points/export")
+async def points_export(body: ExportPointsRequest, request: Request):
+    """One page of a collection including vectors (use-case transfer)."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        page = export_points(body.collection, body.offset, body.limit)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "collection_not_found", "detail": str(exc),
+                     "request_id": request_id, "service": "vectordb-service"},
+        )
+    except QdrantUnavailableError as exc:
+        return _qdrant_error_response(exc, request_id)
+    return {**page, "collection": body.collection, "request_id": request_id}
+
+
+@router.post("/points/import")
+async def points_import(body: ImportPointsRequest, request: Request):
+    """Write exported points unchanged; ``create`` refuses existing collections."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        written = import_points(
+            body.collection,
+            [p.model_dump() for p in body.points],
+            body.dimension,
+            create=body.create,
+        )
+    except CollectionExistsError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "collection_exists", "detail": str(exc),
+                     "request_id": request_id, "service": "vectordb-service"},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "collection_not_found", "detail": str(exc),
+                     "request_id": request_id, "service": "vectordb-service"},
+        )
+    except QdrantUnavailableError as exc:
+        return _qdrant_error_response(exc, request_id)
+    return {"status": "ok", "imported": written, "collection": body.collection,
+            "request_id": request_id}

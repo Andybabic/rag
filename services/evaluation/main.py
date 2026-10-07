@@ -15,6 +15,7 @@ from models import HealthResponse
 from router.admin import router as admin_router
 from router.auth import router as auth_router
 from router.public import router as public_router
+from router.transfer import router as transfer_router
 from router.v1 import router as v1_router
 from shared.auth import ensure_bootstrap_admin
 from shared.errors import handle_error
@@ -79,6 +80,7 @@ app.include_router(v1_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(public_router)
+app.include_router(transfer_router)
 
 
 @app.exception_handler(Exception)

@@ -32,14 +32,16 @@ CREATE TABLE feedback (
 CREATE TABLE ingestion_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     file_name VARCHAR(500) NOT NULL,
-    file_hash VARCHAR(64) NOT NULL UNIQUE,
+    file_hash VARCHAR(64) NOT NULL,
     stored_path VARCHAR(1000),
     collection VARCHAR(100),
     use_case VARCHAR(50),
     chunk_count INTEGER,
     status VARCHAR(20) DEFAULT 'ok',
     error_detail TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- Pro Use Case eindeutig: dieselbe Datei darf in mehreren Use Cases liegen.
+    CONSTRAINT uq_ingestion_log_use_case_file_hash UNIQUE (use_case, file_hash)
 );
 
 -- Agent-Gedächtnis (ersetzt memory.md aus bestehender Pipeline)

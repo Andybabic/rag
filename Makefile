@@ -6,7 +6,7 @@ COMPOSE_BUILD = $(COMPOSE_BUILD_BASE) $(COMPOSE_BUILD_BIND)
 COMPOSE = $(COMPOSE_DEV)
 PY_SERVICES = cleaning data_structure embedding vectordb evaluation
 
-.PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test pull-models doc reset help
+.PHONY: _ensure-compose-v2 _ensure-env _ensure-auth-secret _ensure-data-dirs _check-postgres-port frontend-build up up-dev-full dev dev-bundled dev-fe frontend-dev down logs clean-stack test lint integration-test benchmark benchmark-query benchmark-score benchmark-report benchmark-check benchmark-clean benchmark-test pull-models doc reset help
 
 # Backend service ports published to localhost (see docker-compose.dev.yml).
 FE_DEV_ENV = \
@@ -201,6 +201,36 @@ lint: ## Run ruff + mypy across the entire codebase
 integration-test: _ensure-compose-v2 ## Run E2E integration tests in Docker
 	$(COMPOSE) --profile test run --rm integration-test
 
+# ── Benchmark (XRAG) ─────────────────────────────────────────
+# Stack muss laufen (make dev). Konfiguration: benchmark/.env
+# Zusaetzliche Flags:  make benchmark BENCH_ARGS="--mono 20 --multi 10 --fresh"
+BENCH = python3 benchmark/run.py
+
+_bench-env:
+	@test -f benchmark/.env || (cp benchmark/.env.example benchmark/.env && \
+		echo "benchmark/.env angelegt – Judge (BENCH_JUDGE_*) dort eintragen.")
+
+benchmark: _bench-env ## XRAG-Benchmark: Use Case anlegen, Artikel indexieren, Fragen stellen, bewerten
+	$(BENCH) all $(BENCH_ARGS)
+
+benchmark-query: _bench-env ## Benchmark: Fragen erneut stellen + bewerten (neuester Lauf)
+	$(BENCH) query $(BENCH_ARGS) && $(BENCH) score $(BENCH_ARGS) && $(BENCH) report $(BENCH_ARGS)
+
+benchmark-score: _bench-env ## Benchmark: nur bewerten + Bericht (z.B. nach Judge-Wechsel)
+	$(BENCH) score $(BENCH_ARGS) && $(BENCH) report $(BENCH_ARGS)
+
+benchmark-report: ## Benchmark: Bericht des neuesten Laufs neu erzeugen
+	$(BENCH) report $(BENCH_ARGS)
+
+benchmark-check: _bench-env ## Benchmark: Verbindung zu Kermit und Judge-LLM testen
+	$(BENCH) check $(BENCH_ARGS)
+
+benchmark-clean: ## Benchmark-Daten aus Kermit loeschen (Vektoren, Dokumente, Dateien, Use Case)
+	$(BENCH) clean $(BENCH_ARGS)
+
+benchmark-test: ## Unit-Tests der Benchmark-Kennzahlen
+	cd benchmark && python3 -m pytest -q tests
+
 # ── Reset ────────────────────────────────────────────────────
 
 reset: _ensure-compose-v2 ## Alle Daten loeschen und Originalzustand herstellen
@@ -263,6 +293,8 @@ help: ## Show this help
 	@echo "  make test            Unit-Tests ausfuehren"
 	@echo "  make lint            Ruff + Mypy ausfuehren"
 	@echo "  make integration-test  E2E-Tests in Docker"
+	@echo "  make benchmark       XRAG-Benchmark gegen laufenden Stack (benchmark/README.md)"
+	@echo "  make benchmark-clean Benchmark-Daten wieder aus Kermit entfernen"
 	@echo ""
 	@echo "Dokumentation:"
 	@echo "  make doc            Interface Agreement als HTML generieren"

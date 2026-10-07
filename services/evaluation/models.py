@@ -72,6 +72,9 @@ class AgentQueryRequest(BaseModel):
 
 class IngestLogDeleteRequest(BaseModel):
     file_hashes: list[str] = Field(default_factory=list, max_length=5000)
+    # Limits the delete to one use case. The same file can be indexed by
+    # several use cases, so every caller that knows its use case passes it.
+    use_case: str | None = None
 
 
 class FeedbackRequest(BaseModel):

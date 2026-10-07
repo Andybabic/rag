@@ -24,6 +24,11 @@ from sqlalchemy import create_engine, text
 #: Newest first. Each entry is the revision and a probe that is true once that
 #: revision has been applied — a table or column it introduced.
 _LEVELS: list[tuple[str, str]] = [
+    ("0012", "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+             "WHERE conname='uq_ingestion_log_use_case_file_hash')"),
+    ("0011", "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+             "WHERE table_name='usecase_skill_functions' "
+             "AND column_name='permission_override')"),
     ("0010", "SELECT to_regclass('public.usecase_skill_functions') IS NOT NULL"),
     ("0009", "SELECT to_regclass('public.api_jobs') IS NOT NULL"),
     ("0008", "SELECT to_regclass('public.deleted_use_cases') IS NOT NULL"),

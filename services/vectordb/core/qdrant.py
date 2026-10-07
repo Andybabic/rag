@@ -365,6 +365,98 @@ def scroll_payloads(collection: str, filters: dict, limit: int = 1) -> list[dict
     return [dict(p.payload or {}) for p in points]
 
 
+# ── Transfer (use-case export / import) ─────────────────────────────────────
+
+
+class CollectionExistsError(Exception):
+    """Raised when an import would write into a collection that already exists."""
+
+
+def export_points(
+    collection: str, offset: str | int | None = None, limit: int = 256
+) -> dict:
+    """One page of a collection *with* vectors, for moving it to another instance.
+
+    Points come back exactly as stored — id, vector, payload — so the importing
+    side can rebuild the collection without re-embedding anything. ``next`` is
+    the offset of the following page, ``None`` after the last one.
+    """
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
+    if collection not in existing:
+        raise ValueError(f"Collection '{collection}' not found")
+    try:
+        info = client.get_collection(collection)
+        points, next_offset = client.scroll(
+            collection_name=collection,
+            offset=offset,
+            limit=limit,
+            with_payload=True,
+            with_vectors=True,
+        )
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant scroll failed: {exc}") from exc
+    dimension = 0
+    if info.config and info.config.params and info.config.params.vectors:
+        dimension = info.config.params.vectors.size
+    return {
+        "dimension": dimension,
+        "points": [
+            {"id": p.id, "vector": p.vector, "payload": dict(p.payload or {})}
+            for p in points
+        ],
+        "next": next_offset,
+    }
+
+
+def import_points(
+    collection: str, points: list[dict], dimension: int, create: bool = False
+) -> int:
+    """Write exported points back unchanged (ids, vectors, payloads).
+
+    With ``create`` the collection must not exist yet: an import fills a fresh
+    collection and never mixes into one somebody else's use case already uses.
+    Later pages of the same collection pass ``create=False``.
+    """
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
+    if create:
+        if collection in existing:
+            raise CollectionExistsError(f"Collection '{collection}' existiert bereits")
+        try:
+            client.create_collection(
+                collection_name=collection,
+                vectors_config=VectorParams(size=dimension, distance=Distance.COSINE),
+            )
+        except Exception as exc:
+            raise QdrantUnavailableError(f"Qdrant create failed: {exc}") from exc
+    elif collection not in existing:
+        raise ValueError(f"Collection '{collection}' not found")
+    if not points:
+        return 0
+    structs = [
+        PointStruct(id=p["id"], vector=p["vector"], payload=p.get("payload") or {})
+        for p in points
+    ]
+    batch_size = max(1, settings.UPSERT_BATCH_SIZE)
+    try:
+        for start in range(0, len(structs), batch_size):
+            client.upsert(
+                collection_name=collection,
+                points=structs[start : start + batch_size],
+                wait=True,
+            )
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant upsert failed: {exc}") from exc
+    return len(structs)
+
+
 def delete_collection(name: str) -> bool:
     """Delete a collection. Returns True if deleted, raises ValueError if not found."""
     client = get_client()
