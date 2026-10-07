@@ -75,7 +75,7 @@ export async function replaceTableRows(
 		const logResp = await fetch(`${SERVICES.evaluation}/v1/ingest-log/delete`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ file_hashes: orphaned })
+			body: JSON.stringify({ file_hashes: orphaned, use_case: useCase })
 		});
 		if (logResp.ok) removed = (await logResp.json()).documents ?? [];
 	} catch {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from config import settings
@@ -298,3 +299,77 @@ def get_image_absolute_path(use_case: str, image_id: str) -> str | None:
         if stem == image_id and ext.lower() in _IMAGE_EXTS:
             return os.path.join(img_dir, fname)
     return None
+
+
+# ── Transfer (use-case export / import) ─────────────────────────────────────
+
+_USE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+class TransferPathError(ValueError):
+    """A use-case id or relative path that would leave the use case's folder."""
+
+
+def _use_case_root(use_case: str) -> Path:
+    if not _USE_CASE_RE.match(use_case):
+        raise TransferPathError(f"Ungültige Use-Case-ID: {use_case!r}")
+    return Path(settings.FILE_STORAGE_DIR) / use_case
+
+
+def _transfer_path(use_case: str, rel_path: str) -> Path:
+    """Absolute path of ``rel_path`` inside the use case's folder — or refuse.
+
+    ``rel_path`` arrives from an archive someone else built. Resolving and
+    re-checking the prefix is what keeps ``../../etc`` or an absolute path in
+    that archive from writing anywhere but here.
+    """
+    root = _use_case_root(use_case).resolve()
+    target = (root / rel_path).resolve()
+    if not rel_path or target == root or root not in target.parents:
+        raise TransferPathError(f"Pfad außerhalb des Use Case: {rel_path!r}")
+    return target
+
+
+def list_use_case_files(use_case: str) -> list[dict]:
+    """Every stored file of a use case (originals, images, sidecars), relative
+    to its folder. Empty when the folder does not exist."""
+    root = _use_case_root(use_case)
+    if not root.is_dir():
+        return []
+    return [
+        {"path": p.relative_to(root).as_posix(), "size": p.stat().st_size}
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    ]
+
+
+def use_case_file_path(use_case: str, rel_path: str) -> Path | None:
+    """Existing file inside the use case's folder, else ``None``."""
+    target = _transfer_path(use_case, rel_path)
+    return target if target.is_file() else None
+
+
+def open_use_case_file_for_write(use_case: str, rel_path: str) -> tuple[Path, Path]:
+    """(temporary path, final path) for writing one transferred file.
+
+    The caller writes the temporary file and renames it into place, so an
+    aborted upload never leaves a truncated original that looks complete.
+    """
+    target = _transfer_path(use_case, rel_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.with_name(target.name + ".part"), target
+
+
+def delete_use_case_files(use_case: str) -> int:
+    """Remove the use case's whole folder; returns the number of files removed.
+
+    Used to roll back an import that failed half-way.
+    """
+    import shutil
+
+    root = _use_case_root(use_case)
+    if not root.is_dir():
+        return 0
+    count = sum(1 for p in root.rglob("*") if p.is_file())
+    shutil.rmtree(root)
+    return count

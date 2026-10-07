@@ -69,6 +69,209 @@
 		}
 	}
 
+	// ── Transfer: Export / Import eines kompletten Use Case ──────────────
+
+	interface Job {
+		job_id: string;
+		status: 'running' | 'done' | 'error';
+		phase: string;
+		done: number;
+		total: number;
+		result: any;
+		error: string | null;
+	}
+
+	/** Laufende Exporte je Use Case (für Fortschritt am Button). */
+	let exports: Record<string, Job> = $state({});
+
+	async function pollJob(jobId: string, onUpdate: (j: Job) => void): Promise<Job> {
+		for (;;) {
+			const resp = await fetch(`/api/admin/transfer/jobs/${jobId}`);
+			const job: Job = await resp.json();
+			if (!resp.ok) throw new Error((job as any).detail || `HTTP ${resp.status}`);
+			onUpdate(job);
+			if (job.status !== 'running') return job;
+			await new Promise((r) => setTimeout(r, 1000));
+		}
+	}
+
+	async function startExport(id: string) {
+		error = '';
+		notice = '';
+		try {
+			const resp = await fetch(`/api/admin/transfer/export/${encodeURIComponent(id)}`, {
+				method: 'POST'
+			});
+			const body = await resp.json();
+			if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+			exports[id] = body;
+			const job = await pollJob(body.job_id, (j) => (exports[id] = j));
+			if (job.status === 'error') throw new Error(job.error || 'Export fehlgeschlagen');
+			const a = document.createElement('a');
+			a.href = `/api/admin/transfer/jobs/${job.job_id}/download`;
+			a.download = job.result?.file_name ?? `${id}.zip`;
+			a.click();
+			const r = job.result ?? {};
+			notice =
+				`„${id}" exportiert (${formatBytes(r.size)}): ${r.counts?.ingestion_log ?? 0} Dokumente, ` +
+				`${r.points ?? 0} Vektoren in ${r.collections ?? 0} Collections, ${r.files ?? 0} Dateien, ` +
+				`${r.counts?.queries ?? 0} Anfragen, ${r.counts?.feedback ?? 0} Feedbacks, ` +
+				`${r.counts?.usecase_skills ?? 0} Skills. API-Keys und Variablenwerte sind nicht enthalten.`;
+		} catch (e) {
+			error = `Export von „${id}": ${e instanceof Error ? e.message : 'Fehler'}`;
+		} finally {
+			delete exports[id];
+		}
+	}
+
+	function formatBytes(n: number | undefined): string {
+		if (!n) return '0 B';
+		const units = ['B', 'KB', 'MB', 'GB'];
+		let i = 0;
+		while (n >= 1024 && i < units.length - 1) {
+			n /= 1024;
+			i++;
+		}
+		return `${n.toFixed(i ? 1 : 0)} ${units[i]}`;
+	}
+
+	/** Teilgröße des Uploads — deutlich unter BODY_SIZE_LIMIT (50 MB). */
+	const CHUNK = 16 * 1024 * 1024;
+
+	let importOpen = $state(false);
+	type Stage = 'pick' | 'upload' | 'review' | 'running' | 'done';
+	let importStage = $state<Stage>('pick');
+	let importFile = $state<File | null>(null);
+	let uploadId = $state('');
+	let uploaded = $state(0);
+	let inspect: any = $state(null);
+	let targetId = $state('');
+	let targetLabel = $state('');
+	let importError = $state('');
+	let importJob = $state<Job | null>(null);
+	let checking = $state(false);
+
+	function openImport() {
+		importOpen = true;
+		importStage = 'pick';
+		importFile = null;
+		uploadId = '';
+		uploaded = 0;
+		inspect = null;
+		targetId = '';
+		targetLabel = '';
+		importError = '';
+		importJob = null;
+	}
+
+	async function closeImport() {
+		if (importStage === 'running') return;
+		if (uploadId && importStage !== 'done') {
+			fetch(`/api/admin/transfer/uploads/${uploadId}`, { method: 'DELETE' }).catch(() => {});
+		}
+		importOpen = false;
+		if (importStage === 'done') await load();
+	}
+
+	async function uploadArchive() {
+		if (!importFile) return;
+		importError = '';
+		importStage = 'upload';
+		uploaded = 0;
+		try {
+			let resp = await fetch('/api/admin/transfer/uploads', { method: 'POST' });
+			let body = await resp.json();
+			if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+			uploadId = body.upload_id;
+			for (let offset = 0; offset < importFile.size; offset += CHUNK) {
+				resp = await fetch(`/api/admin/transfer/uploads/${uploadId}?offset=${offset}`, {
+					method: 'PUT',
+					headers: { 'content-type': 'application/octet-stream' },
+					body: importFile.slice(offset, offset + CHUNK)
+				});
+				body = await resp.json();
+				if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+				uploaded = body.size;
+			}
+			// Ohne ID prüfen = unter der Original-ID. Ist sie belegt, bleibt das
+			// Feld leer: ein neuer Name muss bewusst vergeben werden.
+			await check(null);
+			const src = inspect.manifest.use_case;
+			targetId = inspect.exists ? '' : src.id;
+			targetLabel = src.label;
+			importStage = 'review';
+		} catch (e) {
+			importError = e instanceof Error ? e.message : 'Upload fehlgeschlagen';
+			importStage = 'pick';
+		}
+	}
+
+	/** Archiv gegen diese Instanz prüfen; `id === null` = unter der Original-ID. */
+	async function check(id: string | null = targetId) {
+		checking = true;
+		importError = '';
+		try {
+			const resp = await fetch(`/api/admin/transfer/uploads/${uploadId}/inspect`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(id ? { target_id: id } : {})
+			});
+			const body = await resp.json();
+			if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+			inspect = body;
+		} catch (e) {
+			importError = e instanceof Error ? e.message : 'Prüfung fehlgeschlagen';
+		} finally {
+			checking = false;
+		}
+	}
+
+	/** Solange die ID der Quelle hier existiert, muss ein neuer Name her. */
+	let needsNewName = $derived(
+		!!inspect?.exists && (!targetId || targetId === inspect?.manifest?.use_case?.id)
+	);
+	let checkedCurrent = $derived(!!inspect && inspect.target_id === targetId);
+	let canImport = $derived(
+		importStage === 'review' &&
+			!!targetId &&
+			!needsNewName &&
+			checkedCurrent &&
+			!inspect?.problems?.length &&
+			!checking
+	);
+
+	async function runImport() {
+		importError = '';
+		try {
+			const resp = await fetch(`/api/admin/transfer/uploads/${uploadId}/import`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ target_id: targetId, label: targetLabel })
+			});
+			const body = await resp.json();
+			if (!resp.ok) {
+				if (body.detail?.problems) {
+					inspect = { ...inspect, problems: body.detail.problems, warnings: body.detail.warnings };
+					return;
+				}
+				throw new Error(body.detail || `HTTP ${resp.status}`);
+			}
+			importStage = 'running';
+			importJob = body;
+			const job = await pollJob(body.job_id, (j) => (importJob = j));
+			if (job.status === 'error') {
+				importError = job.error || 'Import fehlgeschlagen';
+				importStage = 'review';
+				await check();
+				return;
+			}
+			importStage = 'done';
+		} catch (e) {
+			importError = e instanceof Error ? e.message : 'Import fehlgeschlagen';
+			if (importStage === 'running') importStage = 'review';
+		}
+	}
+
 	function splitCsv(s: string): string[] {
 		return s
 			.split(',')
@@ -231,6 +434,9 @@
 			<button onclick={exportJson} class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
 				Export JSON
 			</button>
+			<button onclick={openImport} class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+				Use Case importieren
+			</button>
 			<button onclick={addNew} class="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">
 				+ Neuer Use Case
 			</button>
@@ -268,6 +474,24 @@
 						<button onclick={() => save(it)} disabled={it.saving} class="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-60">
 							Speichern
 						</button>
+						{#if !it.isNew}
+							<button
+								onclick={() => startExport(it.id)}
+								disabled={!!exports[it.id]}
+								title="Alles exportieren: Konfiguration, Prompts, Skills, Dokumente, Vektoren, Dateien, Chatverlauf, Feedback"
+								class="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+							>
+								{#if exports[it.id]}
+									{exports[it.id].phase}{exports[it.id].total
+										? ` ${exports[it.id].done}/${exports[it.id].total}`
+										: exports[it.id].done
+											? ` ${exports[it.id].done}`
+											: ''} …
+								{:else}
+									Exportieren
+								{/if}
+							</button>
+						{/if}
 						<button onclick={() => remove(it)} class="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50">
 							{it.isNew ? 'Verwerfen' : 'Löschen'}
 						</button>
@@ -392,6 +616,168 @@
 				>
 					{wipeBusy ? 'Löscht …' : 'Endgültig löschen'}
 				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if importOpen}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+		<div class="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-5 shadow-xl">
+			<h3 class="text-base font-bold text-gray-900">Use Case importieren</h3>
+			<p class="mt-1 text-sm text-gray-600">
+				Export-Datei (.zip) eines Use Case von dieser oder einer anderen Instanz.
+			</p>
+
+			{#if importStage === 'pick' || importStage === 'upload'}
+				<input
+					type="file"
+					accept=".zip,application/zip"
+					disabled={importStage === 'upload'}
+					onchange={(e) => (importFile = e.currentTarget.files?.[0] ?? null)}
+					class="mt-4 block w-full text-sm"
+				/>
+				{#if importStage === 'upload' && importFile}
+					<div class="mt-3 h-2 w-full overflow-hidden rounded bg-gray-100">
+						<div
+							class="h-2 bg-blue-600 transition-all"
+							style="width: {Math.round((uploaded / importFile.size) * 100)}%"
+						></div>
+					</div>
+					<p class="mt-1 text-xs text-gray-500">
+						{formatBytes(uploaded)} von {formatBytes(importFile.size)} hochgeladen …
+					</p>
+				{/if}
+			{/if}
+
+			{#if (importStage === 'review' || importStage === 'running') && inspect}
+				{@const m = inspect.manifest}
+				<div class="mt-4 rounded-lg bg-gray-50 p-3 text-sm text-gray-700">
+					<p>
+						<strong>{m.use_case.label}</strong>
+						<span class="font-mono text-xs text-gray-500">({m.use_case.id})</span>
+					</p>
+					<p class="mt-1 text-xs text-gray-500">
+						Exportiert {new Date(m.exported_at).toLocaleString('de-AT')} ·
+						{m.counts.ingestion_log ?? 0} Dokumente ·
+						{m.collections.reduce((n: number, c: any) => n + c.points, 0)} Vektoren ·
+						{m.files.count} Dateien ({formatBytes(m.files.bytes)}) ·
+						{m.counts.queries ?? 0} Anfragen · {m.counts.feedback ?? 0} Feedbacks ·
+						{m.counts.usecase_skills ?? 0} Skills
+					</p>
+				</div>
+
+				{#if inspect.exists}
+					<p class="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+						Use Case „{m.use_case.id}" existiert hier bereits. Bitte einen neuen Namen vergeben.
+					</p>
+				{/if}
+
+				<div class="mt-3 grid gap-3 sm:grid-cols-2">
+					<label class="block">
+						<span class="mb-1 block text-xs text-gray-500">ID auf dieser Instanz</span>
+						<input
+							bind:value={targetId}
+							disabled={importStage === 'running'}
+							placeholder="z.B. {m.use_case.id}2"
+							onkeydown={(e) => e.key === 'Enter' && targetId && check()}
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-sm"
+						/>
+					</label>
+					<label class="block">
+						<span class="mb-1 block text-xs text-gray-500">Label</span>
+						<input
+							bind:value={targetLabel}
+							disabled={importStage === 'running'}
+							class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+						/>
+					</label>
+				</div>
+				<p class="mt-1 text-[11px] text-gray-400">
+					Bei neuem Namen werden Collections, Präfix und Dateipfade mit umbenannt. Der Name darf
+					nicht unter den Präfix eines anderen Use Case fallen – „{m.use_case.id}_kopie" würde vom
+					Original mitdurchsucht, „{m.use_case.id}2" nicht.
+				</p>
+
+				{#if checkedCurrent && !needsNewName}
+					{#if inspect.problems.length}
+						<ul class="mt-3 list-disc space-y-1 rounded-lg bg-red-50 py-2 pr-3 pl-7 text-sm text-red-700">
+							{#each inspect.problems as p}<li>{p}</li>{/each}
+						</ul>
+					{:else}
+						<p class="mt-3 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+							Keine Konflikte. Collections: {Object.values(inspect.collections).join(', ') || '–'}
+						</p>
+					{/if}
+				{/if}
+				{#if inspect.warnings?.length}
+					<ul class="mt-3 list-disc space-y-1 rounded-lg bg-amber-50 py-2 pr-3 pl-7 text-xs text-amber-800">
+						{#each inspect.warnings as w}<li>{w}</li>{/each}
+					</ul>
+				{/if}
+			{/if}
+
+			{#if importStage === 'running' && importJob}
+				<p class="mt-3 text-sm text-gray-600">
+					{importJob.phase}{importJob.total ? ` – ${importJob.done}/${importJob.total}` : ''} …
+				</p>
+			{/if}
+
+			{#if importStage === 'done' && importJob?.result}
+				{@const r = importJob.result}
+				<div class="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-800">
+					Use Case <strong class="font-mono">{r.use_case}</strong> importiert{r.renamed_from
+						? ` (vorher „${r.renamed_from}")`
+						: ''}: {r.counts.ingestion_log ?? 0} Dokumente, {r.points} Vektoren, {r.files} Dateien,
+					{r.counts.queries ?? 0} Anfragen, {r.counts.feedback ?? 0} Feedbacks,
+					{r.counts.usecase_skills ?? 0} Skills, {r.counts.user_use_cases ?? 0} Benutzerzuordnungen.
+				</div>
+				{#if r.warnings?.length}
+					<p class="mt-3 text-xs font-semibold text-amber-800">Noch zu erledigen:</p>
+					<ul class="mt-1 list-disc space-y-1 pl-5 text-xs text-amber-800">
+						{#each r.warnings as w}<li>{w}</li>{/each}
+					</ul>
+				{/if}
+			{/if}
+
+			{#if importError}
+				<p class="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{importError}</p>
+			{/if}
+
+			<div class="mt-4 flex justify-end gap-2">
+				<button
+					onclick={closeImport}
+					disabled={importStage === 'running' || importStage === 'upload'}
+					class="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+				>
+					{importStage === 'done' ? 'Schließen' : 'Abbrechen'}
+				</button>
+				{#if importStage === 'pick' || importStage === 'upload'}
+					<button
+						onclick={uploadArchive}
+						disabled={!importFile || importStage === 'upload'}
+						class="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+					>
+						{importStage === 'upload' ? 'Lädt hoch …' : 'Hochladen und prüfen'}
+					</button>
+				{:else if importStage === 'review' || importStage === 'running'}
+					{#if !checkedCurrent && importStage === 'review'}
+						<button
+							onclick={() => check()}
+							disabled={!targetId || checking}
+							class="rounded-lg border border-blue-600 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+						>
+							{checking ? 'Prüft …' : 'Namen prüfen'}
+						</button>
+					{/if}
+					<button
+						onclick={runImport}
+						disabled={!canImport}
+						class="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+					>
+						{importStage === 'running' ? 'Importiert …' : 'Importieren'}
+					</button>
+				{/if}
 			</div>
 		</div>
 	</div>

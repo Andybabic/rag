@@ -214,6 +214,21 @@ enthalten). Master-Schalter und Limits stehen in `.env` unter
 - Skill schreiben: [`docs/skill_functions_developer.md`](docs/skill_functions_developer.md)
 - Wie es intern funktioniert: [`docs/skill_functions_architecture.md`](docs/skill_functions_architecture.md)
 
+## Use Case auf andere Instanz übertragen
+
+**Verwaltung → Use Cases → Exportieren** packt einen kompletten Use Case in eine
+ZIP-Datei: Konfiguration, Prompts, Skills, Dokumentliste, Collections samt
+Vektoren, Originaldateien und Bilder, Chatverlauf, Feedback. API-Keys und
+Werte von Skill-Variablen bleiben draußen.
+
+**Use Case importieren** lädt die Datei auf einer anderen (oder derselben)
+Instanz hoch. Existiert die ID dort schon, muss ein neuer Name vergeben werden —
+Collections, Präfix und Dateipfade werden dann mit umbenannt. Vektoren werden
+1:1 kopiert, daher muss das Ziel dasselbe Embedding-Modell nutzen. Braucht
+Migration 0012 (`make migrate`).
+
+→ **Details: [`docs/use_case_transfer.md`](docs/use_case_transfer.md)**
+
 ## Pipeline per API nutzen
 
 Die Pipeline ist nicht nur über die Chat-Oberfläche erreichbar, sondern auch per

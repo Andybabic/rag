@@ -53,3 +53,24 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+
+
+class ExportPointsRequest(BaseModel):
+    collection: str
+    # Offset from the previous page's ``next``; point ids are UUIDs or ints.
+    offset: str | int | None = None
+    limit: int = Field(default=256, ge=1, le=1000)
+
+
+class ImportPoint(BaseModel):
+    id: str | int
+    vector: list[float]
+    payload: dict = Field(default_factory=dict)
+
+
+class ImportPointsRequest(BaseModel):
+    collection: str
+    dimension: int = Field(ge=1)
+    points: list[ImportPoint] = Field(default_factory=list)
+    # First page: create the collection, and refuse if it already exists.
+    create: bool = False

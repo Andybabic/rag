@@ -127,7 +127,7 @@ export async function replaceProduct(
 		{
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ file_hashes: orphaned })
+			body: JSON.stringify({ file_hashes: orphaned, use_case: GW_USE_CASE })
 		}
 	);
 	const removed = ((await logResp.json()).documents ?? []) as Array<{

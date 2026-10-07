@@ -16,6 +16,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -76,7 +77,7 @@ class IngestionLog(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     file_name = Column(String(500), nullable=False)
-    file_hash = Column(String(64), nullable=False, unique=True)
+    file_hash = Column(String(64), nullable=False)
     collection = Column(String(100))
     use_case = Column(String(50))
     chunk_count = Column(Integer)
@@ -88,6 +89,10 @@ class IngestionLog(Base):
 
     __table_args__ = (
         Index("idx_ingestion_file_hash", "file_hash"),
+        # Per use case: the same file may be indexed by several use cases.
+        UniqueConstraint(
+            "use_case", "file_hash", name="uq_ingestion_log_use_case_file_hash"
+        ),
     )
 
 

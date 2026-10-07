@@ -440,7 +440,7 @@ async def log_ingestion(body: dict, request: Request):
             """INSERT INTO ingestion_log
                    (id, file_name, file_hash, stored_path, collection, use_case, chunk_count, status)
                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'ok')
-               ON CONFLICT (file_hash) DO UPDATE SET
+               ON CONFLICT (use_case, file_hash) DO UPDATE SET
                    chunk_count = EXCLUDED.chunk_count,
                    stored_path = EXCLUDED.stored_path,
                    collection = EXCLUDED.collection""",
@@ -472,11 +472,22 @@ async def delete_ingestion_logs(body: IngestLogDeleteRequest, request: Request):
     if not body.file_hashes:
         return {"status": "ok", "documents": [], "request_id": request_id}
     pool = await get_pool()
-    rows = await pool.fetch(
-        """DELETE FROM ingestion_log WHERE file_hash = ANY($1::text[])
-           RETURNING file_name, file_hash, stored_path, use_case""",
-        body.file_hashes,
-    )
+    # A hash is unique only per use case: without the scope, cleaning up one
+    # use case would drop the same file from every other one that holds it.
+    if body.use_case:
+        rows = await pool.fetch(
+            """DELETE FROM ingestion_log
+               WHERE file_hash = ANY($1::text[]) AND use_case = $2
+               RETURNING file_name, file_hash, stored_path, use_case""",
+            body.file_hashes,
+            body.use_case,
+        )
+    else:
+        rows = await pool.fetch(
+            """DELETE FROM ingestion_log WHERE file_hash = ANY($1::text[])
+               RETURNING file_name, file_hash, stored_path, use_case""",
+            body.file_hashes,
+        )
     return {
         "status": "ok",
         "documents": [

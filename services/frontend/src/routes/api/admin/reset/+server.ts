@@ -130,7 +130,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			const resp = await fetch(`${SERVICES.evaluation}/v1/ingest-log/delete`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ file_hashes: hashes })
+				body: JSON.stringify({ file_hashes: hashes, use_case: useCase })
 			});
 			if (resp.ok) removed = (await resp.json()).documents ?? [];
 			else errors.push(`Dokumentliste: HTTP ${resp.status}`);

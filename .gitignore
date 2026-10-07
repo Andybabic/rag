@@ -15,3 +15,8 @@ gitpush.txt
 =======
 *.pptx
 >>>>>>> Stashed changes
+
+# Benchmark: Konfiguration, Datensatz-Cache (CC BY-NC) und Laeufe
+benchmark/.env
+benchmark/.cache/
+benchmark/runs/

@@ -13,12 +13,17 @@ from core.handlers import supported_formats
 from core.image_jobs import get_progress, run_alt_text_job
 from core.pii import remove_pii
 from core.storage import (
+    TransferPathError,
     delete_document_files,
+    delete_use_case_files,
     get_absolute_path,
     get_image_absolute_path,
     list_document_images,
+    list_use_case_files,
+    open_use_case_file_for_write,
     store_image,
     store_original,
+    use_case_file_path,
     write_image_metadata,
 )
 from fastapi import APIRouter, Form, Request, UploadFile
@@ -439,3 +444,76 @@ async def clean_batch(
             for e in batch.errors
         ],
     }
+
+
+# ── Transfer (use-case export / import) ─────────────────────────────────────
+# The evaluation service moves a whole use case between instances; these routes
+# are its view of the file storage. Everything is confined to
+# <storage>/<use_case>/ — paths come out of an uploaded archive.
+
+
+def _transfer_error(exc: TransferPathError, request: Request) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "invalid_path",
+            "detail": str(exc),
+            "request_id": getattr(request.state, "request_id", "unknown"),
+            "service": "cleaning-service",
+        },
+    )
+
+
+@router.get("/transfer/{use_case}/files")
+async def transfer_list_files(use_case: str, request: Request):
+    """All stored files of a use case, relative to its folder."""
+    try:
+        files = list_use_case_files(use_case)
+    except TransferPathError as exc:
+        return _transfer_error(exc, request)
+    return {"use_case": use_case, "files": files}
+
+
+@router.get("/transfer/{use_case}/file/{path:path}")
+async def transfer_get_file(use_case: str, path: str, request: Request):
+    try:
+        abs_path = use_case_file_path(use_case, path)
+    except TransferPathError as exc:
+        return _transfer_error(exc, request)
+    if abs_path is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "detail": f"Datei fehlt: {path}",
+                     "service": "cleaning-service"},
+        )
+    return FileResponse(abs_path, media_type="application/octet-stream")
+
+
+@router.put("/transfer/{use_case}/file/{path:path}")
+async def transfer_put_file(use_case: str, path: str, request: Request):
+    """Store one file of an imported use case (raw request body)."""
+    try:
+        tmp, final = open_use_case_file_for_write(use_case, path)
+    except TransferPathError as exc:
+        return _transfer_error(exc, request)
+    size = 0
+    try:
+        with open(tmp, "wb") as fh:
+            async for chunk in request.stream():
+                fh.write(chunk)
+                size += len(chunk)
+        os.replace(tmp, final)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return {"status": "ok", "path": path, "size": size}
+
+
+@router.delete("/transfer/{use_case}")
+async def transfer_delete_files(use_case: str, request: Request):
+    """Remove a use case's whole folder (rollback of a failed import)."""
+    try:
+        removed = delete_use_case_files(use_case)
+    except TransferPathError as exc:
+        return _transfer_error(exc, request)
+    return {"status": "ok", "removed": removed}
