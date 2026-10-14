@@ -2,19 +2,20 @@
 /services/cleaning/logs
 shared/.DS_Store
 .DS_Store
-.env
 /data/documents
-<<<<<<< Updated upstream
 Kermit/~$Kermit_Praesentation.pptx
 Kermit/Kermit_Praesentation.pptx
 Kermit/20251009 CORNET KERMIT - 1 Steering Committee Meeting - Kick-off.pptx
 gitpush.txt
-.env copy
-.env_old
-.env_rwth
-=======
 *.pptx
->>>>>>> Stashed changes
+
+# Env-Dateien mit Secrets: nie committen (nur *.env.example)
+.env
+.env*
+**/.env
+**/.env*
+!.env.example
+!**/.env.example
 
 # Benchmark: Konfiguration, Datensatz-Cache (CC BY-NC) und Laeufe
 benchmark/.env
