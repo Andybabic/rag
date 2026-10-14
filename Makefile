@@ -133,9 +133,15 @@ dev: _ensure-compose-v2 _ensure-env _ensure-auth-secret _check-postgres-port ski
 	@cd services/frontend && [ -d node_modules ] || npm install
 	@echo ""
 	@echo "Frontend dev server mit Hot-Reload → http://localhost:5173"
-	@echo "Backend-Logs:  make logs   |   Stop:  make down"
+	@echo "Backend-Logs:  make logs   |   Stop:  make down   |   Selbsttest:  make check"
 	@echo ""
+	@# Selbsttest im Hintergrund: Vite startet sofort, das Ergebnis erscheint
+	@# im selben Terminal, sobald LLM, Embedding und Reranker geprueft sind.
+	@(python3 scripts/check_dependencies.py || true) &
 	cd services/frontend && AUTH_SECRET="$$(grep -E '^AUTH_SECRET=' ../../.env 2>/dev/null | head -1 | cut -d= -f2-)" $(FE_DEV_ENV) npm run dev -- --host 0.0.0.0
+
+check: ## Selbsttest: LLMs, Embedding und Reranker erreichbar und funktionsfaehig?
+	@python3 scripts/check_dependencies.py
 
 dev-fe: dev ## Alias fuer 'make dev' (frueheres Verhalten beibehalten)
 

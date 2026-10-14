@@ -282,3 +282,17 @@ def test_scroll_payloads_reads_metadata_by_filter():
 
 def test_scroll_payloads_missing_collection_is_empty():
     assert scroll_payloads("nope", {"file_hash": "h1"}) == []
+
+
+def test_scroll_filter_with_list_matches_any_value():
+    """Neighbour lookup asks for several chunk positions in one call."""
+    name = "test_scroll_any"
+    upsert_vectors(name, [
+        {**e, "metadata": {**e["metadata"], "extra": {"chunk_index": i}, "file_hash": "h1"}}
+        for i, e in enumerate(_make_embeddings(4))
+    ])
+    try:
+        points = scroll_payloads(name, {"file_hash": "h1", "extra.chunk_index": [1, 3]}, limit=10)
+        assert sorted(p["extra"]["chunk_index"] for p in points) == [1, 3]
+    finally:
+        delete_collection(name)

@@ -67,6 +67,27 @@ class Kermit:
                 raise KermitError(f"{name} meldet {resp.status_code}: {_detail(resp)}")
         await self._find_frontend()
 
+    async def dependencies(self) -> dict | None:
+        """Run Kermit's self-test (LLMs, embedding, reranker) and return it,
+        or None on an older Kermit without the endpoint. Can take minutes
+        while the reranker model is still downloading."""
+        try:
+            resp = await self.eval.get(
+                "/health/dependencies", params={"refresh": "true"}, timeout=960.0
+            )
+        except httpx.HTTPError as exc:
+            raise KermitError(f"Selbsttest nicht abrufbar: {exc}") from exc
+        return resp.json() if resp.status_code == 200 else None
+
+    async def pipeline(self) -> dict | None:
+        """Kermit's effective retrieval settings, or None on an older Kermit
+        without the endpoint – a run without them is still a valid run."""
+        try:
+            resp = await self.eval.get("/health/retrieval")
+        except httpx.HTTPError:
+            return None
+        return resp.json() if resp.status_code == 200 else None
+
     async def _find_frontend(self) -> None:
         """Use the configured frontend URL, or the first local one that answers."""
         configured = self.s.frontend_url.rstrip("/")

@@ -12,6 +12,7 @@ from qdrant_client.models import (
     Filter,
     FilterSelector,
     IsEmptyCondition,
+    MatchAny,
     MatchValue,
     PayloadField,
     PointStruct,
@@ -151,7 +152,8 @@ def upsert_vectors(
 def _build_filter(filters: dict) -> Filter | None:
     """Convert a flat dict of filters to Qdrant Filter conditions.
 
-    A value of ``None`` means "field absent or empty". That is how points
+    A list matches any of its values. A value of ``None`` means "field absent
+    or empty". That is how points
     written before a field existed are addressed — e.g. replacing a product's
     chunks must also remove the ones ingested before they carried a machine.
     """
@@ -161,6 +163,9 @@ def _build_filter(filters: dict) -> Filter | None:
     for key, value in filters.items():
         if value is None:
             conditions.append(IsEmptyCondition(is_empty=PayloadField(key=key)))
+        elif isinstance(value, list):
+            # Any of several values – e.g. a chunk's neighbours by position.
+            conditions.append(FieldCondition(key=key, match=MatchAny(any=value)))
         else:
             conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
     return Filter(must=conditions)

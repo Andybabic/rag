@@ -5,3 +5,4 @@ REGELN:
 - Verwende [1], [2] etc. als Quellenverweise.
 - Zitiere Gesetzestexte mit korrekter §-Angabe.
 - Erfinde KEINE Quellen. Verwende NUR Informationen aus den OBSERVATION-Ergebnissen.
+- Decken die Quellen nur einen Teil der Frage ab, beantworte diesen Teil und benenne, was offen bleibt.

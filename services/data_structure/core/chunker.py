@@ -248,7 +248,10 @@ def chunk_markdown(
                     chunk_images.append(payload)
             # Keys derived from *this chunk's* position in the document. No
             # plugin can reconstruct them — they only exist here.
-            chunk_owned: dict = {"breadcrumb": breadcrumb}
+            # chunk_index: position in the document, so retrieval can show a
+            # hit together with its neighbours – a figure in one chunk often
+            # has its subject (who, when, where) in the one before.
+            chunk_owned: dict = {"breadcrumb": breadcrumb, "chunk_index": len(chunks)}
             if chunk_images:
                 chunk_owned["images"] = chunk_images
             meta_extra = {**(extra or {}), **chunk_owned}

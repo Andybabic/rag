@@ -26,6 +26,10 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from config import settings
+from core.agent import _NO_INFO_RE
+from core.grounding import find_ungrounded
+from core.guards import strip_invented_years
+from core.reranker import rerank_chunks
 from core.actions import product_scope
 from core.agent import run_agent
 from core.citations import map_citations, strip_unresolved_refs
@@ -114,6 +118,13 @@ Verfügbare Rollen:
 - "procedure": Abläufe, Anleitungen, Schritt-für-Schritt, Workflows
 - "context":   Hintergrund, Definitionen, Begriffsklärungen, Rahmen
 
+Antwortform (answer_form) – was die Frage als Antwort erwartet:
+- "single":      EIN Wert, Name, Ereignis oder eine Zahl ("Welches Ereignis …?",
+                 "Wie viele …?", "Wer …?")
+- "list":        eine Aufzählung ("Welche Spieler …?", "Worauf ist zu achten?")
+- "comparison":  zwei Seiten gegeneinander ("Was war mehr/früher …?")
+- "explanation": ein Ablauf oder Zusammenhang ("Wie funktioniert …?")
+
 Merge-Strategien:
 - "complementary": Antworten ergänzen sich (Standard, z.B. Fakt + Hintergrund)
 - "comparative":   Antworten werden gegenübergestellt (z.B. A vs. B)
@@ -134,6 +145,13 @@ REGELN:
 - NIE mehr als 3 Sub-Tasks. Lieber einen weglassen als zwei ähnliche.
 - Jede sub_query muss eigenständig durchsuchbar sein (keine Pronomen,
   keine Bezüge auf andere Sub-Tasks).
+- Übernimm Eigennamen, Ereignisbezeichnungen und Zeitangaben der Anfrage
+  WÖRTLICH. Ergänze KEINE Jahreszahlen, Orte, Personen oder Deutungen aus
+  eigenem Wissen – auch nicht in Klammern. Was die Anfrage offen lässt
+  („kürzlich“, „der Konflikt“, „der verfluchte Dienstag“), bleibt offen: Die
+  Dokumente klären es, nicht du. Eine falsch ergänzte Jahreszahl lenkt die
+  Suche auf ein anderes Ereignis, und der Spezialist verwirft dann den
+  richtigen Treffer, weil er nicht zu deiner Jahreszahl passt.
 - KEINE Platzhalter in der sub_query. Schreibe nie "(Standort)", "[Name]"
   oder "<Ort>". Setze den konkreten Wert aus der Anfrage ein; fehlt er,
   nimm den Ort/Gegenstand aus dem fachlichen Kontext des Use Cases. Eine
@@ -150,6 +168,7 @@ Antworte AUSSCHLIESSLICH mit gültigem JSON in genau diesem Schema:
 {
   "rationale": "kurz auf Deutsch, warum du so zerlegst",
   "merge_strategy": "complementary" | "comparative" | "fallback",
+  "answer_form": "single" | "list" | "comparison" | "explanation",
   "subtasks": [
     {"role": "facts" | "procedure" | "context",
      "sub_query": "...",
@@ -210,6 +229,7 @@ def _fallback_plan(query: str) -> dict:
     return {
         "rationale": "Fallback: Manager-LLM lieferte keinen verwertbaren Plan.",
         "merge_strategy": "fallback",
+        "answer_form": infer_answer_form(query),
         "subtasks": [
             {
                 "role": DEFAULT_ROLE,
@@ -302,6 +322,63 @@ def _with_product_scope(sub_query: str, scoped_product: str | None) -> str:
     return f"{sub_query} (Bauteil {scoped_product})"
 
 
+#: What shape the answer must take, by the planner's reading of the question.
+#: The synthesizer otherwise answers every question as a list of everything it
+#: found – observed: "Welches Ereignis …?" got six numbered criticisms, the
+#: one event asked for in fifth place.
+_ANSWER_FORMS = {
+    "single": (
+        "Gefragt ist EIN Wert, Name, Ereignis oder eine Zahl. Nenne ihn im ersten "
+        "Satz mit Beleg. Weitere Angaben nur, wenn sie genau diesen einen Wert "
+        "belegen oder einschränken – keine Aufzählung weiterer Punkte."
+    ),
+    "list": (
+        "Gefragt ist eine Aufzählung. Liste die Punkte vollständig, je Punkt "
+        "ein Satz mit Beleg."
+    ),
+    "comparison": (
+        "Gefragt ist ein Vergleich. Erster Satz: das Fazit (welche Seite, mit "
+        "beiden Werten und Belegen). Danach höchstens eine kurze Begründung."
+    ),
+    "explanation": (
+        "Gefragt ist ein Ablauf oder Zusammenhang. Erkläre ihn in der "
+        "nötigen Reihenfolge, jeder Schritt belegt."
+    ),
+}
+
+
+_COMPARATIVE_RE = re.compile(
+    r"\b(?:mehr|weniger|höher\w*|niedriger\w*|größer\w*|kleiner\w*|früher|später|"
+    r"zuerst|länger|kürzer|teurer|billiger|besser\w*|schlechter\w*|stärker\w*|"
+    r"ehrgeizig\w*|erfolgreich\w*)\b.*\boder\b",
+    re.I | re.S,
+)
+_SINGLE_RE = re.compile(
+    r"^\s*(?:wie\s+viele?|wie\s+hoch|wie\s+lange|wann|wo|wer|welche[rs]|was\s+war)\b", re.I
+)
+_LIST_RE = re.compile(r"^\s*(?:welche|was\s+sind|nenne|worauf|wer\s+sind)\b", re.I)
+_EXPLAIN_RE = re.compile(r"^\s*(?:wie\s+funktioniert|warum|wieso|weshalb|erkläre|wie\s+geht)\b", re.I)
+
+
+def infer_answer_form(query: str) -> str | None:
+    """The answer form a question asks for, read off its wording.
+
+    Fallback for when the planner leaves ``answer_form`` out – in practice it
+    usually does. Comparison is checked first: "Welches Ereignis forderte mehr
+    …: A oder B?" opens like a single-value question but asks to compare.
+    """
+    q = query or ""
+    if _COMPARATIVE_RE.search(q):
+        return "comparison"
+    if _EXPLAIN_RE.search(q):
+        return "explanation"
+    if _SINGLE_RE.search(q):
+        return "single"
+    if _LIST_RE.search(q):
+        return "list"
+    return None
+
+
 def _normalise_plan(raw: dict, fallback_query: str) -> dict:
     """Validate + clamp the decomposer output. Always returns a usable plan."""
     if not isinstance(raw, dict):
@@ -361,10 +438,14 @@ def _normalise_plan(raw: dict, fallback_query: str) -> dict:
     merge = raw.get("merge_strategy")
     if merge not in ("complementary", "comparative", "fallback"):
         merge = "complementary"
+    form = raw.get("answer_form")
+    if form not in _ANSWER_FORMS:
+        form = infer_answer_form(fallback_query)
 
     return {
         "rationale": (raw.get("rationale") or "").strip()[:500],
         "merge_strategy": merge,
+        "answer_form": form,
         "subtasks": cleaned,
     }
 
@@ -560,16 +641,66 @@ async def plan_subtasks(
             f"Response (truncated): {raw_response[:200]!r}"
         )
         return _fallback_plan(query)
-    return _normalise_plan(parsed, query)
+    plan = _strip_invented_years(
+        _normalise_plan(parsed, query),
+        "\n".join(user_msg_parts) + "\n" + domain_prompt,
+    )
+    return _keep_single_question(plan, query, history)
+
+
+def _keep_single_question(plan: dict, query: str, history: list[dict] | None) -> dict:
+    """One facet: search with the user's own question, not the planner's rewrite.
+
+    With a single sub-task there is nothing to split, so a rewrite can only
+    lose or add – observed: "trotz der Leistung von Kane" became "obwohl Kane
+    als bester Spieler des Turniers galt", a premise the documents contradict,
+    and the answer repeated it. Kept for follow-ups and vague questions, where
+    the planner's rewrite carries context the bare question lacks.
+    """
+    subtasks = plan.get("subtasks") or []
+    if len(subtasks) == 1 and not history and not _is_vague_query(query, history):
+        subtasks[0]["sub_query"] = query
+    return plan
+
+
+def _strip_invented_years(plan: dict, allowed_text: str) -> dict:
+    """Remove years from sub-queries that appear nowhere in what the planner
+    was given (query, history, memory, domain prompt). See ``core.guards``.
+
+    Measured on 100 benchmark questions: "der verfluchte Dienstag" became
+    "Beirut 2020" (it was 2024), "der Militäreinmarsch" became "1982".
+    """
+    for st in plan.get("subtasks", []):
+        original = st["sub_query"]
+        cleaned = strip_invented_years(original, allowed_text)
+        if cleaned != original:
+            logger.info("Removed invented year(s) from sub-query: %r → %r", original, cleaned)
+            st["sub_query"] = cleaned
+    return plan
 
 
 # ── Sub-agent orchestration ─────────────────────────────────────────────────
 
 
-def _build_sub_system_prompt(base_prompt: str, role: RoleConfig, focus: str) -> str:
-    """Compose the use-case prompt with the role-specific suffix + focus hint."""
+def _build_sub_system_prompt(
+    base_prompt: str, role: RoleConfig, focus: str, user_query: str = ""
+) -> str:
+    """Compose the use-case prompt with the role-specific suffix + focus hint.
+
+    ``user_query`` is the question as the user asked it. A specialist used to
+    see only its sub-query, so whatever the planner got wrong there (an
+    invented year, a misread event) was invisible to it – it could only
+    answer the distorted question.
+    """
     focus_block = f"\nFOKUS DIESES SUB-TASKS: {focus}\n" if focus else ""
-    return f"{base_prompt}\n{role.prompt_suffix}{focus_block}"
+    query_block = (
+        "\nGESAMTFRAGE DES NUTZERS (zur Einordnung – dein Sub-Task deckt einen "
+        f"Teil davon ab): {user_query}\n"
+        "Weicht deine Teilfrage in Ereignis, Ort oder Zeitraum von der "
+        "Gesamtfrage ab, gilt die Gesamtfrage.\n"
+        if user_query else ""
+    )
+    return f"{base_prompt}\n{role.prompt_suffix}{focus_block}{query_block}"
 
 
 #: Events that must reach the client unwrapped. A sub-agent event is normally
@@ -641,6 +772,7 @@ async def _run_one_subagent(
     *,
     sub_id: str,
     sub_query: str,
+    user_query: str = "",
     role: RoleConfig,
     focus: str,
     use_case: str,
@@ -658,7 +790,7 @@ async def _run_one_subagent(
     """Run a single sub-agent. Wraps ``run_agent`` with the role config."""
     _t0 = time.perf_counter()
     sub_actions = filter_actions(role, available_actions)
-    sub_prompt = _build_sub_system_prompt(use_case_prompt, role, focus)
+    sub_prompt = _build_sub_system_prompt(use_case_prompt, role, focus, user_query)
 
     if on_event:
         await on_event({
@@ -689,6 +821,7 @@ async def _run_one_subagent(
                 images=images,
                 image_context=image_context,
                 persist_memory=False,  # the manager owns the moderated memory update
+                anchor_query=user_query,
                 request_id=request_id,
                 username=username,
                 on_event=_wrap_event(
@@ -935,6 +1068,19 @@ BEISPIEL (Platzierung):
   ("Quelle [3] gibt X an, Quelle [5] dagegen Y").
 - Wenn ein Teil der Originalfrage durch keinen Chunk gedeckt ist, sage
   das wörtlich.
+- Jedes Fragment trägt einen STATUS. „nicht gefunden" oder „teilweise"
+  heisst nur, dass der Spezialist nichts Passendes erkannt hat. Nennt das
+  Fragment Pool-Stellen „laut Reranker passend", prüfe genau diese Chunks
+  und beantworte den Teil daraus, wenn sie ihn tragen. Steht dort „nichts",
+  ist der Teil offen – sage das, ohne zu raten.
+- Ein Fragment „keine Information" ist kein Beweis: Prüfe den Pool selbst.
+  Steht dort eine passende Angabe – auch ein naher Treffer (benachbarter
+  Ort, ungefähre Zahl, angrenzender Zeitraum) –, nimm sie auf und benenne
+  die Abweichung im selben Satz.
+- VERGLEICHSFRAGEN („Was war mehr / früher / teurer …?"): Liegen für BEIDE
+  Seiten Werte vor, nenne beide mit [n] und ziehe das Fazit ausdrücklich.
+  Fehlt eine Seite, sage welche, nenne die vorhandene und ziehe KEIN Fazit –
+  ein Vergleich gegen einen fehlenden Wert ist geraten.
 - Ist ein Fragment mit "(Fehler: …)" markiert, hat dieser Spezialist
   nichts geliefert. Antworte dann nur aus den vorhandenen Chunks und
   weise am Ende in einem Satz darauf hin, welcher Aspekt deshalb
@@ -1006,7 +1152,11 @@ def _merge_chunks(subagents: list[dict]) -> list[dict]:
 # answer then read as an accurate but oddly incomplete summary of a source the
 # synthesizer had never seen whole. Sized to pass a normal chunk intact with
 # headroom for oversized ones (tables, appended image descriptions).
-_POOL_CHUNK_CHARS = 1200
+#
+# The neighbour context shown around a hit (CONTEXT_NEIGHBOR_CHARS before and
+# after) comes on top – cutting it here would hide from the synthesizer what
+# the specialist based its fragment on.
+_POOL_CHUNK_CHARS = 1200 + 2 * max(settings.CONTEXT_NEIGHBOR_CHARS, 0)
 
 
 def _format_global_chunks(chunks: list[dict]) -> str:
@@ -1020,7 +1170,7 @@ def _format_global_chunks(chunks: list[dict]) -> str:
     lines = []
     for i, c in enumerate(chunks, 1):
         meta = c.get("metadata") or {}
-        text = (c.get("text") or "")[:_POOL_CHUNK_CHARS]
+        text = (c.get("context_text") or c.get("text") or "")[:_POOL_CHUNK_CHARS]
         file_name = meta.get("file_name", "")
         page = meta.get("page")
         ref = f"{file_name}, S. {page}" if page else file_name
@@ -1092,7 +1242,111 @@ def select_used_images(answer: str, catalog: list[dict]) -> list[dict]:
     return used
 
 
-def _format_fragments(subagents: list[dict]) -> str:
+# ── Abdeckung: was jede Teilfrage tatsächlich geliefert hat ─────────────────
+
+_FRAGMENT_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_SEARCH_ACTIONS = ("SEARCH", "REFINE_QUERY", "SEARCH_CNC", "SEARCH_TOOL")
+_STATUS_LABEL = {
+    "found": "gefunden",
+    "partial": "teilweise",
+    "not_found": "nicht gefunden",
+    "error": "Fehler",
+}
+
+
+def facet_status(sub: dict) -> str:
+    """found | partial | not_found | error – read off the fragment itself.
+
+    A fragment is prose, and its verdict used to travel to the synthesizer as
+    prose too: "Dazu enthalten die Dokumente keine Information" was final.
+    Made explicit here, the verdict becomes something the manager can check
+    against the pool instead of trusting.
+    """
+    if sub.get("error"):
+        return "error"
+    sentences = [x for x in _FRAGMENT_SENTENCE_RE.split((sub.get("answer") or "").strip()) if x.strip()]
+    if not sentences:
+        return "not_found"
+    open_sentences = [x for x in sentences if _NO_INFO_RE.search(x)]
+    if not open_sentences:
+        return "found"
+    return "partial" if len(open_sentences) < len(sentences) else "not_found"
+
+
+def _searched_queries(sub: dict) -> list[str]:
+    return [
+        q for st in sub.get("agent_steps", [])
+        if st.get("action") in _SEARCH_ACTIONS
+        and (q := ((st.get("args") or {}).get("query") or "").strip())
+    ]
+
+
+async def _pool_candidates(
+    sub_query: str, query: str, global_chunks: list[dict]
+) -> list[int] | None:
+    """1-based pool numbers the reranker rates relevant for ``sub_query``.
+
+    ``None`` when no reranker judgement is available (disabled, loading,
+    failed) – then nobody can tell, and the caller must not treat it as
+    "nothing in the pool".
+    """
+    candidates = [
+        {"chunk_id": str(i), "metadata": {"text": c.get("context_text") or c.get("text") or ""}}
+        for i, c in enumerate(global_chunks, 1)
+    ]
+    scored = await asyncio.to_thread(
+        rerank_chunks, f"{sub_query}\n(Gesamtfrage: {query})", candidates,
+        top_n=len(candidates),
+    )
+    if not scored or any(c["relevance_label"] == "unranked" for c in scored):
+        return None
+    return sorted(
+        int(c["chunk_id"]) for c in scored
+        if c["relevance_label"] in ("relevant", "highly_relevant")
+    )
+
+
+async def assess_coverage(
+    query: str, subagents: list[dict], global_chunks: list[dict]
+) -> list[dict]:
+    """Per sub-query: status, what was searched, and – where it stayed open –
+    which pool chunks could still carry it.
+
+    Pool numbers refer to ``global_chunks`` as passed, i.e. the numbering the
+    synthesizer cites against.
+    """
+    coverage = []
+    for sub in subagents:
+        status = facet_status(sub)
+        entry = {
+            "sub_query": sub["sub_query"],
+            "status": status,
+            "searched": _searched_queries(sub),
+            "pool_candidates": None,
+        }
+        if status in ("partial", "not_found") and global_chunks and settings.COVERAGE_CHECK:
+            entry["pool_candidates"] = await _pool_candidates(
+                sub["sub_query"], query, global_chunks
+            )
+        coverage.append(entry)
+    return coverage
+
+
+def _coverage_line(entry: dict) -> str:
+    lines = [f"STATUS: {_STATUS_LABEL[entry['status']]}"]
+    if entry["searched"]:
+        lines.append("Gesucht: " + "; ".join(entry["searched"]))
+    candidates = entry.get("pool_candidates")
+    if entry["status"] in ("partial", "not_found") and candidates is not None:
+        lines.append(
+            "Im Pool laut Reranker passend: " + ", ".join(f"[{n}]" for n in candidates)
+            if candidates else
+            "Im Pool laut Reranker passend: nichts – dieser Teil ist offen."
+        )
+    return "\n".join(lines)
+
+
+def _format_fragments(subagents: list[dict], coverage: list[dict] | None = None) -> str:
     """Render the sub-agent answer fragments for the synthesizer prompt.
 
     Local ``[n]`` markers are stripped. Every sub-agent numbers its own
@@ -1103,13 +1357,15 @@ def _format_fragments(subagents: list[dict]) -> str:
     all. The pool is the single source of citation numbers.
     """
     lines = []
-    for sub in subagents:
+    for i, sub in enumerate(subagents):
         header = f"--- {sub['role_label']} (Sub-Query: {sub['sub_query']}) ---"
         body = (sub.get("answer") or "(leer)").strip()
         if sub.get("error"):
             body = f"(Fehler: {sub['error']})"
         else:
             body = _LOCAL_REF_RE.sub("", body).strip()
+        if coverage and i < len(coverage):
+            header += "\n" + _coverage_line(coverage[i])
         lines.append(f"{header}\n{body}")
     return "\n\n".join(lines)
 
@@ -1148,8 +1404,9 @@ async def _run_gap_round(
         return [], None
 
     global_chunks = _merge_chunks(subagents)
+    coverage = await assess_coverage(query, subagents, global_chunks)
     gaps = _find_gaps(query, use_case=use_case, subagents=subagents,
-                      global_chunks=global_chunks)
+                      global_chunks=global_chunks, coverage=coverage)
     if not gaps:
         return [], None
 
@@ -1219,6 +1476,7 @@ async def _gap_round_inner(
         _run_one_subagent(
             sub_id=f"sub-{offset + i}-{role.name}",
             sub_query=st["sub_query"],
+            user_query=query,
             role=role,
             focus=st.get("focus", ""),
             use_case=use_case,
@@ -1305,7 +1563,8 @@ def _chunk_product_id(chunk: dict) -> str:
 
 
 def _find_gaps(query: str, *, use_case: str, subagents: list[dict],
-               global_chunks: list[dict]) -> list[str]:
+               global_chunks: list[dict],
+               coverage: list[dict] | None = None) -> list[str]:
     """Konkrete Löcher nach Runde 1 – deterministisch, ohne LLM-Aufruf.
 
     Bewusst eng: nur ein Loch, das man benennen kann, rechtfertigt die Zeit
@@ -1339,6 +1598,19 @@ def _find_gaps(query: str, *, use_case: str, subagents: list[dict],
         elif not sub.get("chunks") and not global_chunks:
             gaps.append(
                 f"Die Teilfrage „{sub['sub_query']}“ blieb ohne Treffer."
+            )
+
+    # A sub-query the specialist left open AND the reranker finds nothing for
+    # in the whole pool is a gap one can name. Open but with pool candidates
+    # is not: the synthesizer can answer it from what is already there.
+    for entry in coverage or []:
+        if entry["status"] == "not_found" and entry.get("pool_candidates") == []:
+            # Deliberately without the search terms used: they are the
+            # specialist's own words and carried its misreading ("Beirut 2020")
+            # straight into the gap planner's new questions.
+            gaps.append(
+                f"Die Teilfrage „{entry['sub_query']}“ blieb offen – weder der "
+                f"Spezialist noch der gesamte Treffer-Pool enthalten dazu etwas."
             )
     return gaps
 
@@ -1397,9 +1669,10 @@ async def propose_gap_subtasks(
     for st in proposed:
         if not isinstance(st, dict):
             continue
-        sub_query = _clean_gap_query(
-            _strip_placeholders((st.get("sub_query") or "").strip(), query)
-        )
+        sub_query = _clean_gap_query(strip_invented_years(
+            _strip_placeholders((st.get("sub_query") or "").strip(), query),
+            "\n".join([query, *(c.get("text") or "" for c in global_chunks)]),
+        ))
         if not sub_query or sub_query.casefold() in done:
             continue
         done.add(sub_query.casefold())
@@ -1421,6 +1694,7 @@ async def synthesize(
     use_case: str,
     on_event: StepCallback,
     compliance_guidance: str = "",
+    coverage: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Merge sub-agent fragments into one answer + return the global chunk pool.
 
@@ -1458,12 +1732,17 @@ async def synthesize(
         f"\nKORREKTUR-HINWEIS DES COMPLIANCE-AGENTEN:\n{compliance_guidance}\n"
         "Berücksichtige diesen Hinweis beim Umformulieren.\n"
     ) if compliance_guidance else ""
+    form_block = (
+        f"ANTWORTFORM: {_ANSWER_FORMS[plan['answer_form']]}\n\n"
+        if plan.get("answer_form") in _ANSWER_FORMS else ""
+    )
     user = (
         f"ORIGINALFRAGE:\n{query}\n\n"
+        f"{form_block}"
         f"PLAN-RATIONALE (Manager):\n{plan.get('rationale', '')}\n\n"
         f"ANTWORT-FRAGMENTE DER SPEZIALISTEN (ohne Quellennummern — die "
         f"Nummern vergibst du selbst aus dem GLOBAL_CHUNK_POOL):\n"
-        f"{_format_fragments(subagents)}\n\n"
+        f"{_format_fragments(subagents, coverage)}\n\n"
         f"GLOBAL_CHUNK_POOL (für [n]-Verweise — gültig sind ausschliesslich "
         f"[1] bis [{len(global_chunks)}]):\n"
         f"{_format_global_chunks(global_chunks)}\n\n"
@@ -1501,6 +1780,59 @@ async def synthesize(
         await on_event({"type": "synthesizer", "phase": "done",
                         "answer_length": len(final)})
     return final, global_chunks
+
+
+def _grounding_sources(query: str, global_chunks: list[dict]) -> list[str]:
+    return [query, *(c.get("context_text") or c.get("text") or "" for c in global_chunks)]
+
+
+async def _ground_answer(
+    answer: str, *, query: str, plan: dict, subagents: list[dict],
+    global_chunks: list[dict], use_case: str, on_event: StepCallback,
+    coverage: list[dict] | None,
+) -> dict:
+    """Check the answer against the pool; rewrite once if something is unbacked.
+
+    Returns ``{"checked", "found", "remaining", "rewritten", "ms"}`` and, when
+    rewritten, ``"answer"`` with the new text. A figure the answer computed
+    from backed figures (a sum, a difference) is legitimate; the rewrite is
+    told to keep those and show the calculation.
+    """
+    empty = {"numbers": [], "names": []}
+    if not settings.GROUNDING_CHECK or not global_chunks or not answer:
+        return {"checked": False}
+    started = time.perf_counter()
+    sources = _grounding_sources(query, global_chunks)
+    found = find_ungrounded(answer, sources)
+    result = {"checked": True, "found": found, "remaining": empty, "rewritten": False}
+    # Years without a source are removed directly – a rewrite request for
+    # them was ignored more often than followed ("(4. August 2020)" stayed).
+    # The same guard the search queries get; see core.guards.
+    unyeared = strip_invented_years(answer, "\n".join(sources))
+    if unyeared != answer:
+        answer = unyeared
+        result.update(answer=answer, rewritten=True)
+        found = find_ungrounded(answer, sources)
+        result["remaining"] = found
+    if found["numbers"] or found["names"]:
+        items = [*(f"Zahl „{n}“" for n in found["numbers"]),
+                 *(f"Name „{n}“" for n in found["names"])]
+        guidance = (
+            "Diese Angaben der vorigen Fassung stehen in KEINER Quelle: "
+            + ", ".join(items) + ". Streiche sie. Ausnahme: eine Zahl, die du aus "
+            "belegten Zahlen berechnet hast – dann behalte sie und zeige die "
+            "Rechnung mit den Quellen der Ausgangszahlen."
+        )
+        logger.info("Grounding check: unbacked %s – rewriting", items)
+        rewritten, _ = await synthesize(
+            query=query, plan=plan, subagents=subagents, use_case=use_case,
+            on_event=on_event, compliance_guidance=guidance, coverage=coverage,
+        )
+        if rewritten:
+            result.update(answer=rewritten, rewritten=True,
+                          remaining=find_ungrounded(rewritten, sources))
+    result["ms"] = round((time.perf_counter() - started) * 1000)
+    return result
 
 
 def _concat_fragments_fallback(subagents: list[dict]) -> str:
@@ -1976,12 +2308,32 @@ _SYNTH_CLEANUP_RE = re.compile(
 )
 
 
+# The pipeline's own vocabulary, as it leaks into answers ("… da der
+# GLOBAL_CHUNK_POOL hierzu keine Angaben enthält"). The prompt forbids it; the
+# reader must not see it either way. Longest patterns first.
+_INTERNAL_TERMS = [
+    # Replacements keep the grammatical gender, so the surrounding article
+    # and case stay right ("der GLOBAL_CHUNK_POOL" → "der Quellenbestand").
+    (re.compile(r"\bGLOBAL_CHUNK_POOL\b|\b(?:Chunk|Treffer)-Pool\b|\bPool\b"), "Quellenbestand"),
+    (re.compile(r"\b(den|aus|in|mit|von|zu)\s+(?:den\s+)?Chunks\b"),
+     lambda m: m.group(0).replace("Chunks", "Textabschnitten")),
+    (re.compile(r"\bChunks\b"), "Textabschnitte"),
+    (re.compile(r"\bChunk\b"), "Textabschnitt"),
+    (re.compile(r"\bFragmente\s+der\s+Spezialisten\b"), "Teilergebnisse"),
+    (re.compile(r"\b(?:Antwort-)?Fragmente\b"), "Teilergebnisse"),
+    (re.compile(r"\b(?:Antwort-)?Fragment\b"), "Teilergebnis"),
+]
+
+
 def _clean_synthesized(text: str) -> str:
-    """Trim synthesizer output of common artefacts (leading labels, fences)."""
+    """Trim synthesizer output of common artefacts (leading labels, fences,
+    the pipeline's internal vocabulary)."""
     text = text.strip()
     text = re.sub(r"^```(?:\w+)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
     text = _SYNTH_CLEANUP_RE.sub("", text)
+    for pattern, replacement in _INTERNAL_TERMS:
+        text = pattern.sub(replacement, text)
     return text.strip(' "\n')
 
 
@@ -2073,7 +2425,9 @@ async def _enrich_chunk_similarities(subagents: list[dict], global_chunks: list[
         return
 
     # Rank-1 = chunk with the highest rerank_score (not just first in iteration)
-    _best_score = -1.0
+    # -inf, not -1.0: cross-encoder logits are routinely below -1, and a pool
+    # of only weak chunks would otherwise leave no rank-1 chunk at all.
+    _best_score = float("-inf")
     rank1_text: str | None = None
     for text in all_texts:
         for chunk in text_to_chunks.get(text, []):
@@ -2204,6 +2558,7 @@ async def run_manager(
             _run_one_subagent(
                 sub_id=sub_id,
                 sub_query=_with_product_scope(st["sub_query"], scoped_product),
+                user_query=query,
                 role=role,
                 focus=st.get("focus", ""),
                 use_case=use_case,
@@ -2254,6 +2609,8 @@ async def run_manager(
 
     # Synthesize
     _synth_start = time.perf_counter()
+    # Same numbering synthesize() derives from the same sub-agents.
+    coverage = await assess_coverage(query, subagents, _merge_chunks(subagents))
     reset_llm_timing()  # guard against synthesize skipping the LLM call
     final_answer, global_chunks = await synthesize(
         query=query,
@@ -2261,6 +2618,7 @@ async def run_manager(
         subagents=subagents,
         use_case=use_case,
         on_event=on_event,
+        coverage=coverage,
     )
     _synth_llm_timing = get_last_llm_timing()
     _synth_dur = round((time.perf_counter() - _synth_start) * 1000)
@@ -2270,6 +2628,19 @@ async def run_manager(
         "ms": _synth_dur,
         "llm_ms": (_synth_llm_timing or {}).get("total_ms"),
     })
+
+    # Grounding: figures and names the answer states must be in what was
+    # retrieved. One targeted rewrite if not – the compliance LLM waved such
+    # answers through ("Calvert-Lewin" in no chunk; "2020" in no chunk).
+    grounding = await _ground_answer(
+        final_answer, query=query, plan=plan, subagents=subagents,
+        global_chunks=global_chunks, use_case=use_case, on_event=on_event,
+        coverage=coverage,
+    )
+    if grounding.get("rewritten"):
+        final_answer = grounding.pop("answer")
+        phases.append({"id": "grounding", "label": "Belegprüfung (Überarbeitung)",
+                       "ms": grounding["ms"]})
 
     # Compliance check + optional one-shot rewrite
     _compliance_start = time.perf_counter()
@@ -2322,6 +2693,7 @@ async def run_manager(
             on_event=on_event,
             compliance_guidance=compliance.get("guidance", "") or
                 "; ".join(compliance.get("issues") or []),
+            coverage=coverage,
         )
         _synth_llm_timing = get_last_llm_timing()
         _rewrite_dur = round((time.perf_counter() - _synth_start2) * 1000)
@@ -2442,7 +2814,8 @@ async def run_manager(
         "step": 0,
         "thought": plan.get("rationale", ""),
         "action": "MANAGER_PLAN",
-        "args": {"subtasks": plan["subtasks"], "merge_strategy": plan["merge_strategy"]},
+        "args": {"subtasks": plan["subtasks"], "merge_strategy": plan["merge_strategy"],
+                 "answer_form": plan.get("answer_form")},
         "observation": f"{len(plan['subtasks'])} Sub-Task(s) erzeugt.",
         "chunks": [],
         "duration_ms": _plan_dur,
@@ -2457,12 +2830,25 @@ async def run_manager(
         "thought": f"Merge-Strategie: {plan['merge_strategy']}",
         "action": "SYNTHESIZE",
         "args": {"fragment_count": len(subagents),
-                 "global_chunk_count": len(global_chunks)},
+                 "global_chunk_count": len(global_chunks),
+                 "coverage": coverage},
         "observation": final_answer[:300],
         "chunks": global_chunks[:7],
         "duration_ms": _synth_dur,
         "llm_timing": _synth_llm_timing if _synth_llm_timing else None,
     })
+    if grounding.get("checked"):
+        flat_steps.append({
+            "step": len(flat_steps),
+            "thought": "Prüfe, ob jede Zahl und jeder Name der Antwort in den Quellen steht",
+            "action": "GROUNDING_CHECK",
+            "args": {k: grounding[k] for k in ("found", "remaining", "rewritten")},
+            "observation": (
+                "OK" if not grounding["found"]["numbers"] and not grounding["found"]["names"]
+                else "Überarbeitet" if grounding["rewritten"] else "Nicht belegt"
+            ),
+            "duration_ms": grounding["ms"],
+        })
     if skill_function_calls:
         flat_steps.append({
             "step": len(flat_steps),

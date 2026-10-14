@@ -115,3 +115,22 @@ def test_plugins_still_wipe_extra_on_their_own(use_case, _collection):
 
     assert "images" not in (enriched.extra or {})
     assert "breadcrumb" not in (enriched.extra or {})
+
+
+@pytest.mark.parametrize("use_case,collection", PLUGGED_USE_CASES)
+def test_chunk_index_numbers_chunks_in_document_order(use_case, collection):
+    """Retrieval fetches a hit's neighbours by this index; it must survive the
+    plugin and count up without gaps across pages."""
+    long_doc = "\n\n".join(
+        f"<!-- Page {p} -->\n# Kapitel {p}\n\n" + (PARAGRAPH + " ") * 40 for p in (1, 2)
+    )
+    chunks = chunk_markdown(
+        long_doc,
+        file_name="handbuch.pdf",
+        doc_type="pdf",
+        use_case=use_case,
+        collection=collection,
+        plugin=get_plugin(use_case),
+    )
+    assert len(chunks) > 2
+    assert [c.metadata.extra["chunk_index"] for c in chunks] == list(range(len(chunks)))

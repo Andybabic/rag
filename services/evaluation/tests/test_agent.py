@@ -48,8 +48,29 @@ def _no_final_answer():
 
 
 def _mock_search_observation():
-    """Mock action_search to return a formatted observation."""
-    return AsyncMock(return_value="[1] (Score: 0.92) Betriebsdruck max 10 bar...")
+    """Mock action_search with one hit, in the dict shape SEARCH returns.
+
+    The chunks are what citation mapping resolves "[1]" against; a bare
+    observation string carries none, so every citation would be stripped.
+    """
+    return AsyncMock(return_value={
+        "observation": "[1] (handbuch.pdf, S. 4) Betriebsdruck max 10 bar",
+        "chunks": [{
+            "text": "Betriebsdruck max 10 bar",
+            "score": 5.0,
+            "metadata": {"chunk_id": "c1", "file_name": "handbuch.pdf", "page": 4},
+        }],
+        "searched_collections": ["neumann_machines"],
+    })
+
+
+def _mock_search_no_hits():
+    """Mock action_search that finds nothing."""
+    return AsyncMock(return_value={
+        "observation": "Keine Ergebnisse in der Datenbank gefunden.",
+        "chunks": [],
+        "searched_collections": ["neumann_machines"],
+    })
 
 
 # ── Basic agent flow ─────────────────────────────────────────
@@ -85,8 +106,11 @@ async def test_agent_search_then_final_answer(mock_llm, mock_search):
 
 
 @pytest.mark.anyio
+@patch("core.agent.action_search", new_callable=_mock_search_observation)
 @patch("core.agent.call_llm", new_callable=_immediate_answer)
-async def test_agent_immediate_answer(mock_llm):
+async def test_agent_immediate_answer_forces_search_first(mock_llm, mock_search):
+    """A FINAL_ANSWER before any SEARCH is overruled: RAG must run first, so
+    small models cannot answer from the conversation history alone."""
     result = await run_agent(
         query="Einfache Frage",
         use_case="neumann",
@@ -97,15 +121,16 @@ async def test_agent_immediate_answer(mock_llm):
     )
 
     assert result["sufficient"] is True
-    assert len(result["agent_steps"]) == 1
-    assert result["agent_steps"][0]["action"] == "FINAL_ANSWER"
+    assert [s["action"] for s in result["agent_steps"]] == ["SEARCH", "FINAL_ANSWER"]
+    assert "SEARCH erzwungen" in result["agent_steps"][0]["thought"]
+    mock_search.assert_awaited_once()
 
 
 # ── Max steps reached ────────────────────────────────────────
 
 
 @pytest.mark.anyio
-@patch("core.agent.action_search", new_callable=_mock_search_observation)
+@patch("core.agent.action_search", new_callable=_mock_search_no_hits)
 @patch("core.agent.call_llm", new_callable=_no_final_answer)
 async def test_agent_max_steps_no_exception(mock_llm, mock_search):
     result = await run_agent(
@@ -119,7 +144,7 @@ async def test_agent_max_steps_no_exception(mock_llm, mock_search):
     )
 
     assert result["sufficient"] is False
-    assert "präzisieren" in result["answer"]
+    assert "keine passenden Dokumente" in result["answer"]
     assert len(result["agent_steps"]) == 2
 
 
@@ -127,8 +152,9 @@ async def test_agent_max_steps_no_exception(mock_llm, mock_search):
 
 
 @pytest.mark.anyio
+@patch("core.agent.action_search", new_callable=_mock_search_observation)
 @patch("core.agent.call_llm", new_callable=_immediate_answer)
-async def test_agent_memory_updated(mock_llm):
+async def test_agent_memory_updated(mock_llm, mock_search):
     await run_agent(
         query="Testfrage",
         use_case="neumann",
@@ -142,7 +168,8 @@ async def test_agent_memory_updated(mock_llm):
     import asyncio
     await asyncio.sleep(0.1)
 
-    memory = await read_memory("mem-session")
+    # Memory is shared per use case, not per session.
+    memory = await read_memory("neumann")
     assert "Testfrage" in memory
 
 
@@ -217,3 +244,14 @@ async def test_agent_steps_contain_all_fields(mock_llm, mock_search):
         assert "action" in step
         assert "args" in step
         assert "observation" in step
+
+
+def test_cut_off_final_answer_keeps_the_written_text():
+    """The sub-agent token budget may cut an answer mid-JSON; what was written
+    must survive instead of becoming an empty answer."""
+    from core.agent import _parse_action
+    raw = ('THOUGHT: fertig\nACTION: FINAL_ANSWER({"answer": "Der Druck beträgt 10 bar [1].\\n'
+           'Zudem gilt')
+    thought, action, args = _parse_action(raw)
+    assert action == "FINAL_ANSWER"
+    assert args["answer"].startswith("Der Druck beträgt 10 bar [1].\nZudem gilt")

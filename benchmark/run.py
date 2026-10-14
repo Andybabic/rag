@@ -3,6 +3,7 @@
 
     python benchmark/run.py all                 # alles: prepare → … → report
     python benchmark/run.py query --run <dir>   # einzelne Phase auf einem Lauf
+    python benchmark/run.py report --run <dir> --compare <anderer-lauf>
 
 Phasen: check, prepare, setup, ingest, query, score, report – und clean, das
 alle Benchmark-Daten wieder aus Kermit entfernt (nicht Teil von all).
@@ -97,9 +98,24 @@ async def phase_check(s: Settings) -> None:
     k = Kermit(s)
     try:
         await k.check()
+        print(f"check: Kermit ok (Frontend {k.frontend})")
+        deps = await k.dependencies()
     finally:
         await k.aclose()
-    print(f"check: Kermit ok (Frontend {k.frontend})")
+    if deps is None:
+        print("check: Kermit hat keinen Selbsttest (/health/dependencies) – übersprungen")
+    else:
+        for c in deps["checks"]:
+            mark = "ok  " if c.get("ok") else "FAIL"
+            if c.get("skipped"):
+                mark = "--  "
+            print(f"check: {mark} {c['component']:<10} {c.get('name') or ''} – {c.get('message', '')}")
+        if not deps["ok"]:
+            hints = [c.get("hint") for c in deps["checks"] if not c.get("ok") and c.get("hint")]
+            raise KermitError(
+                "Kermit-Selbsttest fehlgeschlagen – siehe FAIL oben."
+                + ("\n" + "\n".join(hints) if hints else "")
+            )
     if not s.judge_enabled:
         print("check: kein Judge konfiguriert – nur Kennzahlen ohne LLM")
         return
@@ -243,6 +259,7 @@ async def phase_query(s: Settings, run_dir: Path) -> None:
     k = Kermit(s)
     try:
         await k.check()
+        await _record_pipeline(k, run_dir)
         sem = asyncio.Semaphore(s.query_concurrency)
         model: str | None = None
         # Variant by variant, memory cleared before each: otherwise the EN
@@ -280,6 +297,63 @@ async def phase_query(s: Settings, run_dir: Path) -> None:
             save_config(run_dir, config)
     finally:
         await k.aclose()
+
+
+def _code_state() -> dict:
+    """Git commit plus a fingerprint of uncommitted changes.
+
+    Pipeline switches miss pure code changes: two runs on different code
+    looked "unchanged" in the report. The diff fingerprint changes with every
+    edit, committed or not.
+    """
+    import hashlib
+    import subprocess
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=BENCH_DIR.parent, capture_output=True,
+                text=True, timeout=20, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    diff = git("diff", "HEAD", "--", "services", "shared")
+    return {
+        "commit": git("rev-parse", "--short", "HEAD").strip() or None,
+        "uncommitted": hashlib.sha1(diff.encode()).hexdigest()[:10] if diff else None,
+    }
+
+
+async def _record_pipeline(k: Kermit, run_dir: Path) -> None:
+    """Store Kermit's retrieval settings in config.json before asking.
+
+    Without them two runs cannot be told apart afterwards – which is exactly
+    what happened when the reranker was switched off between runs. A reranker
+    that is still loading or failed would silently answer the first questions
+    without it, so that stops the run instead of skewing it.
+    """
+    pipeline = await k.pipeline()
+    if pipeline is None:
+        print("query: Kermit liefert keine Pipeline-Angaben (/health/retrieval fehlt)")
+        return
+    pipeline["code"] = _code_state()
+    rr = pipeline.get("reranker") or {}
+    if rr.get("enabled") and rr.get("state") != "ready":
+        raise KermitError(
+            f"Reranker ist eingeschaltet, aber im Zustand '{rr.get('state')}' "
+            f"({rr.get('model')}). Warten bis 'ready' (GET /health/reranker) "
+            "oder RERANKER_ENABLED=false setzen."
+        )
+    config = load_config(run_dir)
+    old = config.get("pipeline")
+    if old and old != pipeline:
+        # A resumed run whose settings changed in between mixes two setups.
+        print("query: WARNUNG – Pipeline hat sich seit dem Start dieses Laufs geändert")
+        config["pipeline_changed"] = True
+        config.setdefault("pipeline_before", old)
+    config["pipeline"] = pipeline
+    save_config(run_dir, config)
 
 
 def latest_results(run_dir: Path) -> dict[str, dict]:
@@ -392,11 +466,13 @@ async def phase_clean(s: Settings) -> None:
     )
 
 
-def phase_report(s: Settings, run_dir: Path) -> None:
+def phase_report(s: Settings, run_dir: Path, compare: Path | None = None) -> None:
     rows = read_jsonl(run_dir / "scored.jsonl")
     if not rows:
         sys.exit("report: keine bewerteten Ergebnisse – zuerst `score` ausführen.")
-    summary = write_report(run_dir, rows, load_config(run_dir))
+    if compare is not None and not (compare / "summary.json").is_file():
+        sys.exit(f"report: Vergleichslauf {compare} hat keinen Bericht (summary.json).")
+    summary = write_report(run_dir, rows, load_config(run_dir), compare)
     print(f"\nreport: {run_dir / 'summary.md'}\n")
     for v, a in summary["variants"].items():
         if v == "neg":
@@ -423,6 +499,11 @@ def main() -> None:
     p.add_argument("phase", choices=[CHECK] + PHASES + ["all", CLEAN])
     p.add_argument(
         "--run", type=Path, help="Laufverzeichnis (Standard: neuester Lauf; bei all/prepare: neu)"
+    )
+    p.add_argument(
+        "--compare",
+        type=Path,
+        help="Vergleichslauf für den Bericht (Standard: der vorherige Lauf)",
     )
     p.add_argument(
         "--fresh", action="store_true", help="Index des Benchmark-Use-Case vorher leeren"
@@ -496,7 +577,7 @@ def main() -> None:
             elif phase == "score":
                 asyncio.run(phase_score(s, run_dir))
             elif phase == "report":
-                phase_report(s, run_dir)
+                phase_report(s, run_dir, args.compare)
         if args.cleanup:
             asyncio.run(phase_clean(s))
     except KermitError as exc:
