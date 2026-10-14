@@ -43,6 +43,33 @@ class Settings(BaseSettings):
     # the manager recalls relevant past Q&A from the memory RAG to plan more
     # specific sub-tasks.
     VAGUE_QUERY_MAX_WORDS: int = 6
+    # Retrieval: a sub-agent's search also runs with the user's original
+    # question. The sub-query is the planner's rewrite – when it misreads the
+    # question (wrong person for "er", an invented year) the original still
+    # pulls the right document in, via the ANCHOR_SLOTS below.
+    SEARCH_ANCHOR: bool = True
+    # How many of the 7 hits per search may come from the original question
+    # alone (and only if the reranker rates them relevant to it). The
+    # sub-query keeps deciding the rest – fusing both rankings on equal terms
+    # cost comparison questions their facet-specific articles.
+    ANCHOR_SLOTS: int = 1
+    # Characters of each neighbouring chunk (before/after) shown around a hit.
+    # A figure often sits in one chunk and its subject in the previous one.
+    # 0 = hits only, as before. Needs chunk_index in the index (re-ingest).
+    CONTEXT_NEIGHBOR_CHARS: int = 300
+    # Coverage check after the fan-out: for every sub-query a specialist left
+    # open, the reranker scores it against the merged chunk pool. Finds facts
+    # another specialist retrieved but this one did not recognise, and tells
+    # a real gap (nothing in the pool) from a missed one. Cheap with a remote
+    # reranker (~0.3 s); on a CPU cross-encoder it costs seconds per facet.
+    COVERAGE_CHECK: bool = True
+    # Output token budget per ReAct step of a manager sub-agent (the single-
+    # agent path keeps the larger default). See core/agent.py.
+    SUBAGENT_STEP_TOKENS: int = 1000
+    # After synthesis: every figure and foreign proper name in the answer must
+    # occur in the question or the retrieved text; otherwise one targeted
+    # rewrite. Deterministic, no LLM unless something is found.
+    GROUNDING_CHECK: bool = True
     LOG_LEVEL: str = "INFO"
 
     # ── Auth bootstrap ───────────────────────────────────────

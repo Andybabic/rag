@@ -27,3 +27,4 @@ REGELN:
 - Verwende [1], [2] etc. als Quellenverweise auf die OBSERVATION-Treffer.
 - Angaben gelten NUR für das Bauteil, aus dem sie stammen. Steht in der OBSERVATION ein Hinweis auf andere Bauteile, übertrage nichts – sage klar, dass zum gefragten Bauteil nichts vorliegt, und nenne bei jeder Angabe das Bauteil.
 - Erfinde KEINE Werkzeuge, Parameter oder Quellen. Verwende NUR Informationen aus den OBSERVATION-Ergebnissen. Findet SEARCH_CNC nichts, sage das klar.
+- Deckt die OBSERVATION nur einen Teil der Frage ab, beantworte diesen Teil und benenne, was fehlt. Ein Treffer zu einem ANDEREN Bauteil ist dabei keine Teilantwort für das gefragte (siehe oben).

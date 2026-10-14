@@ -26,8 +26,21 @@ def _chunks(scores: list[float]) -> list[dict]:
 # ── POST /v1/rerank ─────────────────────────────────────────
 
 
+class _FakeReranker:
+    """Scores each chunk by the number in its text – deterministic, no model."""
+
+    def predict(self, pairs, show_progress_bar=False):
+        return [float(text.rsplit(" ", 1)[-1]) for _, text in pairs]
+
+
 @pytest.mark.anyio
-async def test_rerank_sorts_correctly(client):
+async def test_rerank_sorts_correctly(client, monkeypatch):
+    # Without a loaded model the endpoint keeps the input order on purpose
+    # (fallback); sorting is only defined for real reranker scores.
+    import core.reranker as reranker_mod
+
+    monkeypatch.setattr(reranker_mod, "_RERANKER_ENABLED", True)
+    monkeypatch.setattr(reranker_mod, "_model", _FakeReranker())
     resp = await client.post("/v1/rerank", json={
         "query": "test query",
         "chunks": _chunks([0.3, 0.9, 0.5]),
@@ -41,7 +54,13 @@ async def test_rerank_sorts_correctly(client):
 
 
 @pytest.mark.anyio
-async def test_rerank_threshold(client):
+async def test_rerank_threshold(client, monkeypatch):
+    # Fallback path on purpose (scores passed through), so the result does not
+    # depend on whether this machine has a reranker configured.
+    import core.reranker as reranker_mod
+
+    monkeypatch.setattr(reranker_mod, "_model", None)
+    monkeypatch.setattr(reranker_mod, "_model_load_failed", True)
     resp = await client.post("/v1/rerank", json={
         "query": "test",
         "chunks": _chunks([0.1, 0.5, 0.8]),
@@ -183,84 +202,78 @@ def _agent_body(use_case: str = "neumann", **overrides):
     return body
 
 
-def _mock_llm_search_then_answer():
-    responses = [
-        'THOUGHT: Suche relevante Daten\n'
-        'ACTION: SEARCH({"query": "Hydraulikdruck", "collection": "neumann_machines"})',
-        'THOUGHT: Antwort gefunden\n'
-        'ACTION: FINAL_ANSWER({"answer": "Der Druck beträgt 10 bar.", "extras": {}})',
-    ]
-    return AsyncMock(side_effect=responses)
+def _manager_result(**overrides) -> dict:
+    """A canned run_manager result. The agent loop itself is covered in
+    test_agent.py; these tests check what the endpoint does around it."""
+    result = {
+        "answer": "Der Druck beträgt 10 bar [1].",
+        "citations": [{"ref": 1, "file_name": "handbuch.pdf"}],
+        "agent_steps": [
+            {"step": 1, "action": "MANAGER_PLAN", "thought": "", "observation": ""},
+            {"step": 2, "action": "SEARCH", "thought": "Suche", "observation": "[1] ..."},
+            {"step": 3, "action": "FINAL_ANSWER", "thought": "", "observation": ""},
+        ],
+        "sufficient": True,
+        "session_id": "test-session",
+        "use_case": "neumann",
+        "global_chunks": [],
+        "searched_collections": ["neumann_machines"],
+    }
+    result.update(overrides)
+    return result
 
 
-def _mock_llm_immediate():
-    return AsyncMock(
-        return_value=(
-            'THOUGHT: Antwort klar\n'
-            'ACTION: FINAL_ANSWER({"answer": "Einfache Antwort.", "extras": {}})'
-        )
-    )
-
-
-def _mock_llm_no_answer():
-    return AsyncMock(
-        return_value='THOUGHT: Suche weiter\nACTION: SEARCH({"query": "test"})'
-    )
+@pytest.fixture()
+def no_db():
+    """Keep endpoint tests from writing query rows into a real database."""
+    with patch("router.v1.get_pool", new=AsyncMock(side_effect=RuntimeError("no db"))):
+        yield
 
 
 @pytest.mark.anyio
-@patch(
-    "core.agent.action_search",
-    new_callable=lambda: AsyncMock(return_value="[1] Score 0.92: Relevante Daten"),
-)
-@patch("core.agent.call_llm", new_callable=_mock_llm_search_then_answer)
-async def test_agent_query_basic(mock_llm, mock_search, client):
-    resp = await client.post("/v1/agent/query", json=_agent_body())
+async def test_agent_query_basic(client, no_db):
+    manager = AsyncMock(return_value=_manager_result())
+    with patch("router.v1.run_manager", new=manager):
+        resp = await client.post("/v1/agent/query", json=_agent_body())
     assert resp.status_code == 200
     body = resp.json()
-    assert body["answer"] == "Der Druck beträgt 10 bar."
+    assert body["answer"] == "Der Druck beträgt 10 bar [1]."
     assert body["sufficient"] is True
     assert body["use_case"] == "neumann"
     assert body["session_id"] == "test-session"
     assert "request_id" in body
-    assert len(body["agent_steps"]) == 2
+    kwargs = manager.await_args.kwargs
+    assert kwargs["query"] == "Wie hoch ist der Hydraulikdruck?"
+    assert kwargs["collection"] == "neumann_machines"
 
 
 @pytest.mark.anyio
-@patch(
-    "core.agent.action_search",
-    new_callable=lambda: AsyncMock(return_value="[1] Score 0.92: Relevante Daten"),
-)
-@patch("core.agent.call_llm", new_callable=_mock_llm_search_then_answer)
-async def test_agent_steps_content(mock_llm, mock_search, client):
-    resp = await client.post("/v1/agent/query", json=_agent_body())
-    body = resp.json()
-    steps = body["agent_steps"]
-
-    assert steps[0]["action"] == "SEARCH"
-    assert steps[0]["step"] == 1
-    assert "thought" in steps[0]
-    assert "observation" in steps[0]
-
-    assert steps[1]["action"] == "FINAL_ANSWER"
-    assert steps[1]["step"] == 2
+async def test_agent_steps_content(client, no_db):
+    with patch("router.v1.run_manager", new=AsyncMock(return_value=_manager_result())):
+        resp = await client.post("/v1/agent/query", json=_agent_body())
+    steps = resp.json()["agent_steps"]
+    assert [s["action"] for s in steps] == ["MANAGER_PLAN", "SEARCH", "FINAL_ANSWER"]
+    assert all("thought" in s and "observation" in s for s in steps)
 
 
 @pytest.mark.anyio
-@patch(
-    "core.agent.action_search",
-    new_callable=lambda: AsyncMock(return_value="Keine Ergebnisse"),
-)
-@patch("core.agent.call_llm", new_callable=_mock_llm_no_answer)
-async def test_agent_max_steps_graceful(mock_llm, mock_search, client):
-    resp = await client.post(
-        "/v1/agent/query",
-        json=_agent_body(config={"collection": "neumann_machines", "max_steps": 2}),
+async def test_agent_insufficient_result_passed_through(client, no_db):
+    """An unanswerable query comes back as a normal 200 with sufficient=False –
+    the endpoint must not turn it into an error or a confident answer."""
+    result = _manager_result(
+        answer="Zu dieser Anfrage wurden keine passenden Dokumente gefunden.",
+        sufficient=False,
+        citations=[],
     )
+    with patch("router.v1.run_manager", new=AsyncMock(return_value=result)):
+        resp = await client.post(
+            "/v1/agent/query",
+            json=_agent_body(config={"collection": "neumann_machines", "max_steps": 2}),
+        )
+    assert resp.status_code == 200
     body = resp.json()
     assert body["sufficient"] is False
-    assert "präzisieren" in body["answer"]
-    assert len(body["agent_steps"]) == 2
+    assert "keine passenden Dokumente" in body["answer"]
 
 
 @pytest.mark.anyio
@@ -271,27 +284,31 @@ async def test_agent_unknown_use_case(client):
 
 
 @pytest.mark.anyio
-@patch("core.agent.call_llm", new_callable=_mock_llm_immediate)
-async def test_agent_gw_stpoelten(mock_llm, client):
-    resp = await client.post("/v1/agent/query", json=_agent_body(
-        use_case="gw_stpoelten",
-        query="Fräskopf Alternative für Rüstungs-ID 4711",
-        config={"collection": "gw_cnc_steps", "max_steps": 3},
-    ))
+async def test_agent_gw_stpoelten(client, no_db):
+    manager = AsyncMock(return_value=_manager_result(use_case="gw_stpoelten"))
+    with patch("router.v1.run_manager", new=manager):
+        resp = await client.post("/v1/agent/query", json=_agent_body(
+            use_case="gw_stpoelten",
+            query="Fräskopf Alternative für Rüstungs-ID 4711",
+            config={"collection": "gw_cnc_steps", "max_steps": 3},
+        ))
     assert resp.status_code == 200
     assert resp.json()["use_case"] == "gw_stpoelten"
+    assert manager.await_args.kwargs["use_case"] == "gw_stpoelten"
 
 
 @pytest.mark.anyio
-@patch("core.agent.call_llm", new_callable=_mock_llm_immediate)
-async def test_agent_wiener_linien(mock_llm, client):
-    resp = await client.post("/v1/agent/query", json=_agent_body(
-        use_case="wiener_linien",
-        query="Bremsprüfung Vorschrift",
-        config={"collection": "wl_default", "max_steps": 3},
-    ))
+async def test_agent_wiener_linien(client, no_db):
+    manager = AsyncMock(return_value=_manager_result(use_case="wiener_linien"))
+    with patch("router.v1.run_manager", new=manager):
+        resp = await client.post("/v1/agent/query", json=_agent_body(
+            use_case="wiener_linien",
+            query="Bremsprüfung Vorschrift",
+            config={"collection": "wl_default", "max_steps": 3},
+        ))
     assert resp.status_code == 200
     assert resp.json()["use_case"] == "wiener_linien"
+    assert manager.await_args.kwargs["use_case"] == "wiener_linien"
 
 
 # ── POST /v1/log ──────────────────────────────────────────────

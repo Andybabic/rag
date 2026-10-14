@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -9,6 +10,7 @@ from core.jobs import requeue_stale_jobs, schema_ready, start_worker, stop_worke
 from core.reranker import preload_model as preload_reranker
 from core.seed import seed_use_cases
 from core.skill_seed import seed_skills
+from core.startup_check import STARTUP_CHECKS_ENABLED, run_checks_in_background
 from core.use_cases import refresh_use_cases
 from fastapi import FastAPI, Request
 from models import HealthResponse
@@ -48,6 +50,11 @@ async def lifespan(app: FastAPI):
     # doesn't block for minutes on a cold HF cache. Until it's ready, the
     # reranker falls back to hybrid-fusion ordering (still good quality).
     preload_reranker()
+    # Probe LLMs, embeddings and the reranker once they can be reached. In the
+    # background: a dead provider must be reported, not keep the service down.
+    # Kept on app.state so the task is not garbage-collected mid-run.
+    if STARTUP_CHECKS_ENABLED:
+        app.state.startup_check = asyncio.create_task(run_checks_in_background())
     # Public-API jobs run in a background worker. Anything left "running" by a
     # previous process is nothing's responsibility any more, so hand it back to
     # the queue before the worker starts claiming.
@@ -100,3 +107,48 @@ async def health_reranker():
     from core.reranker import reranker_status
 
     return reranker_status()
+
+
+@app.get("/health/dependencies")
+async def health_dependencies(refresh: bool = False):
+    """Result of the startup self-test (LLM, embedding, reranker).
+
+    ``refresh=true`` runs the checks again – costs one tiny LLM call per
+    distinct setup. ``status: pending`` means the startup run has not finished
+    (usually the reranker still loading)."""
+    from core.startup_check import last_result, run_checks
+
+    if refresh:
+        return await run_checks()
+    return last_result() or {"ok": None, "status": "pending", "checks": []}
+
+
+@app.get("/health/retrieval")
+async def health_retrieval():
+    """Effective retrieval settings of this process – the benchmark stores
+    them with every run, so two runs can be compared knowing what changed.
+    Reads the values the code actually uses, not the .env file, which may
+    have been edited since the container started."""
+    import os
+
+    from core import actions
+    from core.reranker import reranker_status
+
+    return {
+        "reranker": reranker_status(),
+        "rerank_candidates": actions._RERANK_CANDIDATES,
+        "rerank_top_n": actions._RERANK_TOP_N,
+        "observation_chars": actions._OBSERVATION_CHARS,
+        "hybrid_bm25": True,
+        # Pipeline switches – code paths, not just numbers, so the benchmark
+        # can tell two runs apart that differ only in behaviour.
+        "search_anchor": settings.SEARCH_ANCHOR,
+        "anchor_slots": settings.ANCHOR_SLOTS,
+        "context_neighbor_chars": settings.CONTEXT_NEIGHBOR_CHARS,
+        "coverage_check": settings.COVERAGE_CHECK,
+        "gap_round": settings.MANAGER_GAP_ROUND,
+        "subagent_step_tokens": settings.SUBAGENT_STEP_TOKENS,
+        "grounding_check": settings.GROUNDING_CHECK,
+        # Global default; a use case can override it in its own config.
+        "embedding_model_default": os.getenv("EMBEDDING_MODEL"),
+    }

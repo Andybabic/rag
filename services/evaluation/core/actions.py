@@ -81,24 +81,28 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     query = args.get("query", "")
     collection = args.get("collection", "")
     filters = args.get("filters", {})
+    queries = _search_queries(query, args.get("anchor", ""))
     _embed_ms = 0
     _search_ms = 0
     _rerank_ms = 0
     _search_start = 0.0
 
     try:
-        # 1. Get embedding
+        # 1. Get embeddings – one per search query (sub-query, original question)
         _embed_start = time.perf_counter()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            embed_resp = await client.post(
-                f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
-                json={"type": "text", "content": query, "metadata": {},
-                      "use_case": use_case},
-            )
-            embed_resp.raise_for_status()
-            embed_json = embed_resp.json()
-            vector = embed_json["vector"]
-            query_embed_model = embed_json.get("model")
+            async def _embed(text: str) -> dict:
+                resp = await client.post(
+                    f"{settings.EMBEDDING_SERVICE_URL}/v1/embed",
+                    json={"type": "text", "content": text, "metadata": {},
+                          "use_case": use_case},
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+            embed_jsons = await asyncio.gather(*(_embed(q) for q in queries))
+            vectors = [e["vector"] for e in embed_jsons]
+            query_embed_model = embed_jsons[0].get("model")
             _embed_ms = round((time.perf_counter() - _embed_start) * 1000)
 
         # 2. Resolve collections – HARD USE-CASE ISOLATION
@@ -169,7 +173,9 @@ async def action_search(args: dict, *, use_case: str) -> dict:
                         f"folgenden Treffer stammen aus ANDEREN Bauteilen und gelten nicht "
                         f"für {scoped_product}."
                     )
-                for col in collections_to_search:
+                for col, (qi, vector) in (
+                    (c, v) for c in collections_to_search for v in enumerate(vectors)
+                ):
                     search_resp = await client.post(
                         f"{settings.VECTORDB_SERVICE_URL}/v1/search",
                         json={
@@ -183,6 +189,7 @@ async def action_search(args: dict, *, use_case: str) -> dict:
                     if search_resp.status_code == 200:
                         for r in search_resp.json()["results"]:
                             r.setdefault("metadata", {})["_collection"] = col
+                            r["_query_index"] = qi
                             results.append(r)
                     elif search_resp.status_code == 409:
                         # Embedding-model mismatch: the index was built with a
@@ -247,7 +254,13 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     # 3a. Hybrid fusion: combine dense vector ranking with BM25 on the same
     #     candidate pool. Catches exact-keyword hits dense embeddings blur.
     _rerank_start = time.perf_counter()
-    fused = hybrid_fuse(query, results)
+    # The sub-query alone decides candidates and ranking. Mixing the original
+    # question into the fusion made every specialist of a comparison drift to
+    # the same "whole question" articles – measured: 9.7 → 7.4 distinct
+    # articles per pool, pool recall −7 pp, comparisons −11 pp.
+    facet_results = [r for r in results if r.get("_query_index", 0) == 0]
+    anchor_results = [r for r in results if r.get("_query_index") == 1]
+    fused = hybrid_fuse(query, facet_results)
 
     # 3b. Cross-encoder rerank on the top of the fused list (keeps things cheap)
     #     Off the event loop: the cross-encoder is several seconds of CPU work
@@ -256,10 +269,15 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     #     stalled. torch releases the GIL during inference, so a thread lets
     #     concurrent reranks genuinely overlap.
     above = await asyncio.to_thread(
-        rerank_chunks, query, fused[:_RERANK_CANDIDATES], top_n=_RERANK_TOP_N
+        rerank_chunks, query, fused[:_RERANK_CANDIDATES], top_n=_RERANK_TOP_N,
     )
     if not above:
         above = fused[:5]
+    extras = await _anchor_extras(
+        queries[1] if len(queries) > 1 else "", anchor_results,
+        taken={_result_id(r) for r in above},
+        taken_docs={_doc_id(r) for r in above},
+    )
     _rerank_ms = round((time.perf_counter() - _rerank_start) * 1000)
 
     # Deduplicate: same text from different document versions → keep highest score
@@ -272,15 +290,26 @@ async def action_search(args: dict, *, use_case: str) -> dict:
         seen_texts.add(text_key)
         unique.append(r)
 
+    shown = unique[:_SHOWN_HITS - len(extras)] + extras
+    neighbours = await _neighbour_texts([r.get("metadata", {}) for r in shown])
     lines = []
     chunks = []
-    for i, r in enumerate(unique[:7], 1):
+    for i, (r, (before, after)) in enumerate(zip(shown, neighbours, strict=True), 1):
         meta = r.get("metadata", {})
-        text = meta.get("text", "")[:_OBSERVATION_CHARS]
+        core = _display_text(meta)
+        context = _with_context(core[:_OBSERVATION_CHARS], before, after)
         source = _source_label(meta)
-        lines.append(f"[{i}] ({source}) {text}{_image_block(meta)}")
+        if crumb := _breadcrumb(meta):
+            source += f" · {crumb}"
+        if r.get("_via_anchor"):
+            # Not ranked for this sub-query – the agent should know why it is here.
+            source += " · Treffer zur Gesamtfrage"
+        lines.append(f"[{i}] ({source}) {context}{_image_block(meta)}")
         chunks.append({
             "text": meta.get("text", ""),
+            # What the agent read around the hit; the synthesizer gets the
+            # same view. "text" stays the chunk itself for citations.
+            "context_text": _with_context(core, before, after),
             "score": r.get("rerank_score", 0.0),
             "metadata": meta,
         })
@@ -293,6 +322,156 @@ async def action_search(args: dict, *, use_case: str) -> dict:
         "search_ms": _search_ms,
         "rerank_ms": _rerank_ms,
     }
+
+
+def _search_queries(query: str, anchor: str) -> list[str]:
+    """The sub-query, plus the user's original question when it differs."""
+    queries = [query]
+    if (
+        settings.SEARCH_ANCHOR
+        and anchor
+        and anchor.strip().casefold() != (query or "").strip().casefold()
+    ):
+        queries.append(anchor.strip())
+    return queries
+
+
+def _result_id(r: dict) -> str:
+    meta = r.get("metadata") or {}
+    return r.get("chunk_id") or meta.get("chunk_id") or meta.get("text", "")[:200]
+
+
+def _doc_id(r: dict) -> str:
+    meta = r.get("metadata") or {}
+    return meta.get("file_hash") or meta.get("file_name") or _result_id(r)
+
+
+async def _anchor_extras(
+    anchor: str, anchor_results: list[dict], *, taken: set[str],
+    taken_docs: set[str] = frozenset(),
+) -> list[dict]:
+    """Up to ``ANCHOR_SLOTS`` hits only the user's original question found.
+
+    They exist for one case: the planner's sub-query misread the question
+    (the director instead of the actor for "er"), so nothing ranked for it
+    can be right. A hit qualifies only if the reranker rates it relevant to
+    the original question – otherwise it would just be noise in a slot that
+    a good sub-query hit could have had.
+
+    Only documents the sub-query did not already bring: the slot is for what
+    the sub-query cannot see. Without this it went to one more article about
+    the part of the question the sub-query had covered anyway (the director),
+    because that part dominates the reranker's reading of the whole question.
+    """
+    if not anchor or not anchor_results or settings.ANCHOR_SLOTS <= 0:
+        return []
+    candidates: dict[str, dict] = {}
+    for r in sorted(anchor_results, key=lambda r: r.get("score", 0.0), reverse=True):
+        rid = _result_id(r)
+        if rid not in taken and rid not in candidates and _doc_id(r) not in taken_docs:
+            candidates[rid] = r
+        if len(candidates) == _ANCHOR_CANDIDATES:
+            break
+    if not candidates:
+        return []
+    scored = await asyncio.to_thread(
+        rerank_chunks, anchor, list(candidates.values()), top_n=len(candidates)
+    )
+    keep = [
+        {**c, "_via_anchor": True}
+        for c in scored
+        if c.get("relevance_label") in ("relevant", "highly_relevant")
+    ]
+    return keep[: settings.ANCHOR_SLOTS]
+
+
+def _breadcrumb(meta: dict) -> str:
+    extra = meta.get("extra") or {}
+    return (extra.get("breadcrumb") if isinstance(extra, dict) else "") or ""
+
+
+def _display_text(meta: dict) -> str:
+    """Chunk text without the indexing scaffolding.
+
+    The chunker prefixes every chunk with "[file | breadcrumb]" for the
+    embedding, and a document's first chunk usually repeats the breadcrumb as
+    its own heading. In the observation both are already in the source label:
+    measured on news articles, they took 38 % of what the agent was shown.
+    """
+    text = meta.get("text", "") or ""
+    crumb = _breadcrumb(meta)
+    file_name = meta.get("file_name", "")
+    prefix = f"[{' | '.join(p for p in (file_name, crumb) if p)}]"
+    if text.startswith(prefix):
+        text = text[len(prefix):].lstrip("\n")
+    if crumb:
+        last = crumb.split(" > ")[-1].strip()
+        text = re.sub(rf"^#+\s*{re.escape(last)}\s*\n+", "", text)
+    return text.strip()
+
+
+def _strip_overlap(left: str, right: str, min_len: int = 20) -> str:
+    """``right`` without the part that repeats the end of ``left`` (chunk overlap)."""
+    for n in range(min(len(left), len(right)), min_len - 1, -1):
+        if left.endswith(right[:n]):
+            return right[n:]
+    return right
+
+
+def _with_context(core: str, before: str, after: str) -> str:
+    """The hit framed by the tail of the chunk before and the head of the one
+    after – marked, so the agent can tell what the hit itself says."""
+    n = settings.CONTEXT_NEIGHBOR_CHARS
+    if n <= 0 or not (before or after):
+        return core
+    parts = []
+    if before:
+        tail = before[-n:]
+        parts.append(f"(davor: …{tail.lstrip()})")
+    parts.append(core)
+    if after:
+        head = _strip_overlap(core, after)[:n]
+        parts.append(f"(danach: {head.rstrip()}…)")
+    return "\n".join(parts)
+
+
+async def _neighbour_texts(metas: list[dict]) -> list[tuple[str, str]]:
+    """(previous, next) chunk text for each hit, '' where unknown.
+
+    Looked up by file_hash + chunk_index – file names repeat across folders.
+    Chunks indexed before chunk_index existed simply get no context.
+    """
+    empty = [("", "")] * len(metas)
+    if settings.CONTEXT_NEIGHBOR_CHARS <= 0:
+        return empty
+
+    async def one(client: httpx.AsyncClient, meta: dict) -> tuple[str, str]:
+        extra = meta.get("extra") or {}
+        idx = extra.get("chunk_index") if isinstance(extra, dict) else None
+        file_hash = meta.get("file_hash")
+        col = meta.get("_collection") or meta.get("collection")
+        if not isinstance(idx, int) or not file_hash or not col:
+            return ("", "")
+        try:
+            resp = await client.post(
+                f"{settings.VECTORDB_SERVICE_URL}/v1/scroll",
+                json={
+                    "collection": col,
+                    "filters": {"file_hash": file_hash,
+                                "extra.chunk_index": [idx - 1, idx + 1]},
+                    "limit": 2,
+                },
+            )
+            resp.raise_for_status()
+            points = resp.json().get("points", [])
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug("Neighbour lookup failed: %s", exc)
+            return ("", "")
+        by_idx = {(p.get("extra") or {}).get("chunk_index"): _display_text(p) for p in points}
+        return (by_idx.get(idx - 1, ""), by_idx.get(idx + 1, ""))
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return list(await asyncio.gather(*(one(client, m) for m in metas)))
 
 
 # Characters of chunk text shown per observation entry.
@@ -322,6 +501,11 @@ _OBSERVATION_CHARS = 550
 # the hybrid fusion can no longer be rescued by the reranker.
 _RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "25") or 25)
 _RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "15") or 15)
+
+# Hits shown to the agent per search, and how many original-question-only
+# hits are scored for the reserved anchor slot(s).
+_SHOWN_HITS = 7
+_ANCHOR_CANDIDATES = 8
 
 
 def _image_block(meta: dict) -> str:
@@ -1191,6 +1375,7 @@ async def action_refine_query(args: dict, *, use_case: str, collection: str, fil
         "query": refined_query,
         "collection": collection,
         "filters": filters or {},
+        "anchor": args.get("anchor", ""),
     }
     result = await action_search(search_args, use_case=use_case)
     if isinstance(result, dict):

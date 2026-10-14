@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import random
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -187,6 +189,114 @@ def summarize(rows: list[dict], config: dict) -> dict:
     return summary
 
 
+# ── run comparison ──────────────────────────────────────────
+
+# Settings that must match for two runs to be compared at all: a different
+# sample is a different benchmark, not a change in Kermit.
+_SAMPLE_KEYS = ("split", "seed", "mono", "multi", "negative", "distractors", "variants", "use_case")
+
+
+def _flatten(d: dict, prefix: str = "") -> dict:
+    out: dict = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(_flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def config_diff(cur: dict, prev: dict) -> dict:
+    """What differs between two runs' configs: sample and pipeline separately.
+
+    ``pipeline`` is None when either run predates pipeline recording – then
+    nobody can say what changed, and the report says so.
+    """
+    sample = {
+        k: (prev.get(k), cur.get(k)) for k in _SAMPLE_KEYS if prev.get(k) != cur.get(k)
+    }
+    if not cur.get("pipeline") or not prev.get("pipeline"):
+        return {"sample": sample, "pipeline": None}
+    # The answering model is the biggest lever of all; show it with the rest.
+    a = {"kermit_model": prev.get("kermit_model"), **_flatten(prev["pipeline"])}
+    b = {"kermit_model": cur.get("kermit_model"), **_flatten(cur["pipeline"])}
+    pipeline = {k: (a.get(k), b.get(k)) for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)}
+    return {"sample": sample, "pipeline": pipeline}
+
+
+def _sign_test(better: int, worse: int) -> float | None:
+    """Two-sided exact sign test: how likely is a split at least this lopsided
+    if the change made no difference? Ties (unchanged questions) are dropped."""
+    n = better + worse
+    if n == 0:
+        return None
+    k = min(better, worse)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
+    return min(1.0, 2 * tail)
+
+
+def _bootstrap_ci(diffs: list[float], *, rounds: int = 2000, seed: int = 0) -> tuple[float, float]:
+    """95 % interval of the mean paired difference (fixed seed: reproducible)."""
+    rng = random.Random(seed)
+    n = len(diffs)
+    means = sorted(statistics.fmean(rng.choices(diffs, k=n)) for _ in range(rounds))
+    return means[int(0.025 * rounds)], means[int(0.975 * rounds) - 1]
+
+
+def paired_runs(rows: list[dict], prev_rows: list[dict]) -> dict | None:
+    """Question-by-question comparison with the previous run.
+
+    Aggregates hide how much of a difference is noise: at n=100 a few
+    questions flipping by chance move the headline by several points. This
+    pairs each question with itself, so the report can say how many got
+    better or worse, whether that split is beyond chance, and which flipped.
+    """
+    def by_key(rs: list[dict]) -> dict:
+        return {
+            r["key"]: r
+            for r in rs
+            if r.get("expect_answer", True) and not r.get("error") and quality(r) is not None
+        }
+
+    cur, old = by_key(rows), by_key(prev_rows)
+    keys = sorted(set(cur) & set(old))
+    if not keys:
+        return None
+    diffs = [quality(cur[k]) - quality(old[k]) for k in keys]
+    better = sum(d > 0 for d in diffs)
+    worse = sum(d < 0 for d in diffs)
+
+    def verdict_flips(dst_ok: bool) -> list[dict]:
+        out = []
+        for k in keys:
+            was = old[k].get("judge_verdict") == "correct"
+            now = cur[k].get("judge_verdict") == "correct"
+            if was != now and now == dst_ok:
+                out.append({
+                    "key": k,
+                    "query": cur[k].get("query", ""),
+                    "before": old[k].get("judge_verdict"),
+                    "after": cur[k].get("judge_verdict"),
+                    "recall_before": old[k].get("recall_all"),
+                    "recall_after": cur[k].get("recall_all"),
+                })
+        return out
+
+    low, high = _bootstrap_ci(diffs)
+    return {
+        "n": len(keys),
+        "delta": statistics.fmean(diffs),
+        "ci95": [low, high],
+        "better": better,
+        "worse": worse,
+        "unchanged": len(keys) - better - worse,
+        "p_sign": _sign_test(better, worse),
+        "now_correct": verdict_flips(True),
+        "now_wrong": verdict_flips(False),
+    }
+
+
 # ── markdown ────────────────────────────────────────────────
 
 
@@ -233,8 +343,78 @@ def _short(text: str, limit: int = 400) -> str:
     return text if len(text) <= limit else text[:limit] + " …"
 
 
+def _pipeline_line(p: dict | None) -> str:
+    if not p:
+        return "Pipeline: keine Angaben (Lauf vor Pipeline-Aufzeichnung)"
+    rr = p.get("reranker") or {}
+    if rr.get("enabled"):
+        reranker = f"Reranker `{rr.get('model')}` ({rr.get('type')}, {rr.get('state')})"
+    else:
+        reranker = "Reranker aus"
+    return (
+        f"Pipeline: {reranker} · Kandidaten {p.get('rerank_candidates')} → "
+        f"Top {p.get('rerank_top_n')} · BM25 {'an' if p.get('hybrid_bm25') else 'aus'} · "
+        f"Embedding `{p.get('embedding_model_default')}`"
+    )
+
+
+def _comparison_section(diff: dict | None, paired: dict | None, prev_name: str) -> list[str]:
+    out = [f"## Vergleich mit `{prev_name}`", ""]
+    if diff:
+        if diff["sample"]:
+            out.append(
+                "**Achtung, andere Stichprobe – Deltas nicht aussagekräftig:** "
+                + ", ".join(f"{k} {a!r} → {b!r}" for k, (a, b) in diff["sample"].items())
+            )
+        if diff["pipeline"] is None:
+            out.append("Was sich an der Pipeline geändert hat, ist unbekannt "
+                       "(einer der Läufe hat keine Pipeline-Angaben).")
+        elif diff["pipeline"]:
+            out.append("Geändert: " + ", ".join(
+                f"`{k}` {a} → {b}" for k, (a, b) in diff["pipeline"].items()
+            ))
+        else:
+            out.append("Pipeline unverändert.")
+        out.append("")
+    if not paired:
+        return out + ["Keine gemeinsamen Fragen.", ""]
+    lo, hi = paired["ci95"]
+    p = paired["p_sign"]
+    if p is None:
+        out += [f"Qualität pro Frage, {paired['n']} gemeinsame Fragen: keine Frage verändert.", ""]
+    else:
+        out += [
+            f"Qualität pro Frage, {paired['n']} gemeinsame Fragen: "
+            f"**{paired['delta'] * 100:+.1f} pp** "
+            f"(95 %-Intervall {lo * 100:+.1f} … {hi * 100:+.1f} pp) · "
+            f"besser {paired['better']}, schlechter {paired['worse']}, "
+            f"gleich {paired['unchanged']} · Vorzeichentest p = {p:.2f}",
+            "",
+            "Der Unterschied ist **statistisch belastbar** (p < 0,05)." if p < 0.05 else
+            "Der Unterschied liegt **im Rauschen** – nicht von Zufall unterscheidbar.",
+            "",
+        ]
+    for title, items in (("Jetzt richtig", paired["now_correct"]),
+                         ("Jetzt nicht mehr richtig", paired["now_wrong"])):
+        if not items:
+            continue
+        out += [f"**{title}** ({len(items)}):", ""]
+        for f in items:
+            out.append(
+                f"- `{f['key']}` {f['before']} → {f['after']} · Retrieval "
+                f"{_fmt(f['recall_before'], 'pct')} → {_fmt(f['recall_after'], 'pct')} · "
+                f"{_short(f['query'], 120)}"
+            )
+        out.append("")
+    return out
+
+
 def render_markdown(
-    summary: dict, rows: list[dict], prev: dict | None, prev_name: str | None
+    summary: dict,
+    rows: list[dict],
+    prev: dict | None,
+    prev_name: str | None,
+    paired: dict | None = None,
 ) -> str:
     cfg = summary["config"]
     out = [
@@ -245,7 +425,11 @@ def render_markdown(
         f"({cfg.get('distractors', 'alle')} Ablenker/Frage) · "
         f"Judge `{cfg.get('judge_model') or 'aus'}` · "
         f"Kermit-Modell `{cfg.get('kermit_model') or '?'}`",
+        "",
+        _pipeline_line(cfg.get("pipeline")),
     ]
+    if cfg.get("pipeline_changed"):
+        out.append("**Achtung:** Die Pipeline wurde während dieses Laufs geändert.")
     if prev_name:
         out.append(f"Werte in Klammern: Veränderung zu `{prev_name}`.")
     out += [
@@ -264,6 +448,9 @@ def render_markdown(
                 + (f", Gedächtnis genutzt: {a['memory_used']}×" if a.get("memory_used") else "")
             )
         out.append("")
+    if prev_name:
+        diff = config_diff(cfg, prev.get("config") or {}) if prev else None
+        out += _comparison_section(diff, paired, prev_name)
     if gap := summary.get("de_vs_en"):
         out += [
             "## Sprachlücke DE ↔ EN (gleiche Fragen)",
@@ -332,21 +519,39 @@ def render_markdown(
     return "\n".join(out)
 
 
-def write_report(run_dir: Path, rows: list[dict], config: dict) -> dict:
+def _read_rows(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def write_report(
+    run_dir: Path, rows: list[dict], config: dict, compare: Path | None = None
+) -> dict:
+    """Write summary.json/.md. Compared against ``compare`` if given, else the
+    newest earlier run with a summary."""
     summary = summarize(rows, config)
-    prev, prev_name = None, None
-    runs = sorted(
-        p
-        for p in run_dir.parent.iterdir()
-        if p.is_dir() and p.name < run_dir.name and (p / "summary.json").is_file()
-    )
-    if runs:
-        prev_name = runs[-1].name
-        prev = json.loads((runs[-1] / "summary.json").read_text(encoding="utf-8"))
+    prev, prev_name, paired = None, None, None
+    if compare is None:
+        runs = sorted(
+            p
+            for p in run_dir.parent.iterdir()
+            if p.is_dir() and p.name < run_dir.name and (p / "summary.json").is_file()
+        )
+        compare = runs[-1] if runs else None
+    if compare is not None:
+        prev_name = compare.name
+        prev = json.loads((compare / "summary.json").read_text(encoding="utf-8"))
+        paired = paired_runs(rows, _read_rows(compare / "scored.jsonl"))
+        if paired:
+            summary["vs_previous"] = {"run": prev_name, **{
+                k: v for k, v in paired.items() if k not in ("now_correct", "now_wrong")
+            }}
     (run_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8"
     )
     (run_dir / "summary.md").write_text(
-        render_markdown(summary, rows, prev, prev_name), encoding="utf-8"
+        render_markdown(summary, rows, prev, prev_name, paired), encoding="utf-8"
     )
     return summary

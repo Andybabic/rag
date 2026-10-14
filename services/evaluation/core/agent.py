@@ -23,7 +23,9 @@ from core.actions import (
     action_search_tool,
     action_skill,
 )
+from config import settings
 from core.citations import map_citations, strip_unresolved_refs
+from core.guards import strip_invented_years
 from core.llm import TOKENS_AGENT_STEP, call_llm
 from core.memory import read_memory, write_memory
 from core.prompts import ACTION_SIGNATURES
@@ -49,7 +51,7 @@ _NO_INFO_RE = re.compile(
     r"(keine\s+(?:passenden\s+|spezifischen\s+|konkreten\s+)?"
     r"(?:information|informationen|angabe|angaben|hinweise|dokumente)"
     r"|nicht\s+(?:in\s+den\s+|enthalten|dokumentiert|genannt|beschrieben)"
-    r"|enthalten\s+die\dokumente\s+keine"
+    r"|enthalten\s+die\s+dokumente\s+keine"
     r"|liegen\s+keine\s+.*vor"
     r"|keine\s+\S+(?:\s+\S+){0,4}?\s+vorliegen"
     r"|(?:handlungsempfehlung|empfehlung|aussage|antwort)\s+nicht\s+möglich"
@@ -210,6 +212,9 @@ async def _build_system_prompt(
     return prompt
 
 
+_PARTIAL_ANSWER_RE = re.compile(r'"answer"\s*:\s*"(.*)', re.DOTALL)
+
+
 def _parse_action(llm_response: str) -> tuple[str, str, dict]:
     """Parse THOUGHT and ACTION from LLM response.
 
@@ -235,6 +240,13 @@ def _parse_action(llm_response: str) -> tuple[str, str, dict]:
             except json.JSONDecodeError:
                 action_args = {}
             return thought, action_name, action_args
+        if action_name == "FINAL_ANSWER":
+            # Output cut off by the token budget inside the answer: keep what
+            # was written instead of an empty answer and a closing LLM call.
+            partial = _PARTIAL_ANSWER_RE.search(llm_response, json_start)
+            if partial:
+                text = partial.group(1).replace("\\n", "\n").replace('\\"', '"').rstrip('\\ ')
+                return thought, action_name, {"answer": text.strip(), "extras": {}}
         return thought, action_name, {}
 
     # Fallback: treat entire response as FINAL_ANSWER
@@ -443,8 +455,13 @@ async def run_agent(
     request_id: str | None = None,
     username: str | None = None,
     on_event: StepCallback = None,
+    anchor_query: str = "",
 ) -> dict:
     """Run the ReAct agent loop.
+
+    ``anchor_query`` is the user's original question when this agent works on
+    a planner's sub-query. Every search then also runs with it (see
+    ``action_search``), so a misread sub-query cannot steer retrieval alone.
 
     If ``on_event`` is provided, it is awaited for each progress event – this
     lets a streaming endpoint push live updates to the client without changing
@@ -487,6 +504,16 @@ async def run_agent(
     # itself isn't multimodal. ``enriched_query`` stays clean so it can still
     # seed document searches without the description leaking into them.
     user_content = enriched_query
+    if anchor_query and anchor_query.strip().casefold() != enriched_query.strip().casefold():
+        # The user's question is the question; the planner's sub-query only
+        # says which part of it this agent covers. Shown the sub-query alone,
+        # the agent answered the planner's rewrite – including what the
+        # planner had added ("obwohl Kane als bester Spieler galt", which the
+        # documents contradict).
+        user_content = (
+            f"Frage des Nutzers: {anchor_query}\n\n"
+            f"Dein Teilauftrag: {enriched_query}"
+        )
     if image_context:
         user_content = (
             "Der Nutzer hat ein Bild hochgeladen. Automatisch erkannter "
@@ -521,6 +548,14 @@ async def run_agent(
     # the documents never hold the answer, so searching again changes nothing.
     has_called_skill = False
     broadened_retry_done = False
+    # Everything retrieved so far – the legitimate source of years/facts a
+    # later search query may mention.
+    observations_seen: list[str] = []
+    # A specialist's fragment is a draft the synthesizer rewrites from the
+    # pool, so it does not need the full budget. Measured: p50 290 tokens per
+    # answer step, but the top 10 % ran to 1000–1500 tokens (27 s+), mostly a
+    # THOUGHT that already spelled out the whole answer once.
+    step_budget = settings.SUBAGENT_STEP_TOKENS if not persist_memory else TOKENS_AGENT_STEP
     last_search_query = enriched_query
 
     for step_num in range(1, max_steps + 1):
@@ -549,7 +584,7 @@ async def run_agent(
         # 1. Call LLM (use_case threads provider/model overrides through resolver)
         _step_start = time.perf_counter()
         llm_response = await call_llm(
-            messages, use_case=use_case, max_tokens=TOKENS_AGENT_STEP
+            messages, use_case=use_case, max_tokens=step_budget
         )
         _llm_timing_data = get_last_llm_timing()
         _llm_ms = round((time.perf_counter() - _step_start) * 1000)
@@ -634,14 +669,30 @@ async def run_agent(
             has_called_skill = True
 
         # Force collection/filters for SEARCH – LLM must not override these
+        if action_name in ("SEARCH", "REFINE_QUERY") and action_args.get("query"):
+            # The model writes its own search terms – and dates events from
+            # its own knowledge. Years must come from the question or from
+            # something retrieved; see core.guards.
+            guarded = strip_invented_years(
+                str(action_args["query"]),
+                "\n".join([anchor_query, query, enriched_query, *observations_seen]),
+            )
+            if guarded != action_args["query"]:
+                logger.info("Removed invented year(s) from search: %r → %r",
+                            action_args["query"], guarded)
+                action_args["query"] = guarded or enriched_query
         if action_name == "SEARCH":
             action_args["collection"] = collection
             action_args["filters"] = filters or action_args.get("filters", {})
             if "query" not in action_args:
                 action_args["query"] = enriched_query
+            if anchor_query:
+                action_args["anchor"] = anchor_query
             has_searched = True
             last_search_query = action_args.get("query") or last_search_query
         elif action_name == "REFINE_QUERY":
+            if anchor_query:
+                action_args["anchor"] = anchor_query
             has_searched = True
             last_search_query = action_args.get("query") or last_search_query
         elif action_name in ("SEARCH_CNC", "SEARCH_TOOL"):
@@ -743,6 +794,7 @@ async def run_agent(
             break
 
         # 5. Add to message history for next iteration
+        observations_seen.append(str(observation))
         messages.append({"role": "assistant", "content": llm_response})
         messages.append({"role": "user", "content": f"OBSERVATION: {observation}"})
 
