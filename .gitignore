@@ -3,19 +3,23 @@
 shared/.DS_Store
 .DS_Store
 /data/documents
+.env
 Kermit/~$Kermit_Praesentation.pptx
 Kermit/Kermit_Praesentation.pptx
 Kermit/20251009 CORNET KERMIT - 1 Steering Committee Meeting - Kick-off.pptx
 gitpush.txt
-*.pptx
-
 # Env-Dateien mit Secrets: nie committen (nur *.env.example)
 .env
+.env copy
+.env_old
+.env_rwth
 .env*
 **/.env
 **/.env*
 !.env.example
 !**/.env.example
+*.pptx
+>>>>>>> e590931b0b1fd0949b7f2a47be8ac0a7b95fe830
 
 # Benchmark: Konfiguration, Datensatz-Cache (CC BY-NC) und Laeufe
 benchmark/.env

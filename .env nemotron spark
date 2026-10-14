@@ -1,0 +1,90 @@
+# ══════════════════════════════════════════════════════════════
+# RAG Platform – Environment Variables
+# ══════════════════════════════════════════════════════════════
+
+# ── Service-URLs (internes Docker-Netzwerk) ───────────────────
+CLEANING_SERVICE_URL=http://cleaning:8001
+DATA_STRUCTURE_SERVICE_URL=http://data_structure:8002
+EMBEDDING_SERVICE_URL=http://embedding:8003
+VECTORDB_SERVICE_URL=http://vectordb:8004
+EVALUATION_SERVICE_URL=http://evaluation:8005
+FRONTEND_URL=http://frontend:3000
+
+# ── Oeffentliche URLs (Coolify / Reverse-Proxy) ──────────────
+ORIGIN=https://jrz.inference.media.fhstp.ac.at
+SERVICE_URL_FRONTEND=https://jrz.inference.media.fhstp.ac.at
+SERVICE_FQDN_FRONTEND=jrz.inference.media.fhstp.ac.at
+SERVICE_URL_CLEANING=https://cleaning.jrz.inference.media.fhstp.ac.at
+SERVICE_FQDN_CLEANING=cleaning.jrz.inference.media.fhstp.ac.at
+SERVICE_URL_DATA_STRUCTURE=https://data_structure.jrz.inference.media.fhstp.ac.at
+SERVICE_FQDN_DATA_STRUCTURE=data_structure.jrz.inference.media.fhstp.ac.at
+SERVICE_URL_EMBEDDING=
+SERVICE_FQDN_EMBEDDING=
+SERVICE_URL_EVALUATION=https://evaluation.jrz.inference.media.fhstp.ac.at
+SERVICE_FQDN_EVALUATION=evaluation.jrz.inference.media.fhstp.ac.at
+
+# ── Persistente Daten ────────────────────────────────────────
+KERMIT_DATA_DIR=/home/kermit
+
+# ── LLM Provider Pipeline ────────────────────────────────────
+LLM_PROVIDER=openai
+EMBEDDING_PROVIDER=ollama
+VISION_PROVIDER=ollama
+
+# ── Ollama ───────────────────────────────────────────────────
+OLLAMA_BASE_URL=https://innolab.fir.de/gim-ollama/
+OLLAMA_API_KEY=GIM-Ollama-39b5e6295870470896df5fa095b356fbd6bffff267a73aea
+OLLAMA_NUM_CTX=32768
+
+# ── OpenAI (OpenAI-kompatibel: LiteLLM, vLLM, …) ─────────────
+OPENAI_BASE_URL=https://nemotron.sparklab.media.ustp.at/v1
+OPENAI_API_KEY=sk-l7sMdxkESwH4kFXF6grhlQ
+EMBEDDING_OPENAI_BASE_URL=http://jrz-spark-02.media.lab:4000
+EMBEDDING_OPENAI_API_KEY=sk-vzMlM8VpRxSWmj-ujLETMg
+
+# ── Modelle ──────────────────────────────────────────────────
+# Chain-of-Thought (Nemotron/Qwen3). Nur bei true werden Thinking-Tokens erzeugt.
+THINKING=false
+LLM_MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+
+#LLM_MODEL=ministral-3:14b
+VISION_MODEL=ministral-3:14b
+EMBEDDING_MODEL=qwen3-embedding:8b
+EMBEDDING_DIMENSION=4096
+EMBED_BATCH_SIZE=50
+
+# ── Qdrant ───────────────────────────────────────────────────
+QDRANT_HOST=qdrant
+QDRANT_PORT=6333
+
+# ── PostgreSQL ───────────────────────────────────────────────
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5433
+POSTGRES_DB=ragplatform
+POSTGRES_USER=rag
+POSTGRES_PASSWORD=changeme
+DATABASE_URL=postgresql://rag:changeme@postgres:5432/ragplatform
+
+# ── Data Structure ───────────────────────────────────────────
+DEFAULT_CHUNK_SIZE=256
+DEFAULT_CHUNK_OVERLAP=32
+
+# ── Cleaning ─────────────────────────────────────────────────
+USE_MINERU=true
+MINERU_API_URL=https://mineru-api.inference.media.fhstp.ac.at
+DEBUG_IMAGE_CAPTIONS=true
+
+# ── Agent ────────────────────────────────────────────────────
+AGENT_MAX_STEPS=5
+MEMORY_MAX_CHARS=4000
+
+# ── Verschluesselung gespeicherter Secrets ──────────────────
+CONFIG_MASTER_KEY=
+
+# ── Authentifizierung ────────────────────────────────────────
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin
+AUTH_SECRET=BAguCikzCeGW407tnWZ6Mc4oxwxdLbWylNQpaDPR9P2kkib4oHSu1-205m8Ea3hG
+
+# ── Logging ──────────────────────────────────────────────────
+LOG_LEVEL=INFO
