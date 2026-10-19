@@ -134,7 +134,15 @@ export async function embedAndUpsert(
 }
 
 /** Document-level keys that are set at ingest time and must survive a re-ingest. */
-const DOCUMENT_META_KEYS = ['doc_kind', 'product_id', 'machine', 'category'] as const;
+const DOCUMENT_META_KEYS = [
+	'doc_kind',
+	'product_id',
+	'machine',
+	'category',
+	// Neumann bulk upload (scripts/bulk_ingest.py): collection and folder.
+	'machine_id',
+	'source_path'
+] as const;
 
 /**
  * Read the document-level metadata of an ingested file back from the index.
@@ -194,7 +202,12 @@ export async function logIngestion(entry: LogEntry): Promise<void> {
 export interface IngestOptions {
 	/** Document-level metadata copied into every chunk (e.g. product link). */
 	extra?: Record<string, unknown>;
-	/** Name shown in the document list instead of the bare file name. */
+	/**
+	 * Name shown in the document list instead of the bare file name. It is
+	 * also the chunks' file_name – what the agent and the citations show –
+	 * so a folder path given here ("Ofen 5/Schaltplan/…pdf") stays attached
+	 * to every hit.
+	 */
 	displayName?: string;
 }
 
@@ -218,6 +231,7 @@ function photoMarkdown(
 
 /** Full ingest of one document file. */
 export async function ingestDocument(file: File, useCase: string, opts: IngestOptions = {}) {
+	const fileName = opts.displayName || file.name;
 	// 1. Clean (use_case decides where the original is stored)
 	const cleanForm = new FormData();
 	cleanForm.append('file', file, file.name);
@@ -261,7 +275,7 @@ export async function ingestDocument(file: File, useCase: string, opts: IngestOp
 	// it the chunker finds nothing but the image anchor and indexes nothing.
 	const markdown =
 		cleanData.metadata?.doc_type === 'image'
-			? photoMarkdown(file.name, descriptions.images, cleanData.markdown ?? '')
+			? photoMarkdown(fileName, descriptions.images, cleanData.markdown ?? '')
 			: cleanData.markdown;
 
 	// 2. Structure
@@ -275,7 +289,7 @@ export async function ingestDocument(file: File, useCase: string, opts: IngestOp
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					markdown,
-					metadata: cleanData.metadata ?? {},
+					metadata: { ...(cleanData.metadata ?? {}), file_name: fileName },
 					use_case: useCase,
 					images: descriptions.images,
 					...(opts.extra ? { config: { extra: opts.extra } } : {})
@@ -296,7 +310,7 @@ export async function ingestDocument(file: File, useCase: string, opts: IngestOp
 
 	// 5. Log
 	await logIngestion({
-		file_name: opts.displayName || file.name,
+		file_name: fileName,
 		file_hash: fileHash,
 		stored_path: storedPath,
 		collection: collections.join(', '),

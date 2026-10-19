@@ -25,3 +25,7 @@ gitpush.txt
 benchmark/.env
 benchmark/.cache/
 benchmark/runs/
+
+# bulk_ingest.py: Resume-State und Manifeste
+scripts/.ingest_state/
+scripts/bulk_ingest.py
