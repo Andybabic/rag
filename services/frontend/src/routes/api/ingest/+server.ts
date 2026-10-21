@@ -10,6 +10,8 @@ import type { RequestHandler } from './$types';
  *                 Einstellblatt stays linked to its product and machine.
  *   display_name  Name for the document list (many products each have an
  *                 "Einstellblatt 1.pdf"; the bare name would be ambiguous).
+ *   fast          "true": digital PDFs from their text layer, no image
+ *                 descriptions – for bulk uploads (scripts/bulk_ingest.py).
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const formData = await request.formData();
@@ -33,9 +35,10 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 	}
 	const displayName = (formData.get('display_name') as string | null) ?? undefined;
+	const fast = formData.get('fast') === 'true';
 
 	try {
-		return json(await ingestDocument(file, useCase, { extra, displayName }));
+		return json(await ingestDocument(file, useCase, { extra, displayName, fast }));
 	} catch (err) {
 		if (err instanceof PipelineError) {
 			return json(failureBody(err), { status: err.failure.status });

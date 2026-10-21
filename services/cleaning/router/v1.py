@@ -49,6 +49,9 @@ async def clean_file(
     cfg = json.loads(config)
     extract_images = cfg.get("extract_images", True)
     pii_removal = cfg.get("pii_removal", False)
+    # "text_layer": digital PDFs skip MinerU (bulk uploads); anything else
+    # keeps the configured parser.
+    pdf_text_layer_first = cfg.get("pdf_parser") == "text_layer"
 
     filename = file.filename or "unknown"
     ext = os.path.splitext(filename)[1].lower()
@@ -74,7 +77,7 @@ async def clean_file(
         cfg.get("use_case", ""),
     )
     try:
-        doc = await clean(file_bytes, filename)
+        doc = await clean(file_bytes, filename, pdf_text_layer_first=pdf_text_layer_first)
     except Exception as exc:
         logger.error("clean failed for %r: %s", filename, exc)
         return JSONResponse(

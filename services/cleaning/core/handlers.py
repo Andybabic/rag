@@ -212,7 +212,28 @@ class PDFHandler(BaseHandler):
 
     supported_extensions = [".pdf"]
 
-    async def parse(self, file_bytes: bytes, filename: str) -> ParsedDocument:
+    # text_layer_first: share of pages that must carry real text (and the
+    # minimum characters that make a page count) before MinerU is skipped.
+    TEXT_LAYER_MIN_SHARE = 0.8
+    TEXT_LAYER_MIN_CHARS = 50
+
+    async def parse(
+        self, file_bytes: bytes, filename: str, *, text_layer_first: bool = False
+    ) -> ParsedDocument:
+        """Parse a PDF.
+
+        ``text_layer_first`` (bulk uploads): a digital PDF whose text layer
+        covers almost every page is read straight from that layer – seconds
+        instead of minutes of OCR, but without MinerU's table structure and
+        images. Scanned or mixed PDFs still go through MinerU.
+        """
+        if settings.USE_MINERU and text_layer_first:
+            parsed = await self._parse_with_pymupdf(file_bytes, filename)
+            if self._has_text_layer(parsed):
+                self._guard_degenerate(parsed, filename)
+                return parsed
+            logger.info("%r: Textlayer unvollständig – weiter mit MinerU", filename)
+
         if settings.USE_MINERU:
             # MinerU is authoritative for scanned/table PDFs. No PyMuPDF
             # fallback: a silent PyMuPDF degrade on a scanned PDF produces
@@ -237,6 +258,18 @@ class PDFHandler(BaseHandler):
 
         self._guard_degenerate(parsed, filename)
         return parsed
+
+    @classmethod
+    def _has_text_layer(cls, parsed: ParsedDocument) -> bool:
+        total = (parsed.metadata or {}).get("total_pages") or 0
+        if total < 1:
+            return False
+        with_text = sum(
+            1
+            for p in parsed.pages or []
+            if len(p.get("text", "").strip()) >= cls.TEXT_LAYER_MIN_CHARS
+        )
+        return with_text / total >= cls.TEXT_LAYER_MIN_SHARE
 
     @staticmethod
     def _guard_degenerate(parsed: ParsedDocument, filename: str) -> None:

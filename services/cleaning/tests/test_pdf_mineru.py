@@ -352,3 +352,56 @@ async def test_scanned_pdf_pymupdf_raises_degenerate(monkeypatch):
     handler = PDFHandler()
     with pytest.raises(DegenerateExtractionError):
         await handler.parse(_image_only_pdf(), "scanned.pdf")
+
+
+# ── text_layer_first (bulk uploads) ───────────────────────────
+
+_LONG = "Wartungsintervall Hydraulikpumpe: Filter alle 500 Betriebsstunden wechseln."
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_enable_mineru")
+async def test_text_layer_first_skips_mineru_for_digital_pdf():
+    handler = PDFHandler()
+    pdf = _make_pdf_bytes([_LONG, _LONG + " Seite 2"])
+    with patch.object(handler, "_do_mineru_request", new_callable=AsyncMock) as m:
+        result = await handler.parse(pdf, "digital.pdf", text_layer_first=True)
+    m.assert_not_called()
+    assert result.metadata["parser"] == "pymupdf"
+    assert "Hydraulikpumpe" in result.text
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_enable_mineru")
+async def test_text_layer_first_falls_back_to_mineru_for_scan():
+    handler = PDFHandler()
+    with patch.object(handler, "_do_mineru_request", new_callable=AsyncMock) as m:
+        m.return_value = _fp_response([{"type": "text", "text": "OCR text", "page_idx": 0}])
+        result = await handler.parse(_image_only_pdf(), "scan.pdf", text_layer_first=True)
+    m.assert_called_once()
+    assert result.metadata["parser"] == "mineru"
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_enable_mineru")
+async def test_text_layer_first_mostly_empty_pages_use_mineru():
+    """A PDF with text on only a few pages is treated as (partly) scanned."""
+    handler = PDFHandler()
+    pdf = _make_pdf_bytes([_LONG, "", "", "", ""])
+    with patch.object(handler, "_do_mineru_request", new_callable=AsyncMock) as m:
+        m.return_value = _fp_response([{"type": "text", "text": "OCR text", "page_idx": 0}])
+        result = await handler.parse(pdf, "mixed.pdf", text_layer_first=True)
+    m.assert_called_once()
+    assert result.metadata["parser"] == "mineru"
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_enable_mineru")
+async def test_default_still_uses_mineru_for_digital_pdf():
+    handler = PDFHandler()
+    pdf = _make_pdf_bytes([_LONG])
+    with patch.object(handler, "_do_mineru_request", new_callable=AsyncMock) as m:
+        m.return_value = _fp_response([{"type": "text", "text": _LONG, "page_idx": 0}])
+        result = await handler.parse(pdf, "digital.pdf")
+    m.assert_called_once()
+    assert result.metadata["parser"] == "mineru"

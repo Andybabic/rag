@@ -9,6 +9,7 @@ from models import ParsedDocument
 from core.handlers import (
     HANDLER_REGISTRY,
     GCodeHandler,
+    PDFHandler,
     decode_cnc_bytes,
     looks_like_cnc,
     supported_formats,
@@ -17,7 +18,9 @@ from core.handlers import (
 _GCODE_HANDLER = GCodeHandler()
 
 
-async def clean(data: bytes, filename: str) -> ParsedDocument:
+async def clean(
+    data: bytes, filename: str, *, pdf_text_layer_first: bool = False
+) -> ParsedDocument:
     """Extract structured content from raw file bytes.
 
     Dispatch primär über die Dateiendung. Hat eine Datei KEINE bekannte
@@ -27,6 +30,8 @@ async def clean(data: bytes, filename: str) -> ParsedDocument:
     """
     ext = os.path.splitext(filename)[1].lower()
     handler = HANDLER_REGISTRY.get(ext)
+    if isinstance(handler, PDFHandler):
+        return await handler.parse(data, filename, text_layer_first=pdf_text_layer_first)
     if handler is not None:
         return await handler.parse(data, filename)
 

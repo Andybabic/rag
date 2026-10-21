@@ -209,6 +209,13 @@ export interface IngestOptions {
 	 * to every hit.
 	 */
 	displayName?: string;
+	/**
+	 * Bulk upload: read digital PDFs from their text layer instead of OCR'ing
+	 * them with MinerU, and skip the vision descriptions of embedded images.
+	 * Much faster; a single document can be upgraded later via "Neu einlesen".
+	 * Photos are unaffected.
+	 */
+	fast?: boolean;
 }
 
 /**
@@ -235,7 +242,16 @@ export async function ingestDocument(file: File, useCase: string, opts: IngestOp
 	// 1. Clean (use_case decides where the original is stored)
 	const cleanForm = new FormData();
 	cleanForm.append('file', file, file.name);
-	cleanForm.append('config', JSON.stringify({ use_case: useCase }));
+	cleanForm.append(
+		'config',
+		JSON.stringify({
+			use_case: useCase,
+			// A photo's description is its only content – fast never drops it.
+			...(opts.fast && !/\.(jpe?g|png)$/i.test(file.name)
+				? { pdf_parser: 'text_layer', extract_images: false }
+				: {})
+		})
+	);
 	const cleanData = await (
 		await callStage(
 			'Bereinigung/PDF-Extraktion',
@@ -323,6 +339,7 @@ export async function ingestDocument(file: File, useCase: string, opts: IngestOp
 		file_name: file.name,
 		use_case: useCase,
 		chunks: upserted,
+		used_mineru: Boolean(cleanData.metadata?.used_mineru),
 		stored_path: storedPath,
 		// For the upload UI to poll background alt-text progress.
 		file_hash: fileHash,
