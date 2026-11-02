@@ -29,3 +29,6 @@ benchmark/runs/
 # bulk_ingest.py: Resume-State und Manifeste
 scripts/.ingest_state/
 scripts/bulk_ingest.py
+
+# Use-case exports (ZIP, downloaded via FTP)
+exports/

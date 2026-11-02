@@ -180,12 +180,17 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8005
     volumes:
       - kermit_neumann_hf_cache:/home/appuser/.cache
+      # Use-case exports land here as ZIP files (download via FTP). Host folder
+      # must be writable by uid 1000 (appuser in the container).
+      - ./exports:/data/exports
     environment:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
       SANDBOX_SERVICE_URL: http://sandbox:8007
       SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+      TRANSFER_DIR: /data/exports
+      TRANSFER_KEEP_HOURS: "720"
     env_file: .env
     depends_on:
       postgres:

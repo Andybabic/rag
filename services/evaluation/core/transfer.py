@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from config import settings
@@ -300,13 +301,20 @@ def transfer_dir() -> Path:
 
 
 def cleanup_stale() -> None:
-    """Forget jobs and delete archives/uploads older than a day."""
+    """Forget jobs after a day; delete our archives/uploads past the file retention.
+
+    Only ``export-*.zip`` and ``upload-*.zip`` are ours to delete: the folder may
+    also be shared with files dropped in by hand (e.g. for an FTP download).
+    """
     cutoff = time.time() - _KEEP_SECONDS
     for job_id in [j.id for j in _jobs.values() if j.started < cutoff and j.status != "running"]:
         _jobs.pop(job_id, None)
+    file_cutoff = time.time() - settings.TRANSFER_KEEP_HOURS * 3600
     for path in transfer_dir().iterdir():
+        if not re.fullmatch(r"(export|upload)-[0-9a-f]+\.zip", path.name):
+            continue
         try:
-            if path.stat().st_mtime < cutoff:
+            if path.stat().st_mtime < file_cutoff:
                 path.unlink()
         except OSError:
             pass
@@ -470,7 +478,9 @@ async def _export_collection(client, zf: zipfile.ZipFile, name: str, job: Job) -
 
 
 async def _export_file(client, zf: zipfile.ZipFile, use_case: str, rel: str) -> None:
-    url = f"{settings.CLEANING_SERVICE_URL}/v1/transfer/{use_case}/file/{rel}"
+    # Quote the path: stored names can contain a literal "%20", which must reach
+    # the cleaning service as "%2520" and not be decoded into a space.
+    url = f"{settings.CLEANING_SERVICE_URL}/v1/transfer/{use_case}/file/{quote(rel, safe='/')}"
     # Originals and images are compressed already; deflating them again only
     # costs time.
     info = zipfile.ZipInfo(f"files/{rel}", date_time=time.localtime()[:6])
