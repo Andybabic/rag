@@ -8,7 +8,7 @@ import pathlib, sys
 
 USECASES = ["jrz", "gw", "wienerlinien", "neumann", "ustp"]
 NAMES = ["kermit_postgres", "kermit_qdrant", "kermit_documents",
-         "kermit_hf_cache", "kermit_ollama", "kermit_skill_egress"]
+         "kermit_hf_cache", "kermit_ollama", "kermit_exports", "kermit_skill_egress"]
 
 root = pathlib.Path(__file__).resolve().parent.parent  # Repo-Wurzel
 base = (root / "docker-compose.yml").read_text()

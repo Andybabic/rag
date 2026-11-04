@@ -180,12 +180,16 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8005
     volumes:
       - kermit_wienerlinien_hf_cache:/home/appuser/.cache
+      # Use-case exports (ZIP, downloadable via FTP from the volume).
+      - kermit_wienerlinien_exports:/data/exports
     environment:
       HF_HOME: /home/appuser/.cache/huggingface
       TRANSFORMERS_CACHE: /home/appuser/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/appuser/.cache/sentence-transformers
       SANDBOX_SERVICE_URL: http://sandbox:8007
       SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+      TRANSFER_DIR: /data/exports
+      TRANSFER_KEEP_HOURS: "720"
     env_file: .env
     depends_on:
       postgres:
@@ -282,6 +286,7 @@ volumes:
   kermit_wienerlinien_documents:
   kermit_wienerlinien_hf_cache:
   kermit_wienerlinien_ollama:
+  kermit_wienerlinien_exports:
 
 networks:
   default:

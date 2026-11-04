@@ -12,7 +12,7 @@ WORKDIR /app
 # dies at startup with EACCES and the whole system runs in degraded retrieval
 # with no symptom beyond worse answers.
 RUN useradd -m -u 1000 appuser \
-    && mkdir -p /data/documents /home/appuser/.cache \
+    && mkdir -p /data/documents /data/exports /home/appuser/.cache \
     && chown -R appuser /data /home/appuser/.cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
