@@ -32,6 +32,8 @@ from core.guards import strip_invented_years
 from core.reranker import rerank_chunks
 from core.actions import product_scope
 from core.agent import run_agent
+from core.code_lookup import lookup as lookup_codes
+from core.code_lookup import pin as pin_chunks
 from core.citations import map_citations, strip_unresolved_refs
 from core.llm import (
     TOKENS_COMPLIANCE,
@@ -870,6 +872,7 @@ async def _run_one_subagent(
         "agent_steps": result.get("agent_steps", []),
         "chunks": chunks,
         "sufficient": result.get("sufficient", False),
+        "clarify": bool(result.get("clarify")),
         "searched_collections": result.get("searched_collections", []),
         "error": result.get("error"),
         "duration_ms": round((time.perf_counter() - _t0) * 1000),
@@ -2527,13 +2530,40 @@ async def run_manager(
     if skill_functions and "SKILL" not in available_actions:
         available_actions = [*available_actions, "SKILL"]
 
-    _plan_t = time.perf_counter()
-    plan = await plan_subtasks(
-        query, use_case=use_case, history=history,
-        image_context=image_context, memory=memory,
-        domain_prompt=use_case_prompt,
-        skill_functions=skill_functions,
+    # Codes the question names (warn codes, parameters) are searched verbatim
+    # first, like Ctrl+F: embeddings blur them. The places reach the
+    # specialists as candidates; when they are too many to tell apart and the
+    # question does not decide, the user is asked.
+    code_hit = await lookup_codes(
+        query, use_case,
+        context=[m["content"] for m in history or [] if m.get("role") == "user"],
     )
+    asking = bool(code_hit and code_hit.ask)
+    pin_chunks(code_hit.pinned if code_hit else [])
+    if code_hit:
+        phases.append({"id": "code_lookup", "label": "Code-Suche", "ms": code_hit.ms})
+        if on_event:
+            await on_event({
+                "type": "code_lookup", "terms": code_hit.terms,
+                "places": code_hit.summary(), "narrowed": code_hit.narrowed,
+                "asking": asking,
+            })
+
+    _plan_t = time.perf_counter()
+    if asking:
+        # Nothing to plan: the question to the user is the answer.
+        plan = {
+            "subtasks": [], "merge_strategy": "complementary",
+            "answer_form": "explanation",
+            "rationale": "Der Code kommt an mehreren Stellen vor, die Frage entscheidet nicht — Rückfrage.",
+        }
+    else:
+        plan = await plan_subtasks(
+            query, use_case=use_case, history=history,
+            image_context=image_context, memory=memory,
+            domain_prompt=use_case_prompt,
+            skill_functions=skill_functions,
+        )
     _plan_llm_timing = get_last_llm_timing()
     _plan_dur = round((time.perf_counter() - _plan_t) * 1000)
     phases.append({
@@ -2576,6 +2606,13 @@ async def run_manager(
         )
     _subs_t = time.perf_counter()
     subagents = list(await asyncio.gather(*subagent_coros))
+    if asking:
+        subagents = [{
+            "subagent_id": "code-lookup", "role": "code_lookup", "role_label": "Code-Suche",
+            "sub_query": "", "focus": "", "answer": code_hit.ask, "agent_steps": [],
+            "chunks": [], "sufficient": False, "clarify": True,
+            "searched_collections": [], "error": None, "duration_ms": code_hit.ms,
+        }]
     _subs_dur = round((time.perf_counter() - _subs_t) * 1000)
     phases.append({
         "id": "subagents",
@@ -2587,39 +2624,51 @@ async def run_manager(
     # Blieb ein benennbares Loch, darf genau eine gezielte Runde nachlegen —
     # mit den Vokabeln aus Runde 1. Das ist der Platz dafür: Der Manager sieht
     # alle Fragmente, ein einzelner Spezialist immer nur seinen Ausschnitt.
-    gap_subagents, gap_phase = await _run_gap_round(
-        query,
-        use_case=use_case,
-        session_id=session_id,
-        use_case_prompt=use_case_prompt,
-        available_actions=available_actions,
-        collection=collection,
-        filters=filters,
-        images=images,
-        image_context=image_context,
-        subagents=subagents,
-        elapsed_s=time.perf_counter() - _t0,
-        on_event=on_event,
-        request_id=request_id,
-        username=username,
-    )
+    if asking:
+        gap_subagents, gap_phase = [], {}
+    else:
+        gap_subagents, gap_phase = await _run_gap_round(
+            query,
+            use_case=use_case,
+            session_id=session_id,
+            use_case_prompt=use_case_prompt,
+            available_actions=available_actions,
+            collection=collection,
+            filters=filters,
+            images=images,
+            image_context=image_context,
+            subagents=subagents,
+            elapsed_s=time.perf_counter() - _t0,
+            on_event=on_event,
+            request_id=request_id,
+            username=username,
+        )
     if gap_subagents:
         subagents += gap_subagents
         phases.append(gap_phase)
 
     # Synthesize
     _synth_start = time.perf_counter()
-    # Same numbering synthesize() derives from the same sub-agents.
-    coverage = await assess_coverage(query, subagents, _merge_chunks(subagents))
-    reset_llm_timing()  # guard against synthesize skipping the LLM call
-    final_answer, global_chunks = await synthesize(
-        query=query,
-        plan=plan,
-        subagents=subagents,
-        use_case=use_case,
-        on_event=on_event,
-        coverage=coverage,
-    )
+    # Only clarification requests and nothing sufficient: pass the question
+    # on as it is. Synthesis would write an answer from the search hits that
+    # the question does not match (they were found for other topics).
+    clarify_subs = [s for s in subagents if s.get("clarify")]
+    clarify_only = bool(clarify_subs) and not any(s.get("sufficient") for s in subagents)
+    if clarify_only:
+        coverage = []
+        final_answer, global_chunks = clarify_subs[0]["answer"], []
+    else:
+        # Same numbering synthesize() derives from the same sub-agents.
+        coverage = await assess_coverage(query, subagents, _merge_chunks(subagents))
+        reset_llm_timing()  # guard against synthesize skipping the LLM call
+        final_answer, global_chunks = await synthesize(
+            query=query,
+            plan=plan,
+            subagents=subagents,
+            use_case=use_case,
+            on_event=on_event,
+            coverage=coverage,
+        )
     _synth_llm_timing = get_last_llm_timing()
     _synth_dur = round((time.perf_counter() - _synth_start) * 1000)
     phases.append({
@@ -2657,14 +2706,19 @@ async def run_manager(
         if st.get("action") == "SKILL"
     })
 
-    compliance = await check_compliance(
-        answer=final_answer,
-        global_chunks=global_chunks,
-        use_case_prompt=use_case_prompt,
-        use_case=use_case,
-        executed_skills=executed_skills,
-        on_event=on_event,
-    )
+    if clarify_only:
+        # A clarification makes no claims and cites nothing: nothing to check,
+        # and the checker would only rewrite the question.
+        compliance = {"verdict": "OK", "guidance": "", "issues": []}
+    else:
+        compliance = await check_compliance(
+            answer=final_answer,
+            global_chunks=global_chunks,
+            use_case_prompt=use_case_prompt,
+            use_case=use_case,
+            executed_skills=executed_skills,
+            on_event=on_event,
+        )
     _compliance_llm_timing = get_last_llm_timing()
     _compliance_dur = round((time.perf_counter() - _compliance_start) * 1000)
     phases.append({
@@ -2821,6 +2875,17 @@ async def run_manager(
         "duration_ms": _plan_dur,
         "llm_timing": _plan_llm_timing if _plan_llm_timing else None,
     }]
+    if code_hit:
+        flat_steps.append({
+            "step": len(flat_steps),
+            "thought": "Codes der Frage wörtlich suchen (wie Strg+F)",
+            "action": "CODE_LOOKUP",
+            "args": {"terms": code_hit.terms, "narrowed": code_hit.narrowed,
+                     "asking": asking},
+            "observation": code_hit.describe(),
+            "chunks": [],
+            "duration_ms": code_hit.ms,
+        })
     for sub in subagents:
         for s in sub.get("agent_steps", []):
             flat_steps.append({**s, "subagent_id": sub["subagent_id"],
@@ -2914,7 +2979,8 @@ async def run_manager(
 
     # Store this Q&A as one chunk in the memory RAG (background, non-blocking).
     # Skip refusals/empty answers so the memory isn't polluted with non-answers.
-    if compliance["verdict"] != "REFUSE" and final_answer.strip():
+    # A clarification is a question, not knowledge: it stays out of the memory.
+    if compliance["verdict"] != "REFUSE" and final_answer.strip() and not clarify_only:
         asyncio.create_task(remember(use_case, query, final_answer))
 
     result = {
@@ -2928,6 +2994,10 @@ async def run_manager(
         "system_prompt": use_case_prompt,
         "enriched_query": query,
         "use_case_extras": {},
+        "code_lookup": {
+            "terms": code_hit.terms, "places": code_hit.summary(),
+            "narrowed": code_hit.narrowed, "asking": asking,
+        } if code_hit else None,
         "audit": _audit,
         "timing": _audit.get("timing"),
         "sufficient": sufficient and compliance["verdict"] != "REFUSE",

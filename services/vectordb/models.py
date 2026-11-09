@@ -55,6 +55,13 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class FindTextRequest(BaseModel):
+    collections: list[str]
+    terms: list[str] = Field(min_length=1, max_length=20)
+    # Per term, across all collections. More hits than this are only counted.
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
 class ExportPointsRequest(BaseModel):
     collection: str
     # Offset from the previous page's ``next``; point ids are UUIDs or ints.

@@ -356,6 +356,18 @@ async def _update_memory(use_case: str, query: str, answer: str) -> None:
     await write_memory(use_case, updated)
 
 
+def _clarify_question(codes: list[str], topics: list[str]) -> str:
+    """Question to the user when a named warn code is not in the documents."""
+    lines = [
+        f"Der Warncode {', '.join(codes)} kommt in den Handbuch-Treffern nicht vor. "
+        "Bitte nennen Sie die Komponente, den Parameter oder die Funktion, um die es geht."
+    ]
+    if topics:
+        lines.append("Ähnliche Themen aus den Treffern:")
+        lines += [f"- {topic}" for topic in topics]
+    return "\n".join(lines)
+
+
 def _enrich_query(query: str, history: list[dict] | None) -> str:
     """Enrich short follow-up messages with conversation context.
 
@@ -540,6 +552,11 @@ async def run_agent(
     use_case_extras: dict = {}
     chunks_for_citations: list[dict] = []
     searched_collections: set[str] = set()
+    # Warn codes the question names that the last search could not find, and
+    # the topics it did find. A final answer without them becomes a question.
+    missing_codes_pending: list[str] = []
+    topics_pending: list[str] = []
+    clarify_requested = False
     sufficient = False
 
     has_searched = False
@@ -702,6 +719,16 @@ async def run_agent(
             # saubere CNC-Werkzeugempfehlung wieder verwässern.
             has_searched = True
 
+        # The question names a warn code that no hit mentions. An answer now
+        # would be built from neighbouring topics, so ask the user instead.
+        if action_name == "FINAL_ANSWER" and missing_codes_pending and not has_called_skill:
+            action_name = "CLARIFY"
+            action_args = {"question": _clarify_question(missing_codes_pending, topics_pending)}
+            thought = (
+                (thought + "\n" if thought else "")
+                + "[Auto-Korrektur: Warncode nicht im Treffer, Rückfrage statt Antwort.]"
+            )
+
         # 2. Execute action
         _action_start = time.perf_counter()
         result = await _execute_action(
@@ -725,6 +752,9 @@ async def run_agent(
             step_chunks = result.get("chunks", [])
             chunks_for_citations.extend(step_chunks)
             searched_collections.update(result.get("searched_collections", []))
+            if "missing_codes" in result:
+                missing_codes_pending = result["missing_codes"]
+                topics_pending = result.get("topics", [])
             if action_name == "REFINE_QUERY":
                 has_searched = True
         else:
@@ -791,6 +821,7 @@ async def run_agent(
             clarify_text = observation.replace("CLARIFICATION_NEEDED: ", "")
             answer = clarify_text
             sufficient = False
+            clarify_requested = True
             break
 
         # 5. Add to message history for next iteration
@@ -866,6 +897,7 @@ async def run_agent(
         "enriched_query": enriched_query,
         "use_case_extras": use_case_extras,
         "sufficient": sufficient,
+        "clarify": clarify_requested,
         "session_id": session_id,
         "use_case": use_case,
         "searched_collections": sorted(searched_collections),

@@ -8,6 +8,7 @@ from core.qdrant import (
     delete_collection,
     delete_points_by_filter,
     export_points,
+    find_text,
     import_points,
     list_collections,
     scroll_payloads,
@@ -20,6 +21,7 @@ from models import (
     CrossSearchRequest,
     DeletePointsRequest,
     ExportPointsRequest,
+    FindTextRequest,
     ImportPointsRequest,
     ScrollRequest,
     SearchRequest,
@@ -213,6 +215,17 @@ async def collection_delete(name: str, request: Request):
         "deleted": name,
         "request_id": request_id,
     }
+
+
+@router.post("/points/find")
+async def points_find(body: FindTextRequest, request: Request):
+    """Exact text search (Ctrl+F) for codes and identifiers across collections."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        found = find_text(body.collections, body.terms, body.limit)
+    except QdrantUnavailableError as exc:
+        return _qdrant_error_response(exc, request_id)
+    return {**found, "request_id": request_id}
 
 
 @router.post("/points/export")

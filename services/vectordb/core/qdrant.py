@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from uuid import NAMESPACE_DNS, uuid5
 
 from config import settings
@@ -13,6 +14,7 @@ from qdrant_client.models import (
     FilterSelector,
     IsEmptyCondition,
     MatchAny,
+    MatchText,
     MatchValue,
     PayloadField,
     PointStruct,
@@ -368,6 +370,64 @@ def scroll_payloads(collection: str, filters: dict, limit: int = 1) -> list[dict
     except Exception as exc:
         raise QdrantUnavailableError(f"Qdrant scroll failed: {exc}") from exc
     return [dict(p.payload or {}) for p in points]
+
+
+def find_text(collections: list[str], terms: list[str], limit: int = 200) -> dict:
+    """Exact text search, like Ctrl+F: chunks whose text contains a term.
+
+    Embeddings blur codes such as ``A30042`` or ``p0251`` into whatever else
+    the question says, so a code is looked up verbatim instead. A term matches
+    as a whole token (``A30042`` is not found inside ``A300421``) and case
+    sensitively. Collections that do not exist are skipped.
+
+    Returns ``{"hits": {term: [chunk, ...]}, "truncated": {term: bool}}`` where
+    a chunk carries ``collection``, ``chunk_id``, ``text`` and the payload as
+    ``metadata`` — the shape of a search result.
+    """
+    client = get_client()
+    try:
+        existing = {c.name for c in client.get_collections().collections}
+    except Exception as exc:
+        raise QdrantUnavailableError(f"Qdrant unreachable: {exc}") from exc
+
+    hits: dict[str, list[dict]] = {term: [] for term in terms}
+    truncated = {term: False for term in terms}
+    for term in terms:
+        whole_token = re.compile(rf"(?<!\w){re.escape(term)}(?!\w)")
+        text_filter = Filter(must=[FieldCondition(key="text", match=MatchText(text=term))])
+        for collection in collections:
+            if collection not in existing or truncated[term]:
+                continue
+            offset = None
+            while not truncated[term]:
+                try:
+                    points, offset = client.scroll(
+                        collection_name=collection,
+                        scroll_filter=text_filter,
+                        limit=256,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                except Exception as exc:
+                    raise QdrantUnavailableError(f"Qdrant scroll failed: {exc}") from exc
+                for point in points:
+                    payload = dict(point.payload or {})
+                    text = payload.get("text", "") or ""
+                    if not whole_token.search(text):
+                        continue
+                    if len(hits[term]) >= limit:
+                        truncated[term] = True
+                        break
+                    hits[term].append({
+                        "collection": collection,
+                        "chunk_id": payload.get("chunk_id", str(point.id)),
+                        "text": text,
+                        "metadata": payload,
+                    })
+                if offset is None:
+                    break
+    return {"hits": hits, "truncated": truncated}
 
 
 # ── Transfer (use-case export / import) ─────────────────────────────────────

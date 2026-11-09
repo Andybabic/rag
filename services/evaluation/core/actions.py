@@ -11,6 +11,7 @@ import time
 import httpx
 from config import settings
 
+from core.code_lookup import pinned_chunks
 from core.hybrid import hybrid_fuse
 from core.memory import read_memory
 from core.reranker import rerank_chunks
@@ -242,6 +243,13 @@ async def action_search(args: dict, *, use_case: str) -> dict:
 
     _search_ms = round((time.perf_counter() - _search_start) * 1000)
 
+    # Places that name a code from the question verbatim (see core/code_lookup)
+    # join the pool, however the embedding ranked them.
+    # Copies: parallel sub-agents rerank these, and the reranker writes scores.
+    pinned = [{**r, "metadata": dict(r["metadata"])} for r in pinned_chunks()]
+    pinned_ids = {_result_id(r) for r in pinned}
+    results.extend(r for r in pinned if _result_id(r) not in {_result_id(x) for x in results})
+
     if not results:
         return {
             "observation": "Keine Ergebnisse in der Datenbank gefunden.",
@@ -280,6 +288,18 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     )
     _rerank_ms = round((time.perf_counter() - _rerank_start) * 1000)
 
+    # Warn codes (A30042, F01590) appear verbatim in the manuals. A chunk that
+    # contains one goes to the top, even when the reranker, reading the whole
+    # question, ranked it low. Only candidates already in the pool qualify.
+    codes = _warn_codes(query, args.get("anchor", ""))
+    code_hits = [
+        r for r in results
+        if _result_id(r) in pinned_ids or (codes and _mentions_any(r, codes))
+    ]
+    if code_hits:
+        code_ids = {_result_id(r) for r in code_hits}
+        above = code_hits + [r for r in above if _result_id(r) not in code_ids]
+
     # Deduplicate: same text from different document versions → keep highest score
     seen_texts: set[str] = set()
     unique = []
@@ -297,7 +317,11 @@ async def action_search(args: dict, *, use_case: str) -> dict:
     for i, (r, (before, after)) in enumerate(zip(shown, neighbours, strict=True), 1):
         meta = r.get("metadata", {})
         core = _display_text(meta)
-        context = _with_context(core[:_OBSERVATION_CHARS], before, after)
+        exact = _result_id(r) in pinned_ids
+        reach = _PINNED_CONTEXT_CHARS if exact else None
+        context = _with_context(
+            core[:_PINNED_CHARS if exact else _OBSERVATION_CHARS], before, after, reach
+        )
         source = _source_label(meta)
         if crumb := _breadcrumb(meta):
             source += f" · {crumb}"
@@ -309,11 +333,18 @@ async def action_search(args: dict, *, use_case: str) -> dict:
             "text": meta.get("text", ""),
             # What the agent read around the hit; the synthesizer gets the
             # same view. "text" stays the chunk itself for citations.
-            "context_text": _with_context(core, before, after),
+            "context_text": _with_context(core, before, after, reach),
             "score": r.get("rerank_score", 0.0),
             "metadata": meta,
         })
-    notes = [n for n in (scope_note, _mixed_products_note([c["metadata"] for c in chunks])) if n]
+    # A code the question names but no candidate mentions: say so, and hand the
+    # agent the topics it did find, so it can ask the user instead of guessing.
+    missing_codes = [c for c in codes if not any(_mentions_any(r, [c]) for r in results)]
+    code_note = (
+        f"Hinweis: Der Warncode {', '.join(missing_codes)} kommt in keinem Treffer vor."
+        if missing_codes else ""
+    )
+    notes = [n for n in (scope_note, code_note, _mixed_products_note([c["metadata"] for c in chunks])) if n]
     return {
         "observation": "\n".join(notes + lines),
         "chunks": chunks,
@@ -321,6 +352,8 @@ async def action_search(args: dict, *, use_case: str) -> dict:
         "embed_ms": _embed_ms,
         "search_ms": _search_ms,
         "rerank_ms": _rerank_ms,
+        "missing_codes": missing_codes,
+        "topics": _topics(unique),
     }
 
 
@@ -390,6 +423,41 @@ def _breadcrumb(meta: dict) -> str:
     return (extra.get("breadcrumb") if isinstance(extra, dict) else "") or ""
 
 
+_WARN_CODE_RE = re.compile(r"\b[AFN]\d{4,5}\b")
+
+
+def _warn_codes(*texts: str) -> list[str]:
+    """Warn and fault codes named in the texts, e.g. A30042 or F01590."""
+    return sorted({code for text in texts for code in _WARN_CODE_RE.findall(text or "")})
+
+
+def _mentions_any(result: dict, codes: list[str]) -> bool:
+    text = (result.get("metadata") or {}).get("text", "")
+    return any(re.search(rf"\b{re.escape(code)}\b", text) for code in codes)
+
+
+_FAULT_TOPIC_RE = re.compile(r"Störung|Warn|Meldung|Fehler", re.IGNORECASE)
+
+
+def _topics(results: list[dict], limit: int = 5) -> list[str]:
+    """Distinct section breadcrumbs of the hits, in rank order.
+
+    Only hits about faults and warnings: the rest of the ranking is front
+    matter (legend, manufacturer, declaration) that a question never means.
+    """
+    topics: list[str] = []
+    for r in results:
+        meta = r.get("metadata") or {}
+        if not _FAULT_TOPIC_RE.search(meta.get("text", "") or ""):
+            continue
+        crumb = _breadcrumb(meta)
+        if crumb and crumb not in topics:
+            topics.append(crumb)
+        if len(topics) == limit:
+            break
+    return topics
+
+
 def _display_text(meta: dict) -> str:
     """Chunk text without the indexing scaffolding.
 
@@ -418,19 +486,42 @@ def _strip_overlap(left: str, right: str, min_len: int = 20) -> str:
     return right
 
 
-def _with_context(core: str, before: str, after: str) -> str:
+def _head(text: str, n: int) -> str:
+    """The first ``n`` characters, without a word cut in half.
+
+    A cut inside ``(p0251 = 0)`` left the agent with ``(p02…`` — and it filled
+    in the rest from the neighbouring ``p0252``.
+    """
+    if len(text) <= n or text[n].isspace():
+        return text[:n]
+    parts = text[:n].rsplit(None, 1)
+    return parts[0] if len(parts) == 2 else text[:n]
+
+
+def _tail(text: str, n: int) -> str:
+    """The last ``n`` characters, without a word cut in half."""
+    if len(text) <= n or text[-n - 1].isspace():
+        return text[-n:]
+    parts = text[-n:].split(None, 1)
+    return parts[1] if len(parts) == 2 else text[-n:]
+
+
+def _with_context(core: str, before: str, after: str, reach: int | None = None) -> str:
     """The hit framed by the tail of the chunk before and the head of the one
-    after – marked, so the agent can tell what the hit itself says."""
-    n = settings.CONTEXT_NEIGHBOR_CHARS
+    after – marked, so the agent can tell what the hit itself says.
+
+    ``reach`` widens the frame for a hit found by its exact code: the code's
+    chunk is often only the heading, and what it means follows in the next one.
+    """
+    n = reach or settings.CONTEXT_NEIGHBOR_CHARS
     if n <= 0 or not (before or after):
         return core
     parts = []
     if before:
-        tail = before[-n:]
-        parts.append(f"(davor: …{tail.lstrip()})")
+        parts.append(f"(davor: …{_tail(before, n).lstrip()})")
     parts.append(core)
     if after:
-        head = _strip_overlap(core, after)[:n]
+        head = _head(_strip_overlap(core, after), n)
         parts.append(f"(danach: {head.rstrip()}…)")
     return "\n".join(parts)
 
@@ -489,6 +580,10 @@ async def _neighbour_texts(metas: list[dict]) -> list[tuple[str, str]]:
 # many appended image descriptions) must not crowd the other six out of the
 # agent's context.
 _OBSERVATION_CHARS = 550
+# A hit found by its exact code gets more room: it is why the question was
+# answerable at all, and its explanation sits in the chunk that follows.
+_PINNED_CHARS = 1500
+_PINNED_CONTEXT_CHARS = 900
 
 # How many fused candidates the cross-encoder scores, and how many it keeps.
 #
